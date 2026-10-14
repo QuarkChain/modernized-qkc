@@ -90,6 +90,9 @@ type Config struct {
 	// If nil, the Ethereum main net block is used.
 	Genesis *core.Genesis `toml:",omitempty"`
 
+	// XShardSource is a trusted source EL whose finalized Outbox logs are stored locally.
+	XShardSource *XShardSource `toml:",omitempty"`
+
 	// Network ID separates blockchains on the peer-to-peer networking level. When left
 	// zero, the chain ID is used as network ID.
 	NetworkId uint64
@@ -228,6 +231,12 @@ type Config struct {
 
 	// RangeLimit restricts the maximum range (end - start) for range queries.
 	RangeLimit uint64 `toml:",omitempty"`
+}
+
+// XShardSource identifies the source shard and its RPC endpoint.
+type XShardSource struct {
+	ShardID uint32
+	RPC     string
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.

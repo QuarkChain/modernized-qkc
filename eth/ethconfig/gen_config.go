@@ -18,6 +18,7 @@ import (
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
 		Genesis                 *core.Genesis `toml:",omitempty"`
+		XShardSource            *XShardSource `toml:",omitempty"`
 		NetworkId               uint64
 		SyncMode                SyncMode
 		HistoryMode             history.HistoryPolicy
@@ -75,6 +76,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
+	enc.XShardSource = c.XShardSource
 	enc.NetworkId = c.NetworkId
 	enc.SyncMode = c.SyncMode
 	enc.HistoryMode = c.HistoryMode
@@ -136,6 +138,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
 		Genesis                 *core.Genesis `toml:",omitempty"`
+		XShardSource            *XShardSource `toml:",omitempty"`
 		NetworkId               *uint64
 		SyncMode                *SyncMode
 		HistoryMode             *history.HistoryPolicy
@@ -197,6 +200,9 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.Genesis != nil {
 		c.Genesis = dec.Genesis
+	}
+	if dec.XShardSource != nil {
+		c.XShardSource = dec.XShardSource
 	}
 	if dec.NetworkId != nil {
 		c.NetworkId = *dec.NetworkId

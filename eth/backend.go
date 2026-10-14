@@ -20,6 +20,7 @@ package eth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -132,6 +133,9 @@ type Ethereum struct {
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
 
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
+
+	xShardCancel context.CancelFunc
+	xShardDone   chan struct{}
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -186,6 +190,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	chainConfig, genesisHash, err := core.LoadChainConfig(chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
+	}
+	if source := config.XShardSource; source != nil {
+		if source.RPC == "" || !chainConfig.QuarkChain.IsXShardDestination(source.ShardID) {
+			return nil, errors.New("xshard source requires an RPC endpoint and a different configured QuarkChain shard")
+		}
 	}
 	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb)
 	if err != nil {
@@ -413,6 +422,9 @@ func makeExtraData(extra []byte) []byte {
 // NOTE, some of these services probably need to be moved to somewhere else.
 func (s *Ethereum) APIs() []rpc.API {
 	apis := ethapi.GetAPIs(s.APIBackend)
+	if s.blockchain.Config().QuarkChain != nil {
+		apis = append(apis, rpc.API{Namespace: "qkc", Service: &QuarkChainAPI{db: s.chainDb}})
+	}
 
 	// Append all the local APIs and return
 	return append(apis, []rpc.API{
@@ -489,6 +501,11 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+	if s.config.XShardSource != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.xShardCancel, s.xShardDone = cancel, make(chan struct{})
+		go s.receiveXShardLogs(ctx, s.xShardDone)
+	}
 	return nil
 }
 
@@ -603,6 +620,10 @@ func (s *Ethereum) setupDiscovery() error {
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
+	if s.xShardCancel != nil {
+		s.xShardCancel()
+		<-s.xShardDone
+	}
 	// Stop all the peer-related stuff first.
 	s.discmix.Close()
 	s.dropper.Stop()
