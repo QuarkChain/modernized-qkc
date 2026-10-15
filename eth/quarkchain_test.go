@@ -116,11 +116,11 @@ func TestXShardReceive(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	defer db.Close()
 	api := &QuarkChainAPI{db: db}
-	checkCursor := func(number uint64) {
+	checkDownloadCursor := func(number uint64) {
 		t.Helper()
-		n, hash, err := rawdb.ReadXShardCursor(db, 0)
+		n, hash, err := rawdb.ReadXShardDownloadCursor(db, 0)
 		if err != nil || n != number || hash != source.headers[number].Hash() {
-			t.Fatalf("cursor (%d, %s, %v), want block %d", n, hash, err, number)
+			t.Fatalf("download cursor (%d, %s, %v), want block %d", n, hash, err, number)
 		}
 	}
 	// RPC failure must not mark the unread source block as received.
@@ -128,7 +128,7 @@ func TestXShardReceive(t *testing.T) {
 	if err := syncXShardLogs(ctx, client, db, 0, 1); err == nil || err.Error() != "source unavailable" {
 		t.Fatalf("expected source error, got %v", err)
 	}
-	checkCursor(0)
+	checkDownloadCursor(0)
 	if logs, err := api.GetXShardMessages(0, want.BlockHash); err != nil || logs != nil {
 		t.Fatalf("unread block: got %v, %v", logs, err)
 	}
@@ -137,19 +137,19 @@ func TestXShardReceive(t *testing.T) {
 	if err := syncXShardLogs(ctx, client, db, 0, 1); err == nil {
 		t.Fatal("accepted log from a different block")
 	}
-	checkCursor(0)
+	checkDownloadCursor(0)
 	source.logs[0].BlockHash = want.BlockHash
 	if err := syncXShardLogs(ctx, client, xShardFailDB{db}, 0, 1); err == nil || err.Error() != "database write failed" {
 		t.Fatalf("expected database error, got %v", err)
 	}
-	checkCursor(0)
+	checkDownloadCursor(0)
 	if logs, _ := api.GetXShardMessages(0, want.BlockHash); logs != nil {
 		t.Fatal("failed batch stored messages")
 	}
 	if err := syncXShardLogs(ctx, client, db, 0, 1); err != nil {
 		t.Fatal(err)
 	}
-	checkCursor(1)
+	checkDownloadCursor(1)
 	if logs, err := api.GetXShardMessages(0, want.BlockHash); err != nil || !reflect.DeepEqual(logs, []types.Log{want}) {
 		t.Fatalf("stored logs: got %v, %v", logs, err)
 	}
@@ -170,11 +170,11 @@ func TestXShardReceive(t *testing.T) {
 	if err := syncXShardLogs(ctx, client, db, 0, 1); err != nil {
 		t.Fatal(err)
 	}
-	checkCursor(2)
+	checkDownloadCursor(2)
 	source.headers[2].Extra = []byte{1}
 	if err := syncXShardLogs(ctx, client, db, 0, 1); err == nil {
 		t.Fatal("accepted changed source chain")
 	}
 	source.headers[2].Extra = nil
-	checkCursor(2)
+	checkDownloadCursor(2)
 }

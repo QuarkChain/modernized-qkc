@@ -69,8 +69,12 @@ func (s *Ethereum) receiveXShardLogs(ctx context.Context, done chan struct{}) {
 
 // syncXShardLogs reads finalized blocks by hash. Messages and progress are
 // committed together so retries and restarts cannot lose or duplicate a block.
+//
+// TODO: When destination execution is implemented, resume consumption from the
+// parent block's QKCExtra.Cursor and validate the resulting cursor in each
+// destination block. The download cursor below tracks ingestion only.
 func syncXShardLogs(ctx context.Context, client *ethclient.Client, db ethdb.Database, source, destination uint32) error {
-	number, hash, err := rawdb.ReadXShardCursor(db, source)
+	number, hash, err := rawdb.ReadXShardDownloadCursor(db, source)
 	if err != nil {
 		return err
 	}
@@ -120,7 +124,7 @@ func syncXShardLogs(ctx context.Context, client *ethclient.Client, db ethdb.Data
 		if err := rawdb.WriteXShardMessages(batch, source, blockHash, messages); err != nil {
 			return err
 		}
-		if err := rawdb.WriteXShardCursor(batch, source, number, blockHash); err != nil {
+		if err := rawdb.WriteXShardDownloadCursor(batch, source, number, blockHash); err != nil {
 			return err
 		}
 		if err := batch.Write(); err != nil {

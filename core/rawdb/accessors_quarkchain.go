@@ -56,8 +56,9 @@ func WriteXShardMessages(db ethdb.KeyValueWriter, shard uint32, hash common.Hash
 	return db.Put(append(xShardKey("qkc-xshard-logs-", shard), hash[:]...), data)
 }
 
-// ReadXShardCursor returns the last stored source block. A zero hash means no progress.
-func ReadXShardCursor(db ethdb.KeyValueReader, shard uint32) (uint64, common.Hash, error) {
+// ReadXShardDownloadCursor returns the last source block whose messages were stored
+// locally. It tracks download progress, not consumption. A zero hash means no progress.
+func ReadXShardDownloadCursor(db ethdb.KeyValueReader, shard uint32) (uint64, common.Hash, error) {
 	key := xShardKey("qkc-xshard-cursor-", shard)
 	has, err := db.Has(key)
 	if err != nil || !has {
@@ -68,13 +69,13 @@ func ReadXShardCursor(db ethdb.KeyValueReader, shard uint32) (uint64, common.Has
 		return 0, common.Hash{}, err
 	}
 	if len(data) != 8+common.HashLength {
-		return 0, common.Hash{}, fmt.Errorf("invalid xshard cursor length %d", len(data))
+		return 0, common.Hash{}, fmt.Errorf("invalid xshard download cursor length %d", len(data))
 	}
 	return binary.BigEndian.Uint64(data[:8]), common.BytesToHash(data[8:]), nil
 }
 
-// WriteXShardCursor must be committed in the same batch as the corresponding logs.
-func WriteXShardCursor(db ethdb.KeyValueWriter, shard uint32, number uint64, hash common.Hash) error {
+// WriteXShardDownloadCursor must be committed in the same batch as the corresponding logs.
+func WriteXShardDownloadCursor(db ethdb.KeyValueWriter, shard uint32, number uint64, hash common.Hash) error {
 	data := binary.BigEndian.AppendUint64(nil, number)
 	return db.Put(xShardKey("qkc-xshard-cursor-", shard), append(data, hash[:]...))
 }
