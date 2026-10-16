@@ -1,4 +1,4 @@
-// Copyright 2026-2027 The QuarkChain Authors
+// Copyright 2026-2027 The quarkchain Authors
 // This file is part of the quarkchain library.
 //
 // The QuarkChain library is free software: you can redistribute it and/or modify
