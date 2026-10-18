@@ -595,6 +595,7 @@ func TestInsertRootBlockValidation(t *testing.T) {
 		// Rule 3: x carries a3, which is not a child of a1, then b2, which
 		// is, but references r1b, not an ancestor of x.
 		{"gap", newRoot(r1, 1, a[2].Header()), ErrConfirmedNotContiguous},
+		{"regression to genesis", newRoot(r1, 1, env.genesis.Header()), ErrConfirmedNotContiguous},
 		{"confirmed root fork", newRoot(r1, 1, b2.Header()), ErrConfirmedRootNotAncestor},
 	}
 	for _, test := range tests {

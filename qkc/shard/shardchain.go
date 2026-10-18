@@ -431,7 +431,12 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	}
 	if len(blocks) > 0 {
 		first := blocks[0]
-		if first.Number.Uint64() != 0 && (confirmed == nil || first.ParentHash != confirmed.Hash()) {
+		if confirmed == nil {
+			genesis := c.chain.Genesis().Header()
+			if first.Number.Uint64() != 0 || first.Hash() != genesis.Hash() {
+				return nil, fmt.Errorf("%w: first #%d [%x..]", ErrConfirmedNotContiguous, first.Number, first.Hash().Bytes()[:4])
+			}
+		} else if first.ParentHash != confirmed.Hash() {
 			return nil, fmt.Errorf("%w: first #%d [%x..]", ErrConfirmedNotContiguous, first.Number, first.Hash().Bytes()[:4])
 		}
 		confirmed = blocks[len(blocks)-1]
