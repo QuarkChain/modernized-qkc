@@ -117,14 +117,22 @@ func newRoot(parent *qkctypes.RootBlock, seed uint64, headers ...*types.Header) 
 	return qkctypes.NewRootBlock(block.Header(), headers, nil)
 }
 
-// remoteHeader returns the header of a block of another shard referencing
-// prevRoot. Headers with different numbers are different.
-func remoteHeader(shard uint32, number int64, prevRoot *qkctypes.RootBlock) *types.Header {
-	return &types.Header{
-		Number:     big.NewInt(number),
-		Difficulty: common.Big0,
-		Extra:      (&types.QKCExtra{ShardID: shard, PrevRootBlock: prevRoot.Hash()}).Encode(),
+// makeShardHeaders creates a linked sequence of headers for a shard. Each
+// header references the corresponding root block in prevRoots.
+func makeShardHeaders(shardID uint32, startBlockNumber int64, prevRoots ...*qkctypes.RootBlock) []*types.Header {
+	headers := make([]*types.Header, len(prevRoots))
+	for i, prevRoot := range prevRoots {
+		headers[i] = &types.Header{
+			ParentHash: common.Hash{},
+			Number:     big.NewInt(startBlockNumber + int64(i)),
+			Difficulty: common.Big0,
+			Extra:      (&types.QKCExtra{ShardID: shardID, PrevRootBlock: prevRoot.Hash()}).Encode(),
+		}
+		if i > 0 {
+			headers[i].ParentHash = headers[i-1].Hash()
+		}
 	}
+	return headers
 }
 
 // addRoot stores a root block, along with the latest shard block it confirms
@@ -138,15 +146,6 @@ func (env *testEnv) addRoot(root *qkctypes.RootBlock, confirmed *types.Block) {
 
 func (env *testEnv) setRootTip(root *qkctypes.RootBlock) {
 	qkcrawdb.WriteRootHeadHash(env.db, root.Hash())
-}
-
-// storeXShardDeposits stores the cross-shard deposits sent to the shard by a
-// block of another shard, as an empty list.
-func (env *testEnv) storeXShardDeposits(header *types.Header) {
-	key := append([]byte("qkc_xShard"), header.Hash().Bytes()...)
-	if err := env.db.Put(key, []byte{0xc0}); err != nil { // RLP encoding of an empty list
-		env.t.Fatalf("failed to store cross-shard deposits: %v", err)
-	}
 }
 
 // insertRoot inserts a root block, and checks whether it became the root tip.
@@ -533,8 +532,8 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 
 // TestInsertRootBlockValidation checks the rules of validateRootBlock, on top
 // of the chains below. Each invalid root block x is rejected, and not stored.
-// Fork a is a in the code, and a root block carries at most one block of the
-// shard.
+// This diagram shows the local shard 0 chain and root fork; a root block
+// carries at most one block of the local shard.
 //
 //	              +----- r1b
 //	              v
@@ -543,36 +542,43 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 //	                        v
 //	shard chain   g[r0] <-- a1[r0] <-- a2[r0] <-- a3[r0]
 //	                        ^
-//	                        +-------- b2[r1b]
+//	                        +-------- f2[r1b]
 //
-//	r1 confirms g and a1. The other shard 1 has blocks s1 to s4: s1 and s2
-//	reference r1, s3 and s4 reference r0. The deposits of s1 and s4 are
-//	stored. Shard 7, not in the network, has a block t1 referencing r1,
-//	whose deposits are stored.
+//	r1 confirms g and a1. The diagram shows only local shard 0. Separately, the
+//	test passes remote headers to validateRootBlock to check cross-shard deposits.
+//	The target is shard 0, shard 1 is in its network config, and r0 is the root
+//	referenced by the shard genesis. Under these conditions:
+//	  1. b1[r0] has deposits, so validation fails: deposits are unexpected at r0.
+//	  2. b2[r0] has no deposits, so validation accepts it.
+//	  3. b3[r1] has deposits, so validation accepts it; b4[r1] has none, so
+//	     validation fails because deposits are required after r0.
+//	  4. t1[r1] is from shard 7, outside the network config, but has deposits;
+//	     validation fails because shard 7 does not send deposits to shard 0.
 func TestInsertRootBlockValidation(t *testing.T) {
 	env := newTestEnv(t)
 	r0 := env.rootGenesis
-	a := env.makeBlocks(env.genesis, 3, r0, 1)
-	for _, block := range a {
+	blocks := env.makeBlocks(env.genesis, 3, r0, 1)
+	for _, block := range blocks {
 		env.insert(block)
 	}
-	r1, r1b := newRoot(r0, 1, env.genesis.Header(), a[0].Header()), newRoot(r0, 2)
+	r1, r1b := newRoot(r0, 1, env.genesis.Header(), blocks[0].Header()), newRoot(r0, 2)
 	env.insertRoot(r1, true)
 	env.insertRoot(r1b, false)
-	b2 := env.makeBlocks(a[0], 1, r1b, 2)[0]
-	env.insert(b2)
+	aForkB2 := env.makeBlocks(blocks[0], 1, r1b, 2)[0]
+	env.insert(aForkB2)
 
-	s1, s2, s3, s4 := remoteHeader(1, 1, r1), remoteHeader(1, 2, r1), remoteHeader(1, 3, r0), remoteHeader(1, 4, r0)
-	t1 := remoteHeader(7, 1, r1)
-	env.storeXShardDeposits(s1)
-	env.storeXShardDeposits(s4)
-	env.storeXShardDeposits(t1)
-	s3Extra, err := s3.QKCExtra()
+	bHeaders := makeShardHeaders(1, 1, r0, r0, r1, r1)
+	b1, b2, b3, b4 := bHeaders[0], bHeaders[1], bHeaders[2], bHeaders[3]
+	t1 := makeShardHeaders(7, 1, r1)[0]
+	qkcrawdb.WriteXShardDeposits(env.db, b1.Hash(), nil)
+	qkcrawdb.WriteXShardDeposits(env.db, b3.Hash(), nil)
+	qkcrawdb.WriteXShardDeposits(env.db, t1.Hash(), nil)
+	b2Extra, err := b2.QKCExtra()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.sc.validateXShardDeposits(s3, s3Extra, r1.Header(), env.config.QuarkChain); err != nil {
-		t.Fatalf("block referencing a root before the shard genesis root should not require deposits: %v", err)
+	if err := env.sc.validateXShardDeposits(b2, b2Extra, r0.Header(), env.config.QuarkChain); err != nil {
+		t.Fatalf("block referencing the shard genesis root should not require deposits: %v", err)
 	}
 	env.chain.Config().QuarkChain.MaxBlocksPerRootBlock = 1
 
@@ -590,20 +596,20 @@ func TestInsertRootBlockValidation(t *testing.T) {
 
 		// Rule 2: x carries a2 of a fork missing from the shard chain, then
 		// a2 and a3, more than one block of the shard.
-		{"unknown block", newRoot(r1, 1, env.makeBlocks(a[0], 1, r1, 3)[0].Header()), ErrUnknownConfirmedBlock},
-		{"too many blocks", newRoot(r1, 1, a[1].Header(), a[2].Header()), ErrTooManyConfirmedBlocks},
+		{"unknown block", newRoot(r1, 1, env.makeBlocks(blocks[0], 1, r1, 3)[0].Header()), ErrUnknownConfirmedBlock},
+		{"too many blocks", newRoot(r1, 1, blocks[1].Header(), blocks[2].Header()), ErrTooManyConfirmedBlocks},
 
-		// Rule 2: x carries s2, missing its deposits, then s4 and t1, which
-		// send none but come with some.
-		{"missing deposits", newRoot(r1, 1, s2), ErrMissingXShardDeposits},
-		{"deposits before genesis root", newRoot(r1, 1, s4), ErrUnexpectedXShardDeposits},
+		// Rule 2: deposits are required for b4, unexpected for b1 at r0,
+		// and unexpected for t1 because its shard is outside the network.
+		{"missing deposits", newRoot(r1, 1, b4), ErrMissingXShardDeposits},
+		{"deposits at genesis root", newRoot(r1, 1, b1), ErrUnexpectedXShardDeposits},
 		{"deposits from unknown shard", newRoot(r1, 1, t1), ErrUnexpectedXShardDeposits},
 
 		// Rule 3: x carries a3, which is not a child of a1, then b2, which
 		// is, but references r1b, not an ancestor of x.
-		{"gap", newRoot(r1, 1, a[2].Header()), ErrConfirmedNotContiguous},
+		{"gap", newRoot(r1, 1, blocks[2].Header()), ErrConfirmedNotContiguous},
 		{"regression to genesis", newRoot(r1, 1, env.genesis.Header()), ErrConfirmedNotContiguous},
-		{"confirmed root fork", newRoot(r1, 1, b2.Header()), ErrConfirmedRootNotAncestor},
+		{"confirmed root fork", newRoot(r1, 1, aForkB2.Header()), ErrConfirmedRootNotAncestor},
 	}
 	for _, test := range tests {
 		if _, err := env.sc.InsertRootBlock(test.root); !errors.Is(err, test.err) {
@@ -614,16 +620,15 @@ func TestInsertRootBlockValidation(t *testing.T) {
 		}
 	}
 	env.checkRootTip(r1)
-	env.checkHead(a[2])
+	env.checkHead(blocks[2])
 
-	// r2 carries a2, s1 and s3. a2 is a child of a1, and references r0. s1
-	// comes with its deposits, and s3, referencing r0, sends none. It is
-	// valid, and becomes the root tip.
-	r2 := newRoot(r1, 1, a[1].Header(), s1, s3)
+	// r2 carries a2, b2 and b3. b2 references r0 and has no deposits; b3
+	// references r1 and has deposits. The shard 1 references move forward.
+	r2 := newRoot(r1, 1, blocks[1].Header(), b2, b3)
 	env.insertRoot(r2, true)
 	env.checkRootTip(r2)
-	env.checkLastConfirmed(r2, a[1])
-	env.checkHead(a[2])
+	env.checkLastConfirmed(r2, blocks[1])
+	env.checkHead(blocks[2])
 }
 
 // TestInsertRootBlockConfirmsFork checks that the head moves to the latest

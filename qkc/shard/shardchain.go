@@ -487,10 +487,9 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 // cases apply.
 //
 // Case 1: C is not on the canonical chain, as the root tip confirms another
-// fork, or blocks above the head. The head moves to C, which has both
-// properties, see rule 3 of validateRootBlock. As in pyquarkchain, it stays on
-// C even if blocks extend C ("shard_header might not be the tip of the longest
-// chain").
+// fork. The head moves to C, which has both properties, see rule 3 of
+// validateRootBlock. As in pyquarkchain, the head stays at C even if blocks
+// extend it ("shard_header might not be the tip of the longest chain").
 //
 //	root chain    R0 <-- R1 <-- R2
 //	                     :      :
@@ -502,18 +501,20 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 //	R1 confirms the shard chain up to A, and the new root tip R2 up to C.
 //	C is on a fork of the head H, so the head moves from H to C, not to D.
 //
-// Case 2: C is canonical, or there is none. The head already extends C, but
-// may reference a root block on a fork of the root tip. The head moves back to
-// the latest block referencing the root tip or one of its ancestors, C at the
-// latest: "we need to scan back until finding a minor block pointing to the
-// same root chain r_block is on".
+// Case 2: C is canonical, or no shard block has been confirmed yet (as with a
+// root genesis that has no last-confirmed shard block). Starting at the current
+// head, walk back to the nearest shard block whose referenced root is the new
+// root tip or one of its ancestors. If C exists, it is the earliest block the
+// walk can reach; if C does not exist, the walk can reach the shard genesis at
+// most. This follows "we need to scan back until finding a minor block pointing
+// to the same root chain r_block is on".
 //
 //	                     +----- R2'
 //	                     v
 //	root chain    R0 <-- R1 <-- R2 <-- R3
 //	                     :
 //	                     v
-//	shard chain   G <--- C <--- X <--- Y <--- H
+//	shard chain   G <--- C <--- X[R1] <--- Y[R2'] <--- H[R2']
 //
 //	R1 and its descendants confirm the shard chain up to C. X references
 //	R1, and Y and H reference R2', the former root tip. With R3 as the new
@@ -525,21 +526,23 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 	if confirmed != nil && c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
 		head = confirmed
 	}
-	// Case 2, which keeps C in case 1. The walk stops at the shard genesis at
-	// the latest, as it references the root block of the shard genesis, an
-	// ancestor of every root block above it (rule 1 of validateRootBlock).
-	// pyquarkchain resets the shard genesis there instead, as a shard created
-	// after the root genesis has a genesis block per root chain, while the one
-	// here is fixed.
+	// Walk back to the nearest shard block referencing the new root tip or one
+	// of its ancestors. If C exists, do not walk past it; otherwise, stop at the
+	// shard genesis. Return ErrRootNotDescendant if the genesis creation root is
+	// not on the new root chain.
 	for {
 		prevRoot, err := c.prevRootBlock(head)
 		if err != nil {
 			return err
 		}
 		if c.isRootDescendant(rootTip, prevRoot) {
+			// If C exists, root-block validation guarantees the scan matches by C
+			// at the latest; Case 1 starts the scan at C itself.
 			break
 		}
 		if head.Number.Uint64() == 0 {
+			// With no C, genesis is the last candidate. Its creation root must
+			// still be on the new root chain.
 			return fmt.Errorf("%w: genesis references root #%d [%x..]", ErrRootNotDescendant, prevRoot.Number, prevRoot.Hash().Bytes()[:4])
 		}
 		if head = c.chain.GetHeader(head.ParentHash, head.Number.Uint64()-1); head == nil {
