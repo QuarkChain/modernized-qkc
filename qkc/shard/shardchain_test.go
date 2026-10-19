@@ -567,6 +567,13 @@ func TestInsertRootBlockValidation(t *testing.T) {
 	env.storeXShardDeposits(s1)
 	env.storeXShardDeposits(s4)
 	env.storeXShardDeposits(t1)
+	s3Extra, err := s3.QKCExtra()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sc.validateXShardDeposits(s3, s3Extra, r1.Header(), env.config.QuarkChain); err != nil {
+		t.Fatalf("block referencing a root before the shard genesis root should not require deposits: %v", err)
+	}
 	env.chain.Config().QuarkChain.MaxBlocksPerRootBlock = 1
 
 	badVersion := newRoot(r1, 1).Header()

@@ -14,7 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package shard implements the consensus layer of a QuarkChain shard.
 package shard
 
 import (
@@ -53,9 +52,9 @@ var (
 	// block that is not in the local chain.
 	ErrUnknownConfirmedBlock = errors.New("unknown confirmed block")
 
-	// ErrRootNotAfterGenesis is returned when a root block is not higher than
-	// the root block referenced by the shard genesis.
-	ErrRootNotAfterGenesis = errors.New("root block not after the root block of the shard genesis")
+	// ErrRootNotAfterGenesis is returned when the root block's number is not
+	// greater than the number of the root block referenced by the shard genesis.
+	ErrRootNotAfterGenesis = errors.New("root block number must be greater than the root block referenced by the shard genesis")
 
 	// ErrRootBlockVersion is returned when a root block has an unsupported
 	// version.
@@ -469,7 +468,7 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 	// the root block of the shard genesis: "prev_root_header can be None when
 	// the shard is not created at root height 0".
 	prevRoot := rawdb.ReadRootBlockHeader(c.db, extra.PrevRootBlock)
-	sends := prevRoot != nil && prevRoot.Number != genesisRoot.Number && config.IsXShardDestination(extra.ShardID)
+	sends := prevRoot != nil && prevRoot.Number > genesisRoot.Number && config.IsXShardDestination(extra.ShardID)
 	stored := rawdb.HasXShardDeposits(c.db, block.Hash())
 	switch {
 	case sends && !stored:
