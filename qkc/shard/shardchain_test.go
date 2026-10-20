@@ -337,10 +337,10 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 		if !errors.Is(err, test.err) {
 			t.Errorf("%s: error mismatch: have %v, want %v", test.name, err, test.err)
 		}
-		if have := errors.Is(err, clusterInconsistencyErr); have != test.inconsistent {
+		if have := errors.Is(err, ErrClusterInconsistency); have != test.inconsistent {
 			t.Errorf("%s: cluster inconsistency mismatch: have %v, want %v", test.name, have, test.inconsistent)
 		}
-		if have := errors.Is(err, shardInconsistencyErr); have != test.shardInconsistent {
+		if have := errors.Is(err, ErrShardInconsistency); have != test.shardInconsistent {
 			t.Errorf("%s: shard inconsistency mismatch: have %v, want %v", test.name, have, test.shardInconsistent)
 		}
 		if env.chain.HasBlock(test.block.Hash(), test.block.NumberU64()) {
@@ -607,7 +607,7 @@ func TestInsertRootBlockValidation(t *testing.T) {
 
 		// Rule 2: x carries a2 of a fork missing from the shard chain, then
 		// a2 and a3, more than one block of the shard.
-		{"unknown block", newRoot(r1, 1, env.makeBlocks(blocks[0], 1, r1, 3)[0].Header()), ErrUnknownConfirmedBlock, false},
+		{"unknown block", newRoot(r1, 1, env.makeBlocks(blocks[0], 1, r1, 3)[0].Header()), ErrUnknownConfirmedBlock, true},
 		{"too many blocks", newRoot(r1, 1, blocks[1].Header(), blocks[2].Header()), ErrTooManyConfirmedBlocks, false},
 
 		// Rule 2: deposits are required for b4, unexpected for b1 at r0,
@@ -619,7 +619,7 @@ func TestInsertRootBlockValidation(t *testing.T) {
 		// Rule 3: x carries a3, which is not a child of a1, then b2, which
 		// is, but references r1b, not an ancestor of x.
 		{"gap", newRoot(r1, 1, blocks[2].Header()), ErrConfirmedNotContiguous, true},
-		{"regression to genesis", newRoot(r1, 1, env.genesis.Header()), ErrConfirmedNotContiguous, false},
+		{"regression to genesis", newRoot(r1, 1, env.genesis.Header()), ErrConfirmedNotContiguous, true},
 		{"confirmed root fork", newRoot(r1, 1, aForkB2.Header()), ErrConfirmedRootNotAncestor, true},
 	}
 	for _, test := range tests {
@@ -627,13 +627,13 @@ func TestInsertRootBlockValidation(t *testing.T) {
 		if !errors.Is(err, test.err) {
 			t.Errorf("%s: error mismatch: have %v, want %v", test.name, err, test.err)
 		}
-		if have := errors.Is(err, clusterInconsistencyErr); have != test.inconsistent {
+		if have := errors.Is(err, ErrClusterInconsistency); have != test.inconsistent {
 			t.Errorf("%s: cluster inconsistency mismatch: have %v, want %v", test.name, have, test.inconsistent)
 		}
 		if test.inconsistent && err != nil && !strings.Contains(err.Error(), "cluster inconsistency") {
 			t.Errorf("%s: cluster inconsistency missing from log message: %v", test.name, err)
 		}
-		if errors.Is(err, shardInconsistencyErr) {
+		if errors.Is(err, ErrShardInconsistency) {
 			t.Errorf("%s: input validation error incorrectly marked as shard inconsistency: %v", test.name, err)
 		}
 		if qkcrawdb.HasRootBlock(env.db, test.root.Hash()) {
@@ -650,6 +650,26 @@ func TestInsertRootBlockValidation(t *testing.T) {
 	env.checkRootTip(r2)
 	env.checkLastConfirmed(r2, blocks[1])
 	env.checkHead(blocks[2])
+}
+
+// The cluster must make local shard blocks available before a root confirms
+// them. Missing blocks violate this guarantee, rather than local stored state.
+func TestInsertRootBlockMissingLocalBlock(t *testing.T) {
+	env := newTestEnv(t)
+	missing := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
+	root := newRoot(env.rootGenesis, 1, env.genesis.Header(), missing.Header())
+	switched, err := env.sc.InsertRootBlock(root)
+	if switched || !errors.Is(err, ErrClusterInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardInconsistency) {
+		t.Fatalf("missing confirmed local block: switched %v, error %v", switched, err)
+	}
+	if !strings.Contains(err.Error(), "cluster inconsistency") {
+		t.Fatalf("cluster inconsistency missing from log message: %v", err)
+	}
+	if qkcrawdb.HasRootBlock(env.db, root.Hash()) {
+		t.Fatal("root stored despite missing confirmed local block")
+	}
+	env.checkRootTip(env.rootGenesis)
+	env.checkHead(env.genesis)
 }
 
 // TestInsertRootBlockConfirmsFork checks that the head moves to the latest
@@ -703,7 +723,7 @@ func TestInsertShardBlockForkChoiceError(t *testing.T) {
 
 	fork := env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0]
 	err := env.sc.InsertShardBlock(fork)
-	if !errors.Is(err, shardInconsistencyErr) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, clusterInconsistencyErr) {
+	if !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterInconsistency) {
 		t.Fatalf("missing fork-choice confirmation error mismatch: %v", err)
 	}
 	if !strings.Contains(err.Error(), "shard inconsistency") {
@@ -712,7 +732,7 @@ func TestInsertShardBlockForkChoiceError(t *testing.T) {
 	if env.chain.HasBlock(fork.Hash(), fork.NumberU64()) {
 		t.Fatal("block inserted despite fork-choice inconsistency")
 	}
-	if _, err := env.sc.InsertRootBlock(root); !errors.Is(err, shardInconsistencyErr) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, clusterInconsistencyErr) {
+	if _, err := env.sc.InsertRootBlock(root); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterInconsistency) {
 		t.Fatalf("missing known-root confirmation error mismatch: %v", err)
 	}
 	env.checkRootTip(root)
@@ -735,7 +755,7 @@ func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 	qkcrawdb.WriteRootHeadHash(rootDB, env.rootGenesis.Hash())
 	env.sc.db = rootDB
 	block := env.makeBlocks(parent, 1, env.rootGenesis, 1)[0]
-	if err := env.sc.InsertShardBlock(block); !errors.Is(err, shardInconsistencyErr) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, clusterInconsistencyErr) {
+	if err := env.sc.InsertShardBlock(block); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterInconsistency) {
 		t.Fatalf("missing stored parent reference error mismatch: %v", err)
 	}
 	if env.chain.HasBlock(block.Hash(), block.NumberU64()) {
@@ -759,7 +779,7 @@ func TestInsertShardBlockCurrentRootError(t *testing.T) {
 	qkcrawdb.WriteRootHeadHash(rootDB, env.rootGenesis.Hash())
 	env.sc.db = rootDB
 	fork := env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0]
-	if err := env.sc.InsertShardBlock(fork); !errors.Is(err, shardInconsistencyErr) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, clusterInconsistencyErr) {
+	if err := env.sc.InsertShardBlock(fork); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterInconsistency) {
 		t.Fatalf("missing current head root reference error mismatch: %v", err)
 	}
 	if env.chain.HasBlock(fork.Hash(), fork.NumberU64()) {
