@@ -86,19 +86,6 @@ func TestRootBlockStorage(t *testing.T) {
 	}
 }
 
-func TestRootHeadStorage(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-
-	if hash := ReadRootHeadHash(db); hash != (common.Hash{}) {
-		t.Fatalf("non existent root head returned: %x", hash)
-	}
-	want := common.Hash{0x01}
-	WriteRootHeadHash(db, want)
-	if hash := ReadRootHeadHash(db); hash != want {
-		t.Fatalf("root head mismatch: have %x, want %x", hash, want)
-	}
-}
-
 func TestLastConfirmedStorage(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	root := common.Hash{0x01}

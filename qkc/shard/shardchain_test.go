@@ -83,7 +83,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		}),
 	}
 	env.addRoot(env.rootGenesis, nil)
-	env.setRootTip(env.rootGenesis)
 
 	gspec := &core.Genesis{
 		Config:     env.config,
@@ -102,6 +101,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	env.chain = chain
 	env.genesis = chain.Genesis()
 	env.sc = NewShardChain(env.db, chain)
+	env.setRootTip(env.rootGenesis)
 	return env
 }
 
@@ -146,7 +146,7 @@ func (env *testEnv) addRoot(root *qkctypes.RootBlock, confirmed *types.Block) {
 }
 
 func (env *testEnv) setRootTip(root *qkctypes.RootBlock) {
-	qkcrawdb.WriteRootHeadHash(env.db, root.Hash())
+	env.sc.rootTip = root.Header()
 }
 
 // insertRoot inserts a root block, and checks whether it became the root tip.
@@ -163,8 +163,8 @@ func (env *testEnv) insertRoot(root *qkctypes.RootBlock, wantSwitched bool) {
 
 func (env *testEnv) checkRootTip(want *qkctypes.RootBlock) {
 	env.t.Helper()
-	if have := qkcrawdb.ReadRootHeadHash(env.db); have != want.Hash() {
-		env.t.Fatalf("root tip mismatch: have [%x..], want #%d [%x..]", have.Bytes()[:4], want.Number(), want.Hash().Bytes()[:4])
+	if have := env.sc.rootTip; have == nil || have.Hash() != want.Hash() {
+		env.t.Fatalf("root tip mismatch: have %v, want #%d [%x..]", have, want.Number(), want.Hash().Bytes()[:4])
 	}
 }
 
@@ -259,7 +259,7 @@ func TestInsertShardBlockUnknownParent(t *testing.T) {
 //	Inserting a1 fails.
 func TestInsertShardBlockRootChainUninitialized(t *testing.T) {
 	env := newTestEnv(t)
-	qkcrawdb.WriteRootHeadHash(env.db, common.Hash{})
+	env.sc.rootTip = nil
 	blocks := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)
 	if err := env.sc.InsertShardBlock(blocks[0]); !errors.Is(err, ErrRootChainUninitialized) {
 		t.Fatalf("error mismatch: have %v, want %v", err, ErrRootChainUninitialized)
@@ -752,7 +752,6 @@ func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 	rootDB := rawdb.NewMemoryDatabase()
 	t.Cleanup(func() { rootDB.Close() })
 	qkcrawdb.WriteRootBlock(rootDB, env.rootGenesis)
-	qkcrawdb.WriteRootHeadHash(rootDB, env.rootGenesis.Hash())
 	env.sc.db = rootDB
 	block := env.makeBlocks(parent, 1, env.rootGenesis, 1)[0]
 	if err := env.sc.InsertShardBlock(block); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterInconsistency) {
@@ -776,8 +775,8 @@ func TestInsertShardBlockCurrentRootError(t *testing.T) {
 	rootDB := rawdb.NewMemoryDatabase()
 	t.Cleanup(func() { rootDB.Close() })
 	qkcrawdb.WriteRootBlock(rootDB, env.rootGenesis)
-	qkcrawdb.WriteRootHeadHash(rootDB, env.rootGenesis.Hash())
 	env.sc.db = rootDB
+	env.setRootTip(env.rootGenesis)
 	fork := env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0]
 	if err := env.sc.InsertShardBlock(fork); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterInconsistency) {
 		t.Fatalf("missing current head root reference error mismatch: %v", err)
@@ -888,7 +887,8 @@ func TestInsertRootBlockRetry(t *testing.T) {
 					t.Fatalf("failed to restart chain: %v", err)
 				}
 				env.chain = chain
-				env.sc.chain = chain
+				env.sc = NewShardChain(env.sc.db, chain)
+				env.setRootTip(r1)
 			}
 			env.insertRoot(r2, true)
 			env.checkRootTip(r2)

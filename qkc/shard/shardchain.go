@@ -104,11 +104,12 @@ type ShardChain struct {
 	db    ethdb.KeyValueStore // Database of the root blocks seen by the shard
 	chain *core.BlockChain
 
-	mu sync.Mutex // Serializes block imports and head updates
+	rootTip *qkctypes.RootBlockHeader // Set by root-block initialization before imports
+	mu      sync.Mutex                // Serializes block imports and head updates
 }
 
-// NewShardChain creates a shard chain on top of the given chain, reading the
-// root blocks from db.
+// NewShardChain creates a shard chain on top of the given chain, reading root
+// blocks from db.
 func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
 	return &ShardChain{db: db, chain: chain}
 }
@@ -125,7 +126,7 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	if c.chain.HasBlock(block.Hash(), block.NumberU64()) {
 		return nil
 	}
-	rootTip := c.rootTip()
+	rootTip := c.rootTip
 	if rootTip == nil {
 		return ErrRootChainUninitialized
 	}
@@ -314,7 +315,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	rootTip := c.rootTip()
+	rootTip := c.rootTip
 	if rootTip == nil {
 		return false, ErrRootChainUninitialized
 	}
@@ -344,7 +345,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	}
 	// Step 2: the fork choice.
 	switched := root.TotalDifficulty().Cmp(&rootTip.TotalDifficulty) > 0
-	// Step 3: reconcile the shard head before committing the root tip. On error,
+	// Step 3: reconcile the shard head before updating the root tip. On error,
 	// the root tip stays unchanged, so the stored root block can retry the switch.
 	if switched {
 		if err := c.setHeadForRootTip(root.Header(), confirmed); err != nil {
@@ -425,10 +426,11 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	if parent == nil {
 		return nil, fmt.Errorf("%w: parent %x", ErrUnknownRootBlock, header.ParentHash)
 	}
-	// Rule 2 local checks: require every carried local-shard header and relevant
-	// cross-shard deposit list to be available before accepting this root block.
-	// Missing required data violates the cluster's import guarantees. Preserve the
-	// local headers' carried order for the first-block check in rule 3.
+	// Rule 2: the master or peer shard must ensure every carried local-shard
+	// block and relevant cross-shard deposit list is available before this root
+	// block is imported. Check these guarantees defensively here; missing required
+	// data is an ErrClusterInconsistency. Preserve the local headers' carried
+	// order for the first-block check in rule 3.
 	var blocks []*types.Header
 	for _, block := range root.MinorBlockHeaders() {
 		extra, err := block.QKCExtra()
@@ -509,7 +511,7 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 }
 
 // setHeadForRootTip moves the canonical head onto the shard chain of a stored
-// root block and then commits it as the root tip, given C, the latest shard block
+// root block and then selects it as the root tip, given C, the latest shard block
 // confirmed by the root chain up to it, or nil if none. It mirrors the tip reset
 // of ShardState.add_root_block in pyquarkchain. The head must keep the two
 // properties shouldUpdateHead relies on: it extends C, and it references the
@@ -591,24 +593,10 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 			return fmt.Errorf("set canonical head %x: %w", head.Hash(), err)
 		}
 	}
-	// The root tip advances even when the shard head already matches. This
-	// single-key write is fatal on failure, like the shard head's DB writes.
-	// It is not atomic with SetCanonical: a crash between the writes can leave
-	// the persisted shard head ahead of the root tip.
-	// TODO: Before accepting block imports on startup, reconcile the shard head
-	// against the committed root tip and its stored confirmation. Recovery must
-	// be retryable if interrupted, and missing required data must prevent imports.
-	rawdb.WriteRootHeadHash(c.db, rootTip.Hash())
+	// Advance the in-memory root tip even when the shard head already matches.
+	// After a restart, root-block initialization sets it before imports resume.
+	c.rootTip = rootTip
 	return nil
-}
-
-// rootTip returns the header of the root tip, or nil if it is not known.
-func (c *ShardChain) rootTip() *qkctypes.RootBlockHeader {
-	hash := rawdb.ReadRootHeadHash(c.db)
-	if hash == (common.Hash{}) {
-		return nil
-	}
-	return rawdb.ReadRootBlockHeader(c.db, hash)
 }
 
 // prevRootBlock returns the header of the root block referenced by a shard

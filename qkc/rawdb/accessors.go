@@ -25,22 +25,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-// ReadRootHeadHash retrieves the hash of the root tip.
-func ReadRootHeadHash(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(rootHeadKey)
-	if len(data) == 0 {
-		return common.Hash{}
-	}
-	return common.BytesToHash(data)
-}
-
-// WriteRootHeadHash stores the hash of the root tip.
-func WriteRootHeadHash(db ethdb.KeyValueWriter, hash common.Hash) {
-	if err := db.Put(rootHeadKey, hash.Bytes()); err != nil {
-		log.Crit("Failed to store root head hash", "err", err)
-	}
-}
-
 // HasRootBlock verifies the existence of a root block corresponding to the hash.
 func HasRootBlock(db ethdb.KeyValueReader, hash common.Hash) bool {
 	has, err := db.Has(rootBlockKey(hash))
