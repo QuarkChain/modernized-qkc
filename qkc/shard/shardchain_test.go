@@ -17,6 +17,7 @@
 package shard
 
 import (
+	"context"
 	"errors"
 	"math/big"
 	"strings"
@@ -101,7 +102,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	env.chain = chain
 	env.genesis = chain.Genesis()
 	env.sc = NewShardChain(env.db, chain)
-	env.setRootTip(env.rootGenesis)
+	if err := env.sc.Init(env.rootGenesis); err != nil {
+		t.Fatalf("failed to initialize shard chain: %v", err)
+	}
 	return env
 }
 
@@ -212,6 +215,235 @@ func (env *testEnv) checkHead(want *types.Block) {
 //   - x[r] is a shard block x referencing the root block r.
 //   - A dotted arrow from a root block down to a shard block means the root
 //     chain confirms the shard chain up to that block.
+
+// TestShardChainInitHead checks that initialization restores exactly the stored
+// confirmation, rather than retaining compatible but unconfirmed descendants.
+//
+//	root chain    r0 <-- r1*
+//
+//	shard chain   g[r0] <-- a1[r0] <-- a2[r0]   previous head
+//	              ^
+//	              +-------- b1[r0]
+//
+// Before Init, the canonical chain is g -> a1 -> a2, with a2 as its head.
+// b1 is a stored, noncanonical block on another fork extending g. In the code,
+// a1 and a2 are a[0] and a[1]; b1 is the separate block generated from genesis.
+// Each subtest uses a different last-confirmed checkpoint for r1:
+//
+//   - a1, a canonical ancestor: rewind from a2 to a1, dropping the compatible
+//     but unconfirmed descendant a2.
+//   - b1, a noncanonical fork: switch from fork a to fork b, making b1 the head.
+//   - a2, the current head: keep a2; only initialize the root tip to r1.
+//   - No confirmed block: rewind from a2 to the existing shard genesis g.
+//
+// After each recovery, both shard and root imports must work.
+func TestShardChainInitHead(t *testing.T) {
+	for _, target := range []string{"canonical confirmation", "fork confirmation", "current head", "no confirmation"} {
+		t.Run(target, func(t *testing.T) {
+			env := newTestEnv(t)
+			a := env.makeBlocks(env.genesis, 2, env.rootGenesis, 1)
+			b1 := env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0]
+			for _, block := range append(a, b1) {
+				env.insert(block)
+			}
+			env.checkHead(a[1])
+
+			var confirmed *types.Block
+			var headers []*types.Header
+			switch target {
+			case "canonical confirmation":
+				confirmed, headers = a[0], []*types.Header{env.genesis.Header(), a[0].Header()}
+			case "fork confirmation":
+				confirmed, headers = b1, []*types.Header{env.genesis.Header(), b1.Header()}
+			case "current head":
+				confirmed, headers = a[1], []*types.Header{env.genesis.Header(), a[0].Header(), a[1].Header()}
+			}
+			root := newRoot(env.rootGenesis, 1, headers...)
+			env.addRoot(root, confirmed)
+
+			// Simulate reconnect/restart with the same local DB and blockchain.
+			// Initialization must use the stored checkpoint, not this input body.
+			env.sc = NewShardChain(env.db, env.chain)
+			input := root.WithBody(nil, []byte("master tracking data"))
+			if err := env.sc.Init(input); err != nil {
+				t.Fatalf("initialize: %v", err)
+			}
+			head := confirmed
+			if head == nil {
+				head = env.genesis
+			}
+			env.checkHead(head)
+			env.checkRootTip(root)
+
+			// Init is one-shot even when the master sends the same root again.
+			if err := env.sc.Init(root); !errors.Is(err, ErrRootChainAlreadyInitialized) {
+				t.Fatalf("repeat initialization: %v", err)
+			}
+			env.checkHead(head)
+			env.checkRootTip(root)
+
+			// A successful initialization enables both shard and root imports.
+			next := env.makeBlocks(head, 1, root, 3)[0]
+			env.insert(next)
+			env.insertRoot(newRoot(root, 1), true)
+			env.checkHead(next)
+		})
+	}
+}
+
+// TestShardChainInitUnknownRoot checks that an unpersisted master checkpoint
+// does not initialize the chain or get stored implicitly. Failed initialization
+// must keep both import paths gated, and the same instance can retry after sync.
+func TestShardChainInitUnknownRoot(t *testing.T) {
+	for _, nilInput := range []bool{false, true} {
+		name := "unknown"
+		if nilInput {
+			name = "nil"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t)
+			env.sc = NewShardChain(env.db, env.chain)
+			root := newRoot(env.rootGenesis, 1)
+			input := root
+			if nilInput {
+				input = nil
+			}
+			if err := env.sc.Init(input); !errors.Is(err, ErrUnknownRootBlock) {
+				t.Fatalf("unknown checkpoint: %v", err)
+			}
+			if env.sc.rootTip != nil || qkcrawdb.HasRootBlock(env.db, root.Hash()) {
+				t.Fatal("unknown checkpoint initialized the chain or was persisted")
+			}
+			env.checkHead(env.genesis)
+			next := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
+			if err := env.sc.InsertShardBlock(next); !errors.Is(err, ErrRootChainUninitialized) {
+				t.Fatalf("shard import after failed initialization: %v", err)
+			}
+			if switched, err := env.sc.InsertRootBlock(root); switched || !errors.Is(err, ErrRootChainUninitialized) {
+				t.Fatalf("root import after failed initialization: switched %v, error %v", switched, err)
+			}
+
+			// A failed Init must not call BlockChain.Stop: after data arrives,
+			// the same chain can initialize and execute a new block.
+			env.addRoot(root, nil)
+			if err := env.sc.Init(root); err != nil {
+				t.Fatalf("retry initialization: %v", err)
+			}
+			env.checkRootTip(root)
+			env.insert(next)
+		})
+	}
+}
+
+// TestShardChainInitMissingConfirmedBlock checks partial local recovery: a root
+// can be present while its confirmed header or body has not been restored yet.
+// Init must remain retryable, and must not close the underlying blockchain.
+func TestShardChainInitMissingConfirmedBlock(t *testing.T) {
+	for _, headerOnly := range []bool{false, true} {
+		name := "missing header"
+		if headerOnly {
+			name = "missing body"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t)
+			block := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
+			root := newRoot(env.rootGenesis, 1, env.genesis.Header(), block.Header())
+			env.addRoot(root, block)
+			if headerOnly {
+				rawdb.WriteHeader(env.db, block.Header())
+			}
+			env.sc = NewShardChain(env.db, env.chain)
+			want := ErrUnknownConfirmedBlock
+			if headerOnly {
+				want = consensus.ErrUnknownAncestor
+			}
+			err := env.sc.Init(root)
+			if !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, want) {
+				t.Fatalf("missing confirmed data: have %v, want %v", err, want)
+			}
+			if env.sc.rootTip != nil {
+				t.Fatal("failed initialization published root tip")
+			}
+			env.checkHead(env.genesis)
+
+			// Simulate the separate sync layer restoring and executing the
+			// confirmed block. Core import must still work after the failure.
+			if _, err := env.chain.InsertBlockWithoutSetHead(context.Background(), block, false); err != nil {
+				t.Fatalf("restore confirmed block: %v", err)
+			}
+			if err := env.sc.Init(root); err != nil {
+				t.Fatalf("retry initialization: %v", err)
+			}
+			env.checkHead(block)
+			env.checkRootTip(root)
+		})
+	}
+}
+
+// TestShardChainInitHeadFailure checks that a SetCanonical error does not mark
+// initialization complete. An externally stopped blockchain must be reopened by
+// the service before retrying; Init itself never stops a healthy blockchain.
+func TestShardChainInitHeadFailure(t *testing.T) {
+	env := newTestEnv(t)
+	block := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
+	env.insert(block)
+	root := newRoot(env.rootGenesis, 1) // No confirmation: recovery must rewind to g.
+	env.addRoot(root, nil)
+	env.sc = NewShardChain(env.db, env.chain)
+	env.chain.Stop()
+	if err := env.sc.Init(root); err == nil {
+		t.Fatal("initialization succeeded despite stopped blockchain")
+	}
+	if env.sc.rootTip != nil {
+		t.Fatal("failed head switch published root tip")
+	}
+	env.checkHead(block)
+
+	chain, err := core.NewBlockChain(env.db, nil, env.engine, nil)
+	if err != nil {
+		t.Fatalf("reopen blockchain: %v", err)
+	}
+	env.chain, env.sc.chain = chain, chain
+	if err := env.sc.Init(root); err != nil {
+		t.Fatalf("retry initialization: %v", err)
+	}
+	env.checkHead(env.genesis)
+	env.checkRootTip(root)
+}
+
+// TestShardChainInitConcurrent checks that two master notifications cannot both
+// pass the uninitialized check: the entire initialization runs under c.mu.
+func TestShardChainInitConcurrent(t *testing.T) {
+	env := newTestEnv(t)
+	env.sc = NewShardChain(env.db, env.chain)
+	root := newRoot(env.rootGenesis, 1)
+	env.addRoot(root, nil)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- env.sc.Init(root)
+		}()
+	}
+	close(start)
+	var successes, repeats int
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrRootChainAlreadyInitialized):
+			repeats++
+		default:
+			t.Fatalf("concurrent initialization: %v", err)
+		}
+	}
+	if successes != 1 || repeats != 1 {
+		t.Fatalf("initialization results: successes %d, repeats %d", successes, repeats)
+	}
+	env.checkRootTip(root)
+	env.checkHead(env.genesis)
+}
 
 // TestInsertShardBlockExtendsHead checks that blocks extending the head become
 // the head, and that known blocks are ignored. Fork a is blocks in the code.
@@ -888,7 +1120,9 @@ func TestInsertRootBlockRetry(t *testing.T) {
 				}
 				env.chain = chain
 				env.sc = NewShardChain(env.sc.db, chain)
-				env.setRootTip(r1)
+				if err := env.sc.Init(r1); err != nil {
+					t.Fatalf("failed to initialize restarted shard chain: %v", err)
+				}
 			}
 			env.insertRoot(r2, true)
 			env.checkRootTip(r2)

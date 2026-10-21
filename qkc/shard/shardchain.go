@@ -48,8 +48,12 @@ var (
 	// ErrRootChainUninitialized is returned when no root tip is known yet.
 	ErrRootChainUninitialized = errors.New("root chain not initialized")
 
-	// ErrUnknownRootBlock is returned when a shard block references a root block
-	// that is not known yet.
+	// ErrRootChainAlreadyInitialized is returned when Init is called after a
+	// root tip has already been selected.
+	ErrRootChainAlreadyInitialized = errors.New("root chain already initialized")
+
+	// ErrUnknownRootBlock is returned when a required root block is not stored
+	// locally.
 	ErrUnknownRootBlock = errors.New("unknown root block")
 
 	// ErrRootNotDescendant is returned when the root block referenced by a shard
@@ -104,14 +108,58 @@ type ShardChain struct {
 	db    ethdb.KeyValueStore // Database of the root blocks seen by the shard
 	chain *core.BlockChain
 
-	rootTip *qkctypes.RootBlockHeader // Set by root-block initialization before imports
-	mu      sync.Mutex                // Serializes block imports and head updates
+	rootTip *qkctypes.RootBlockHeader // Nil until Init succeeds; updated by root imports
+	mu      sync.Mutex                // Serializes initialization, imports and head updates
 }
 
 // NewShardChain creates a shard chain on top of the given chain, reading root
-// blocks from db.
+// blocks from db. Call Init before importing blocks.
 func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
 	return &ShardChain{db: db, chain: chain}
+}
+
+// Init restores the shard from the target root block sent by the master on
+// connection. Only the input hash is used: the root header and last confirmed
+// shard block are read from local storage. The head is reset to that confirmed
+// block, or to the existing shard genesis if nothing has been confirmed, as in
+// pyquarkchain's init_from_root_block.
+//
+// This is a minimal local recovery step. The caller must arrange for the root,
+// confirmation record, shard blocks and execution state to be available first.
+// Master connection handling, missing-data synchronization, genesis creation,
+// and starting mining after success belong to the shard service layer and are
+// not implemented here.
+//
+// Until initialization succeeds, errors leave rootTip nil, so imports remain
+// blocked and Init may be retried.
+// Do not stop the underlying BlockChain here: Stop closes it permanently.
+// The service layer decides whether an unrecoverable error warrants shutdown.
+func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Step 1: reject repeat initialization before changing either head.
+	if c.rootTip != nil {
+		return ErrRootChainAlreadyInitialized
+	}
+	if root == nil {
+		return fmt.Errorf("%w: nil root block", ErrUnknownRootBlock)
+	}
+
+	// Step 2: use the locally stored checkpoint, not the received block body.
+	hash := root.Hash()
+	rootHeader := rawdb.ReadRootBlockHeader(c.db, hash)
+	if rootHeader == nil {
+		return fmt.Errorf("%w: %x", ErrUnknownRootBlock, hash)
+	}
+
+	// Step 3: load the checkpoint's confirmation, then reconcile the shard
+	// head. setHeadForRootTip publishes rootTip only after the switch succeeds.
+	confirmed, err := c.lastConfirmed(rootHeader)
+	if err != nil {
+		return err
+	}
+	return c.setHeadForRootTip(rootHeader, confirmed)
 }
 
 // InsertShardBlock validates a block against the root chain, imports it, and
@@ -515,7 +563,10 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 // confirmed by the root chain up to it, or nil if none. It mirrors the tip reset
 // of ShardState.add_root_block in pyquarkchain. The head must keep the two
 // properties shouldUpdateHead relies on: it extends C, and it references the
-// root tip or one of its ancestors. Two cases apply.
+// root tip or one of its ancestors.
+//
+// Init starts directly at C, or genesis if C is nil, matching pyquarkchain's
+// recovery behavior. Once initialized, root imports apply the two cases below.
 //
 // Case 1: C is not on the canonical chain, as the root tip confirms another
 // fork. The head moves to C, which has both properties, see rule 3 of
@@ -557,8 +608,16 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confirmed *types.Header) error {
 	current := c.chain.CurrentBlock()
 	head := current
-	// Case 1.
-	if confirmed != nil && c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
+	if c.rootTip == nil {
+		// Initialization restores the confirmed checkpoint, even if current
+		// is a compatible unconfirmed descendant. With no confirmation, use
+		// the existing genesis. Normal imports below may retain descendants.
+		head = confirmed
+		if head == nil {
+			head = c.chain.Genesis().Header()
+		}
+	} else if confirmed != nil && c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
+		// Case 1 for an already initialized chain.
 		head = confirmed
 	}
 	// Walk back to the nearest shard block referencing the new root tip or one
