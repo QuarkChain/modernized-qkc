@@ -44,10 +44,10 @@ func TestRootBlockStorage(t *testing.T) {
 		Nonce:           6,
 		Extra:           []byte("root"),
 	}
-	minorHeaders := types.MinorBlockHeaders{
-		{Number: big.NewInt(1), Difficulty: common.Big0, Extra: []byte("minor")},
+	shardHeaders := types.ShardBlockHeaders{
+		{Number: big.NewInt(1), Difficulty: common.Big0, Extra: []byte("shard")},
 	}
-	block := types.NewRootBlock(header, minorHeaders, []byte("tracking"))
+	block := types.NewRootBlock(header, shardHeaders, []byte("tracking"))
 	hash := block.Hash()
 
 	if HasRootBlock(db, hash) {
@@ -71,7 +71,7 @@ func TestRootBlockStorage(t *testing.T) {
 	if entry.Hash() != hash {
 		t.Fatalf("retrieved root block mismatch: have %x, want %x", entry.Hash(), hash)
 	}
-	if len(entry.MinorBlockHeaders()) != 1 || entry.MinorBlockHeaders()[0].Hash() != minorHeaders[0].Hash() {
+	if len(entry.ShardBlockHeaders()) != 1 || entry.ShardBlockHeaders()[0].Hash() != shardHeaders[0].Hash() {
 		t.Fatal("retrieved shard block headers mismatch")
 	}
 	if string(entry.TrackingData()) != "tracking" {

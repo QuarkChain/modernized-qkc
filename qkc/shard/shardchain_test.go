@@ -78,18 +78,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		engine: noVerifyEngine{beacon.New(ethash.NewFaker())},
 		config: &config,
 		db:     rawdb.NewMemoryDatabase(),
-		rootGenesis: qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{
-			Difficulty:      *uint256.NewInt(1),
-			TotalDifficulty: *uint256.NewInt(1),
-		}),
 	}
-	env.addRoot(env.rootGenesis, nil)
 
 	gspec := &core.Genesis{
 		Config:     env.config,
 		Difficulty: common.Big0,
 		BaseFee:    big.NewInt(params.InitialBaseFee),
-		ExtraData:  qkcExtra(env.rootGenesis),
+		ExtraData:  (&types.QKCExtra{ShardID: 0}).Encode(),
 		Alloc:      core.SystemContractAllocs(),
 	}
 	env.genDb, _, _ = core.GenerateChainWithGenesis(gspec, env.engine, 0, nil)
@@ -101,6 +96,13 @@ func newTestEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { env.chain.Stop() })
 	env.chain = chain
 	env.genesis = chain.Genesis()
+	// G0 has an empty previous-root hash. Only after deriving G0 can R0
+	// commit to its header, avoiding a circular hash dependency. Init must
+	// store both R0 and its confirmation; the fixture does not pre-seed them.
+	env.rootGenesis = qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+		Difficulty:      *uint256.NewInt(1),
+		TotalDifficulty: *uint256.NewInt(1),
+	}, qkctypes.ShardBlockHeaders{env.genesis.Header()}, nil)
 	env.sc = NewShardChain(env.db, chain)
 	if err := env.sc.Init(env.rootGenesis); err != nil {
 		t.Fatalf("failed to initialize shard chain: %v", err)
@@ -139,13 +141,11 @@ func makeShardHeaders(shardID uint32, startBlockNumber int64, prevRoots ...*qkct
 	return headers
 }
 
-// addRoot stores a root block, along with the latest shard block it confirms
-// if any.
+// addRoot stores a root block with its non-nil confirmed checkpoint. A root
+// without new local headers still inherits its parent's confirmed block.
 func (env *testEnv) addRoot(root *qkctypes.RootBlock, confirmed *types.Block) {
 	qkcrawdb.WriteRootBlock(env.db, root)
-	if confirmed != nil {
-		qkcrawdb.WriteLastConfirmedBlockHash(env.db, root.Hash(), confirmed.Hash())
-	}
+	qkcrawdb.WriteLastConfirmedBlockHash(env.db, root.Hash(), confirmed.Hash())
 }
 
 func (env *testEnv) setRootTip(root *qkctypes.RootBlock) {
@@ -196,6 +196,16 @@ func (env *testEnv) insert(block *types.Block) {
 	}
 }
 
+// reopenChain replaces a stopped blockchain while keeping the shard's root store.
+func (env *testEnv) reopenChain() {
+	env.t.Helper()
+	chain, err := core.NewBlockChain(env.db, nil, env.engine, nil)
+	if err != nil {
+		env.t.Fatalf("reopen blockchain: %v", err)
+	}
+	env.chain, env.sc.chain = chain, chain
+}
+
 func (env *testEnv) checkHead(want *types.Block) {
 	env.t.Helper()
 	if head := env.chain.CurrentBlock(); head.Hash() != want.Hash() {
@@ -210,18 +220,164 @@ func (env *testEnv) checkHead(want *types.Block) {
 //
 //   - r0, r1, ... are root blocks, and * marks the root tip. r1b is another
 //     root block at the height of r1.
-//   - g is the shard genesis. The other shard blocks are named by fork and
-//     height: b2 is the block of fork b at height 2, b[1] in the code.
+//   - g is the shard genesis, with an empty previous-root hash. Other blocks
+//     are named by fork and height: b2 is fork b at height 2, b[1] in the code.
 //   - x[r] is a shard block x referencing the root block r.
 //   - A dotted arrow from a root block down to a shard block means the root
 //     chain confirms the shard chain up to that block.
+
+// TestShardChainInitGenesis bootstraps from a root that is not in the local
+// root store. G0 has an empty previous-root hash; R0 commits to G0 afterwards.
+// Only the local genesis is compared: the remote header's height/hash are left
+// to that shard. Bootstrap must support the first shard and root imports.
+//
+//	shard genesis G0[empty] --> hash(G0) --> R0 body commitment --> hash(R0)
+//	first shard block A1[R0] extends G0 without a circular hash dependency.
+func TestShardChainInitGenesis(t *testing.T) {
+	env := newTestEnv(t)
+	rootDB := rawdb.NewMemoryDatabase()
+	t.Cleanup(func() { rootDB.Close() })
+	remote := makeShardHeaders(1, 99, env.rootGenesis)[0]
+	root := qkctypes.NewRootBlock(env.rootGenesis.Header(), qkctypes.ShardBlockHeaders{remote, env.genesis.Header()}, nil)
+	env.sc = NewShardChain(rootDB, env.chain)
+	if err := env.sc.Init(root); err != nil {
+		t.Fatalf("bootstrap genesis: %v", err)
+	}
+	stored := qkcrawdb.ReadRootBlock(rootDB, root.Hash())
+	if stored == nil || len(stored.ShardBlockHeaders()) != 2 {
+		t.Fatal("Init did not persist the complete genesis root")
+	}
+	if hash := qkcrawdb.ReadLastConfirmedBlockHash(rootDB, root.Hash()); hash != env.genesis.Hash() {
+		t.Fatalf("genesis confirmation mismatch: %x", hash)
+	}
+	env.checkRootTip(root)
+	env.checkHead(env.genesis)
+	if err := env.sc.Init(root); !errors.Is(err, ErrRootChainAlreadyInitialized) {
+		t.Fatalf("repeat genesis bootstrap: %v", err)
+	}
+
+	// The first block can see R0 even though its parent G0 sees EmptyHash.
+	a1 := env.makeBlocks(env.genesis, 1, root, 1)[0]
+	env.insert(a1)
+	r1 := newRoot(root, 1, a1.Header())
+	env.insertRoot(r1, true)
+	if hash := qkcrawdb.ReadLastConfirmedBlockHash(rootDB, r1.Hash()); hash != a1.Hash() {
+		t.Fatalf("first root confirmation mismatch: %x", hash)
+	}
+	env.checkRootTip(r1)
+	env.checkHead(a1)
+}
+
+// TestShardChainInitGenesisValidation rejects malformed local genesis entries
+// before storing any root data or publishing the root tip.
+// All roots have a correct body commitment except the explicit commitment case.
+func TestShardChainInitGenesisValidation(t *testing.T) {
+	env := newTestEnv(t)
+	rootDB := rawdb.NewMemoryDatabase()
+	t.Cleanup(func() { rootDB.Close() })
+	env.sc = NewShardChain(rootDB, env.chain)
+	for _, name := range []string{"missing local", "duplicate local", "non-genesis local", "hash mismatch", "nonempty previous root", "body commitment", "root parent"} {
+		t.Run(name, func(t *testing.T) {
+			header := env.genesis.Header()
+			headers := qkctypes.ShardBlockHeaders{header}
+			rootHeader := env.rootGenesis.Header()
+			switch name {
+			case "missing local":
+				headers = makeShardHeaders(1, 0, env.rootGenesis)
+			case "duplicate local":
+				headers = append(headers, header)
+			case "non-genesis local":
+				header.Number = big.NewInt(1)
+			case "hash mismatch":
+				header.Coinbase = common.Address{1}
+			case "nonempty previous root":
+				header.Extra = qkcExtra(env.rootGenesis)
+			case "root parent":
+				rootHeader.ParentHash = common.Hash{1}
+			}
+			root := qkctypes.NewRootBlock(rootHeader, headers, nil)
+			if name == "body commitment" {
+				root = root.WithBody(nil, nil)
+			}
+			if err := env.sc.Init(root); !errors.Is(err, ErrInvalidRootBlock) {
+				t.Fatalf("invalid genesis root: %v", err)
+			}
+			if env.sc.rootTip != nil {
+				t.Fatal("invalid genesis published initialization state")
+			}
+			if qkcrawdb.HasRootBlock(rootDB, root.Hash()) || qkcrawdb.ReadLastConfirmedBlockHash(rootDB, root.Hash()) != (common.Hash{}) {
+				t.Fatal("invalid genesis persisted root data")
+			}
+			if env.chain.CurrentBlock().Hash() != env.genesis.Hash() {
+				t.Fatal("invalid genesis changed the shard head")
+			}
+		})
+	}
+	// Validation failures leave the same instance available for a valid Init.
+	if err := env.sc.Init(env.rootGenesis); err != nil {
+		t.Fatalf("retry with valid genesis: %v", err)
+	}
+}
+
+// TestShardChainInitGenesisRetry checks both sides of the storage/head boundary.
+// Root and confirmation commit together. A failed head switch may leave both
+// stored, but rootTip must remain unset until the head switch succeeds.
+func TestShardChainInitGenesisRetry(t *testing.T) {
+	for _, name := range []string{"root batch", "head switch", "stopped genesis"} {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t)
+			stopChain := name != "root batch"
+			head := env.genesis
+			if name != "stopped genesis" {
+				head = env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
+				env.insert(head)
+			}
+			rootDB := rawdb.NewMemoryDatabase()
+			t.Cleanup(func() { rootDB.Close() })
+			writeErr := errors.New("genesis batch failed")
+			store := &failingRootDB{KeyValueStore: rootDB, err: writeErr}
+			if !stopChain {
+				store.failAt = 1
+			} else {
+				env.chain.Stop()
+			}
+			env.sc = NewShardChain(store, env.chain)
+			err := env.sc.Init(env.rootGenesis)
+			if err == nil || (!stopChain && !errors.Is(err, writeErr)) {
+				t.Fatalf("expected initialization failure: %v", err)
+			}
+			if env.sc.rootTip != nil {
+				t.Fatal("failed genesis initialization published state")
+			}
+			if qkcrawdb.HasRootBlock(rootDB, env.rootGenesis.Hash()) != stopChain {
+				t.Fatal("unexpected root persistence after initialization failure")
+			}
+			want := common.Hash{}
+			if stopChain {
+				want = env.genesis.Hash()
+			}
+			if hash := qkcrawdb.ReadLastConfirmedBlockHash(rootDB, env.rootGenesis.Hash()); hash != want {
+				t.Fatalf("partial genesis checkpoint: %x, want %x", hash, want)
+			}
+			env.checkHead(head)
+			if stopChain {
+				env.reopenChain()
+			}
+			if err := env.sc.Init(env.rootGenesis); err != nil {
+				t.Fatalf("retry genesis initialization: %v", err)
+			}
+			env.checkRootTip(env.rootGenesis)
+			env.checkHead(env.genesis)
+		})
+	}
+}
 
 // TestShardChainInitHead checks that initialization restores exactly the stored
 // confirmation, rather than retaining compatible but unconfirmed descendants.
 //
 //	root chain    r0 <-- r1*
 //
-//	shard chain   g[r0] <-- a1[r0] <-- a2[r0]   previous head
+//	shard chain   g     <-- a1[r0] <-- a2[r0]   previous head
 //	              ^
 //	              +-------- b1[r0]
 //
@@ -234,11 +390,12 @@ func (env *testEnv) checkHead(want *types.Block) {
 //     but unconfirmed descendant a2.
 //   - b1, a noncanonical fork: switch from fork a to fork b, making b1 the head.
 //   - a2, the current head: keep a2; only initialize the root tip to r1.
-//   - No confirmed block: rewind from a2 to the existing shard genesis g.
+//   - g, an explicit genesis confirmation: rewind from a2 to g. A missing
+//     confirmation is rejected, as covered by TestShardChainInitMissingConfirmation.
 //
-// After each recovery, both shard and root imports must work.
+// Import after recovery is covered by TestShardChainInitMissingConfirmation.
 func TestShardChainInitHead(t *testing.T) {
-	for _, target := range []string{"canonical confirmation", "fork confirmation", "current head", "no confirmation"} {
+	for _, target := range []string{"canonical confirmation", "fork confirmation", "current head", "genesis confirmation"} {
 		t.Run(target, func(t *testing.T) {
 			env := newTestEnv(t)
 			a := env.makeBlocks(env.genesis, 2, env.rootGenesis, 1)
@@ -252,11 +409,13 @@ func TestShardChainInitHead(t *testing.T) {
 			var headers []*types.Header
 			switch target {
 			case "canonical confirmation":
-				confirmed, headers = a[0], []*types.Header{env.genesis.Header(), a[0].Header()}
+				confirmed, headers = a[0], []*types.Header{a[0].Header()}
 			case "fork confirmation":
-				confirmed, headers = b1, []*types.Header{env.genesis.Header(), b1.Header()}
+				confirmed, headers = b1, []*types.Header{b1.Header()}
 			case "current head":
-				confirmed, headers = a[1], []*types.Header{env.genesis.Header(), a[0].Header(), a[1].Header()}
+				confirmed, headers = a[1], []*types.Header{a[0].Header(), a[1].Header()}
+			case "genesis confirmation":
+				confirmed = env.genesis
 			}
 			root := newRoot(env.rootGenesis, 1, headers...)
 			env.addRoot(root, confirmed)
@@ -268,32 +427,14 @@ func TestShardChainInitHead(t *testing.T) {
 			if err := env.sc.Init(input); err != nil {
 				t.Fatalf("initialize: %v", err)
 			}
-			head := confirmed
-			if head == nil {
-				head = env.genesis
-			}
-			env.checkHead(head)
+			env.checkHead(confirmed)
 			env.checkRootTip(root)
-
-			// Init is one-shot even when the master sends the same root again.
-			if err := env.sc.Init(root); !errors.Is(err, ErrRootChainAlreadyInitialized) {
-				t.Fatalf("repeat initialization: %v", err)
-			}
-			env.checkHead(head)
-			env.checkRootTip(root)
-
-			// A successful initialization enables both shard and root imports.
-			next := env.makeBlocks(head, 1, root, 3)[0]
-			env.insert(next)
-			env.insertRoot(newRoot(root, 1), true)
-			env.checkHead(next)
 		})
 	}
 }
 
-// TestShardChainInitUnknownRoot checks that an unpersisted master checkpoint
-// does not initialize the chain or get stored implicitly. Failed initialization
-// must keep both import paths gated, and the same instance can retry after sync.
+// TestShardChainInitUnknownRoot rejects nil or unknown checkpoints without
+// storing the input or changing either head. Retry is covered separately below.
 func TestShardChainInitUnknownRoot(t *testing.T) {
 	for _, nilInput := range []bool{false, true} {
 		name := "unknown"
@@ -315,24 +456,51 @@ func TestShardChainInitUnknownRoot(t *testing.T) {
 				t.Fatal("unknown checkpoint initialized the chain or was persisted")
 			}
 			env.checkHead(env.genesis)
-			next := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
-			if err := env.sc.InsertShardBlock(next); !errors.Is(err, ErrRootChainUninitialized) {
-				t.Fatalf("shard import after failed initialization: %v", err)
-			}
-			if switched, err := env.sc.InsertRootBlock(root); switched || !errors.Is(err, ErrRootChainUninitialized) {
-				t.Fatalf("root import after failed initialization: switched %v, error %v", switched, err)
-			}
-
-			// A failed Init must not call BlockChain.Stop: after data arrives,
-			// the same chain can initialize and execute a new block.
-			env.addRoot(root, nil)
-			if err := env.sc.Init(root); err != nil {
-				t.Fatalf("retry initialization: %v", err)
-			}
-			env.checkRootTip(root)
-			env.insert(next)
 		})
 	}
+}
+
+// TestShardChainInitMissingConfirmation checks that a stored root without a
+// confirmation is not a usable checkpoint. Init must not silently rewind to
+// genesis, persist a fabricated confirmation, or enable either import path.
+func TestShardChainInitMissingConfirmation(t *testing.T) {
+	env := newTestEnv(t)
+	blocks := env.makeBlocks(env.genesis, 2, env.rootGenesis, 1)
+	for _, block := range blocks {
+		env.insert(block)
+	}
+	root := newRoot(env.rootGenesis, 1, blocks[0].Header())
+	qkcrawdb.WriteRootBlock(env.db, root) // The confirmation record is missing.
+	env.sc = NewShardChain(env.db, env.chain)
+	if err := env.sc.Init(root); !errors.Is(err, ErrInvalidRootBlock) || errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardStateInconsistency) {
+		t.Fatalf("missing confirmation: %v", err)
+	}
+	if env.sc.rootTip != nil {
+		t.Fatal("missing confirmation initialized the chain")
+	}
+	env.checkHead(blocks[1])
+	if hash := qkcrawdb.ReadLastConfirmedBlockHash(env.db, root.Hash()); hash != (common.Hash{}) {
+		t.Fatalf("Init fabricated a confirmation: %x", hash)
+	}
+	next := env.makeBlocks(blocks[0], 1, root, 2)[0]
+	if err := env.sc.InsertShardBlock(next); !errors.Is(err, ErrRootChainUninitialized) {
+		t.Fatalf("shard import after failed initialization: %v", err)
+	}
+	if switched, err := env.sc.InsertRootBlock(newRoot(root, 1)); switched || !errors.Is(err, ErrRootChainUninitialized) {
+		t.Fatalf("root import after failed initialization: switched %v, error %v", switched, err)
+	}
+
+	// The sync/bootstrap layer supplies the real checkpoint. The same shard
+	// instance can retry and must recover to a1, not to genesis or the old a2.
+	qkcrawdb.WriteLastConfirmedBlockHash(env.db, root.Hash(), blocks[0].Hash())
+	if err := env.sc.Init(root); err != nil {
+		t.Fatalf("retry initialization: %v", err)
+	}
+	env.checkHead(blocks[0])
+	env.checkRootTip(root)
+	env.insert(next)
+	env.insertRoot(newRoot(root, 1), true)
+	env.checkHead(next)
 }
 
 // TestShardChainInitMissingConfirmedBlock checks partial local recovery: a root
@@ -347,7 +515,7 @@ func TestShardChainInitMissingConfirmedBlock(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := newTestEnv(t)
 			block := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
-			root := newRoot(env.rootGenesis, 1, env.genesis.Header(), block.Header())
+			root := newRoot(env.rootGenesis, 1, block.Header())
 			env.addRoot(root, block)
 			if headerOnly {
 				rawdb.WriteHeader(env.db, block.Header())
@@ -358,7 +526,7 @@ func TestShardChainInitMissingConfirmedBlock(t *testing.T) {
 				want = consensus.ErrUnknownAncestor
 			}
 			err := env.sc.Init(root)
-			if !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, want) {
+			if !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, want) || errors.Is(err, ErrInvalidRootBlock) {
 				t.Fatalf("missing confirmed data: have %v, want %v", err, want)
 			}
 			if env.sc.rootTip != nil {
@@ -387,8 +555,8 @@ func TestShardChainInitHeadFailure(t *testing.T) {
 	env := newTestEnv(t)
 	block := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
 	env.insert(block)
-	root := newRoot(env.rootGenesis, 1) // No confirmation: recovery must rewind to g.
-	env.addRoot(root, nil)
+	root := newRoot(env.rootGenesis, 1) // The stored genesis confirmation rewinds to g.
+	env.addRoot(root, env.genesis)
 	env.sc = NewShardChain(env.db, env.chain)
 	env.chain.Stop()
 	if err := env.sc.Init(root); err == nil {
@@ -399,11 +567,7 @@ func TestShardChainInitHeadFailure(t *testing.T) {
 	}
 	env.checkHead(block)
 
-	chain, err := core.NewBlockChain(env.db, nil, env.engine, nil)
-	if err != nil {
-		t.Fatalf("reopen blockchain: %v", err)
-	}
-	env.chain, env.sc.chain = chain, chain
+	env.reopenChain()
 	if err := env.sc.Init(root); err != nil {
 		t.Fatalf("retry initialization: %v", err)
 	}
@@ -416,8 +580,7 @@ func TestShardChainInitHeadFailure(t *testing.T) {
 func TestShardChainInitConcurrent(t *testing.T) {
 	env := newTestEnv(t)
 	env.sc = NewShardChain(env.db, env.chain)
-	root := newRoot(env.rootGenesis, 1)
-	env.addRoot(root, nil)
+	root := env.rootGenesis
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	for range 2 {
@@ -450,7 +613,7 @@ func TestShardChainInitConcurrent(t *testing.T) {
 //
 //	root chain    r0*
 //
-//	shard chain   g[r0] <-- a1[r0] <-- a2[r0] <-- a3[r0]
+//	shard chain   g     <-- a1[r0] <-- a2[r0] <-- a3[r0]
 //
 //	a1, a2 and a3 become the head in turn. Inserting a1 again keeps a3.
 func TestInsertShardBlockExtendsHead(t *testing.T) {
@@ -470,7 +633,7 @@ func TestInsertShardBlockExtendsHead(t *testing.T) {
 //
 //	root chain    r0*
 //
-//	shard chain   g[r0] <-- (a1[r0]) <-- a2[r0]
+//	shard chain   g     <-- (a1[r0]) <-- a2[r0]
 //
 //	a1 is not inserted, so inserting a2 fails.
 func TestInsertShardBlockUnknownParent(t *testing.T) {
@@ -486,7 +649,7 @@ func TestInsertShardBlockUnknownParent(t *testing.T) {
 //
 //	root chain    r0              no root tip
 //
-//	shard chain   g[r0] <-- a1[r0]
+//	shard chain   g     <-- a1[r0]
 //
 //	Inserting a1 fails.
 func TestInsertShardBlockRootChainUninitialized(t *testing.T) {
@@ -507,7 +670,7 @@ func TestInsertShardBlockRootChainUninitialized(t *testing.T) {
 //	root chain    r0 <-- r1 <-- r2* <-- r3
 //	                            :       :
 //	                            v       v
-//	shard chain   g[r0] <------ a1[r1]  ?
+//	shard chain   g     <------ a1[r1]  ?
 //
 //	r2 confirms a1, the head. r3 confirms ?, a block missing from the shard
 //	chain.
@@ -519,8 +682,8 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 	r2 := newRoot(r1, 1)
 	r3 := newRoot(r2, 1)
 	a1 := env.makeBlocks(env.genesis, 1, r1, 1)[0]
-	env.addRoot(r1, nil)
-	env.addRoot(r1b, nil)
+	env.addRoot(r1, env.genesis)
+	env.addRoot(r1b, env.genesis)
 	env.addRoot(r2, a1)
 	env.setRootTip(r2)
 	env.insert(a1)
@@ -537,29 +700,29 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 		inconsistent      bool
 		shardInconsistent bool
 	}{
-		// g[r0] <-- a1[r1] <-- x[u]
+		// g <-- a1[r1] <-- x[u]
 		//
 		// u, a root block on top of r1, is not stored.
 		{"unknown root", env.makeBlocks(a1, 1, unknown, 1)[0], ErrUnknownRootBlock, false, false},
 
-		// g[r0] <-- a1[r1] <-- x[r0]
+		// g <-- a1[r1] <-- x[r0]
 		//
 		// r0 is older than r1.
 		{"older root", env.makeBlocks(a1, 1, r0, 1)[0], ErrRootNotDescendant, false, false},
 
-		// g[r0] <-- a1[r1] <-- x[r1b]
+		// g <-- a1[r1] <-- x[r1b]
 		//
 		// r1b is on another root chain than r1.
 		{"forked root", env.makeBlocks(a1, 1, r1b, 1)[0], ErrRootNotDescendant, false, false},
 
-		// g[r0] <-- a1[r1]
+		// g <-- a1[r1]
 		// ^
 		// +-------- x[r2]
 		//
 		// r2 extends r0, but confirms a1, which x does not extend.
 		{"not extending confirmed", env.makeBlocks(env.genesis, 1, r2, 2)[0], ErrNotConfirmedDescendant, false, false},
 
-		// g[r0] <-- a1[r1] <-- x[r3]
+		// g <-- a1[r1] <-- x[r3]
 		//
 		// r3 extends r1, but confirms ?, which is missing from the shard chain.
 		{"unknown confirmed", env.makeBlocks(a1, 1, r3, 1)[0], ErrUnknownConfirmedBlock, false, true},
@@ -569,10 +732,10 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 		if !errors.Is(err, test.err) {
 			t.Errorf("%s: error mismatch: have %v, want %v", test.name, err, test.err)
 		}
-		if have := errors.Is(err, ErrClusterInconsistency); have != test.inconsistent {
+		if have := errors.Is(err, ErrClusterStateInconsistency); have != test.inconsistent {
 			t.Errorf("%s: cluster inconsistency mismatch: have %v, want %v", test.name, have, test.inconsistent)
 		}
-		if have := errors.Is(err, ErrShardInconsistency); have != test.shardInconsistent {
+		if have := errors.Is(err, ErrShardStateInconsistency); have != test.shardInconsistent {
 			t.Errorf("%s: shard inconsistency mismatch: have %v, want %v", test.name, have, test.shardInconsistent)
 		}
 		if env.chain.HasBlock(test.block.Hash(), test.block.NumberU64()) {
@@ -581,7 +744,7 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 	}
 	env.checkHead(a1)
 
-	// g[r0] <-- a1[r1] <-- a2[r2]
+	// g <-- a1[r1] <-- a2[r2]
 	//
 	// a2 references r2, which extends r1, and a2 extends a1, which r2 confirms.
 	// It is valid, and becomes the head.
@@ -598,15 +761,15 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 //	              v
 //	root chain    r0 <-- r1*
 //
-//	shard chain   g[r0] <-- a1[r1b]
+//	shard chain   g     <-- a1[r1b]
 //
 //	a1 is valid, as r1b extends r0, so it is inserted. But r1b is not on the
 //	chain of the root tip r1, so the head stays g.
 func TestShouldUpdateHeadRootNotCanonical(t *testing.T) {
 	env := newTestEnv(t)
 	r1, r1b := newRoot(env.rootGenesis, 1), newRoot(env.rootGenesis, 2)
-	env.addRoot(r1, nil)
-	env.addRoot(r1b, nil)
+	env.addRoot(r1, env.genesis)
+	env.addRoot(r1b, env.genesis)
 	env.setRootTip(r1)
 
 	block := env.makeBlocks(env.genesis, 1, r1b, 1)[0]
@@ -622,7 +785,7 @@ func TestShouldUpdateHeadRootNotCanonical(t *testing.T) {
 //
 //	root chain    r0*
 //
-//	shard chain   g[r0] <-- a1[r0]
+//	shard chain   g     <-- a1[r0]
 //	              ^
 //	              +-------- b1[r0] <-- b2[r0]
 //
@@ -650,7 +813,7 @@ func TestShouldUpdateHeadLongerFork(t *testing.T) {
 //
 //	root chain    r0 <-- r1*
 //
-//	shard chain   g[r0] <-- a1[r0]
+//	shard chain   g     <-- a1[r0]
 //	              ^
 //	              +-------- b1[r1]
 //
@@ -659,7 +822,7 @@ func TestShouldUpdateHeadLongerFork(t *testing.T) {
 func TestShouldUpdateHeadLaterRoot(t *testing.T) {
 	env := newTestEnv(t)
 	r1 := newRoot(env.rootGenesis, 1)
-	env.addRoot(r1, nil)
+	env.addRoot(r1, env.genesis)
 	env.setRootTip(r1)
 
 	a := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)
@@ -678,7 +841,7 @@ func TestShouldUpdateHeadLaterRoot(t *testing.T) {
 //	root chain    r0 <----- r1*
 //	                        :
 //	                        v
-//	shard chain   g[r0] <-- a1[r0]
+//	shard chain   g     <-- a1[r0]
 //	              ^
 //	              +-------- b1[r0] <-- b2[r0] <-- b3[r0]
 //
@@ -707,16 +870,16 @@ func TestShouldUpdateHeadConfirmedBarrier(t *testing.T) {
 //	root chain    r0 <----- r1 <------ r2 <-- r3*
 //	                        :          :
 //	                        v          v
-//	shard chain   g[r0] <-- a1[r0] <-- a2[r1] <-- a3[r1]
+//	shard chain   g     <-- a1[r0] <-- a2[r1] <-- a3[r1]
 //
-//	r1 confirms g and a1, r2 confirms a2, and r3 nothing more, so its last
+//	r1 confirms a1, r2 confirms a2, and r3 adds no local headers, so its last
 //	confirmed block is a2 too. Inserting r1 again changes nothing.
 func TestInsertRootBlockConfirms(t *testing.T) {
 	env := newTestEnv(t)
 	a := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)
 	env.insert(a[0])
 
-	r1 := newRoot(env.rootGenesis, 1, env.genesis.Header(), a[0].Header())
+	r1 := newRoot(env.rootGenesis, 1, a[0].Header())
 	env.insertRoot(r1, true)
 	env.checkRootTip(r1)
 	env.checkLastConfirmed(r1, a[0])
@@ -757,10 +920,13 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 	r1, r1b := newRoot(env.rootGenesis, 1), newRoot(env.rootGenesis, 2)
 	env.insertRoot(r1, true)
 	env.checkRootTip(r1)
+	env.checkLastConfirmed(r1, env.genesis)
 
-	// Same total difficulty, the root tip stays.
+	// Same total difficulty, the root tip stays. An empty body still stores
+	// the inherited confirmation, including for a root on another fork.
 	env.insertRoot(r1b, false)
 	env.checkRootTip(r1)
+	env.checkLastConfirmed(r1b, env.genesis)
 	if !qkcrawdb.HasRootBlock(env.db, r1b.Hash()) {
 		t.Fatal("root block not stored")
 	}
@@ -769,6 +935,7 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 	r1c := env.rootGenesis.Header().CreateBlockToAppend(nil, uint256.NewInt(2), nil, &seed, nil)
 	env.insertRoot(r1c, true)
 	env.checkRootTip(r1c)
+	env.checkLastConfirmed(r1c, env.genesis)
 	env.checkHead(env.genesis)
 }
 
@@ -782,11 +949,11 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 //	root chain    r0 <----- r1*
 //	                        :
 //	                        v
-//	shard chain   g[r0] <-- a1[r0] <-- a2[r0] <-- a3[r0]
+//	shard chain   g     <-- a1[r0] <-- a2[r0] <-- a3[r0]
 //	                        ^
 //	                        +-------- f2[r1b]
 //
-//	r1 confirms g and a1. The diagram shows only local shard 0. Separately, the
+//	r1 confirms a1. The diagram shows only local shard 0. Separately, the
 //	test passes remote headers to validateRootBlock to check cross-shard deposits.
 //	The target is shard 0, shard 1 is in its network config, and r0 is the root
 //	referenced by the shard genesis. Under these conditions:
@@ -803,7 +970,7 @@ func TestInsertRootBlockValidation(t *testing.T) {
 	for _, block := range blocks {
 		env.insert(block)
 	}
-	r1, r1b := newRoot(r0, 1, env.genesis.Header(), blocks[0].Header()), newRoot(r0, 2)
+	r1, r1b := newRoot(r0, 1, blocks[0].Header()), newRoot(r0, 2)
 	env.insertRoot(r1, true)
 	env.insertRoot(r1b, false)
 	aForkB2 := env.makeBlocks(blocks[0], 1, r1b, 2)[0]
@@ -819,7 +986,7 @@ func TestInsertRootBlockValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.sc.validateXShardDeposits(b2, b2Extra, r0.Header(), env.config.QuarkChain); err != nil {
+	if err := env.sc.validateXShardDeposits(b2, b2Extra, env.config.QuarkChain); err != nil {
 		t.Fatalf("block referencing the shard genesis root should not require deposits: %v", err)
 	}
 	env.chain.Config().QuarkChain.MaxBlocksPerRootBlock = 1
@@ -859,13 +1026,13 @@ func TestInsertRootBlockValidation(t *testing.T) {
 		if !errors.Is(err, test.err) {
 			t.Errorf("%s: error mismatch: have %v, want %v", test.name, err, test.err)
 		}
-		if have := errors.Is(err, ErrClusterInconsistency); have != test.inconsistent {
+		if have := errors.Is(err, ErrClusterStateInconsistency); have != test.inconsistent {
 			t.Errorf("%s: cluster inconsistency mismatch: have %v, want %v", test.name, have, test.inconsistent)
 		}
-		if test.inconsistent && err != nil && !strings.Contains(err.Error(), "cluster inconsistency") {
+		if test.inconsistent && err != nil && !strings.Contains(err.Error(), ErrClusterStateInconsistency.Error()) {
 			t.Errorf("%s: cluster inconsistency missing from log message: %v", test.name, err)
 		}
-		if errors.Is(err, ErrShardInconsistency) {
+		if errors.Is(err, ErrShardStateInconsistency) {
 			t.Errorf("%s: input validation error incorrectly marked as shard inconsistency: %v", test.name, err)
 		}
 		if qkcrawdb.HasRootBlock(env.db, test.root.Hash()) {
@@ -889,12 +1056,12 @@ func TestInsertRootBlockValidation(t *testing.T) {
 func TestInsertRootBlockMissingLocalBlock(t *testing.T) {
 	env := newTestEnv(t)
 	missing := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0]
-	root := newRoot(env.rootGenesis, 1, env.genesis.Header(), missing.Header())
+	root := newRoot(env.rootGenesis, 1, missing.Header())
 	switched, err := env.sc.InsertRootBlock(root)
-	if switched || !errors.Is(err, ErrClusterInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardInconsistency) {
+	if switched || !errors.Is(err, ErrClusterStateInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardStateInconsistency) {
 		t.Fatalf("missing confirmed local block: switched %v, error %v", switched, err)
 	}
-	if !strings.Contains(err.Error(), "cluster inconsistency") {
+	if !strings.Contains(err.Error(), ErrClusterStateInconsistency.Error()) {
 		t.Fatalf("cluster inconsistency missing from log message: %v", err)
 	}
 	if qkcrawdb.HasRootBlock(env.db, root.Hash()) {
@@ -911,11 +1078,11 @@ func TestInsertRootBlockMissingLocalBlock(t *testing.T) {
 //	root chain    r0 <----- r1 <------ r2*
 //	                        :          :
 //	                        v          v
-//	shard chain   g[r0] <-- a1[r0] <-- b2[r0] <-- b3[r0]
+//	shard chain   g     <-- a1[r0] <-- b2[r0] <-- b3[r0]
 //	                        ^
 //	                        +-------- a2[r0] <-- a3[r0]
 //
-//	a3 is the head. r1 confirms g and a1, and keeps it. r2 confirms b2, so
+//	a3 is the head. r1 confirms a1 and keeps a3. r2 confirms b2, so
 //	the head moves to b2, not to b3.
 func TestInsertRootBlockConfirmsFork(t *testing.T) {
 	env := newTestEnv(t)
@@ -926,7 +1093,7 @@ func TestInsertRootBlockConfirmsFork(t *testing.T) {
 	}
 	env.checkHead(a[2])
 
-	r1 := newRoot(env.rootGenesis, 1, env.genesis.Header(), a[0].Header())
+	r1 := newRoot(env.rootGenesis, 1, a[0].Header())
 	env.insertRoot(r1, true)
 	env.checkHead(a[2])
 
@@ -949,26 +1116,71 @@ func TestInsertShardBlockForkChoiceError(t *testing.T) {
 	for _, block := range blocks {
 		env.insert(block)
 	}
-	root := newRoot(env.rootGenesis, 1, env.genesis.Header())
+	root := newRoot(env.rootGenesis, 1)
 	env.insertRoot(root, true)
 	qkcrawdb.WriteLastConfirmedBlockHash(env.db, root.Hash(), common.Hash{0xff})
 
 	fork := env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0]
 	err := env.sc.InsertShardBlock(fork)
-	if !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterInconsistency) {
+	if !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterStateInconsistency) {
 		t.Fatalf("missing fork-choice confirmation error mismatch: %v", err)
 	}
-	if !strings.Contains(err.Error(), "shard inconsistency") {
+	if !strings.Contains(err.Error(), ErrShardStateInconsistency.Error()) {
 		t.Fatalf("shard inconsistency missing from log message: %v", err)
 	}
 	if env.chain.HasBlock(fork.Hash(), fork.NumberU64()) {
 		t.Fatal("block inserted despite fork-choice inconsistency")
 	}
-	if _, err := env.sc.InsertRootBlock(root); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterInconsistency) {
+	if _, err := env.sc.InsertRootBlock(root); !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterStateInconsistency) {
 		t.Fatalf("missing known-root confirmation error mismatch: %v", err)
 	}
 	env.checkRootTip(root)
 	env.checkHead(blocks[1])
+}
+
+// TestShardChainMissingConfirmation checks the stored-data contract after
+// initialization. A root without a confirmation is invalid in every read
+// path; it is distinct from a recorded confirmation whose local block is missing.
+func TestShardChainMissingConfirmation(t *testing.T) {
+	for _, flow := range []string{"root reference", "fork choice", "root parent", "known root"} {
+		t.Run(flow, func(t *testing.T) {
+			env := newTestEnv(t)
+			blocks := env.makeBlocks(env.genesis, 2, env.rootGenesis, 1)
+			for _, block := range blocks {
+				env.insert(block)
+			}
+			root := newRoot(env.rootGenesis, 1)
+			env.insertRoot(root, true)
+			qkcrawdb.WriteLastConfirmedBlockHash(env.db, root.Hash(), common.Hash{})
+
+			var err error
+			switch flow {
+			case "root reference", "fork choice":
+				parent, prevRoot := blocks[1], root
+				if flow == "fork choice" {
+					parent, prevRoot = env.genesis, env.rootGenesis
+				}
+				block := env.makeBlocks(parent, 1, prevRoot, 2)[0]
+				err = env.sc.InsertShardBlock(block)
+				if env.chain.HasBlock(block.Hash(), block.NumberU64()) {
+					t.Fatal("block imported despite missing confirmation")
+				}
+			case "root parent":
+				nextRoot := newRoot(root, 1)
+				_, err = env.sc.InsertRootBlock(nextRoot)
+				if qkcrawdb.HasRootBlock(env.db, nextRoot.Hash()) {
+					t.Fatal("root stored despite missing parent confirmation")
+				}
+			case "known root":
+				_, err = env.sc.InsertRootBlock(root)
+			}
+			if !errors.Is(err, ErrInvalidRootBlock) || errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardStateInconsistency) || errors.Is(err, ErrClusterStateInconsistency) {
+				t.Fatalf("missing stored confirmation: %v", err)
+			}
+			env.checkRootTip(root)
+			env.checkHead(blocks[1])
+		})
+	}
 }
 
 // Missing stored references are shard inconsistencies, not pyquarkchain check
@@ -976,7 +1188,7 @@ func TestInsertShardBlockForkChoiceError(t *testing.T) {
 func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 	env := newTestEnv(t)
 	root := newRoot(env.rootGenesis, 1)
-	env.addRoot(root, nil)
+	env.addRoot(root, env.genesis)
 	parent := env.makeBlocks(env.genesis, 1, root, 1)[0]
 	env.insert(parent)
 
@@ -984,9 +1196,10 @@ func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 	rootDB := rawdb.NewMemoryDatabase()
 	t.Cleanup(func() { rootDB.Close() })
 	qkcrawdb.WriteRootBlock(rootDB, env.rootGenesis)
+	qkcrawdb.WriteLastConfirmedBlockHash(rootDB, env.rootGenesis.Hash(), env.genesis.Hash())
 	env.sc.db = rootDB
 	block := env.makeBlocks(parent, 1, env.rootGenesis, 1)[0]
-	if err := env.sc.InsertShardBlock(block); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterInconsistency) {
+	if err := env.sc.InsertShardBlock(block); !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterStateInconsistency) {
 		t.Fatalf("missing stored parent reference error mismatch: %v", err)
 	}
 	if env.chain.HasBlock(block.Hash(), block.NumberU64()) {
@@ -999,7 +1212,7 @@ func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 func TestInsertShardBlockCurrentRootError(t *testing.T) {
 	env := newTestEnv(t)
 	root := newRoot(env.rootGenesis, 1)
-	env.addRoot(root, nil)
+	env.addRoot(root, env.genesis)
 	env.setRootTip(root)
 	head := env.makeBlocks(env.genesis, 1, root, 1)[0]
 	env.insert(head)
@@ -1007,10 +1220,11 @@ func TestInsertShardBlockCurrentRootError(t *testing.T) {
 	rootDB := rawdb.NewMemoryDatabase()
 	t.Cleanup(func() { rootDB.Close() })
 	qkcrawdb.WriteRootBlock(rootDB, env.rootGenesis)
+	qkcrawdb.WriteLastConfirmedBlockHash(rootDB, env.rootGenesis.Hash(), env.genesis.Hash())
 	env.sc.db = rootDB
 	env.setRootTip(env.rootGenesis)
 	fork := env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0]
-	if err := env.sc.InsertShardBlock(fork); !errors.Is(err, ErrShardInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterInconsistency) {
+	if err := env.sc.InsertShardBlock(fork); !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterStateInconsistency) {
 		t.Fatalf("missing current head root reference error mismatch: %v", err)
 	}
 	if env.chain.HasBlock(fork.Hash(), fork.NumberU64()) {
@@ -1025,7 +1239,7 @@ func TestShardChainMissingAncestry(t *testing.T) {
 		env := newTestEnv(t)
 		parent := newRoot(env.rootGenesis, 1)
 		root := newRoot(parent, 1)
-		env.addRoot(root, nil) // The stored root's parent is missing.
+		env.addRoot(root, env.genesis) // The stored root's parent is missing.
 		if env.sc.isRootDescendant(root.Header(), env.rootGenesis.Header()) {
 			t.Fatal("root reported as descendant despite missing ancestry")
 		}
@@ -1086,7 +1300,7 @@ func TestInsertRootBlockRetry(t *testing.T) {
 			for _, block := range append(a, b...) {
 				env.insert(block)
 			}
-			r1 := newRoot(env.rootGenesis, 1, env.genesis.Header(), a[0].Header())
+			r1 := newRoot(env.rootGenesis, 1, a[0].Header())
 			env.insertRoot(r1, true)
 			r2 := newRoot(r1, 1, b[0].Header())
 
@@ -1141,10 +1355,10 @@ func TestInsertRootBlockRetry(t *testing.T) {
 //	              v              :
 //	root chain    r0 <-- r1      :
 //	                             v
-//	shard chain   g[r0] <------- a1[r1b]
+//	shard chain   g     <------- a1[r1b]
 //
 //	r1 is the root tip, so a1, referencing r1b, does not become the head.
-//	r2b, heavier than r1, confirms g and a1, so the head moves to a1.
+//	r2b, heavier than r1, confirms a1, so the head moves to a1.
 func TestInsertRootBlockConfirmsAboveHead(t *testing.T) {
 	env := newTestEnv(t)
 	r1, r1b := newRoot(env.rootGenesis, 1), newRoot(env.rootGenesis, 2)
@@ -1155,7 +1369,7 @@ func TestInsertRootBlockConfirmsAboveHead(t *testing.T) {
 	env.insert(a[0])
 	env.checkHead(env.genesis)
 
-	r2b := newRoot(r1b, 1, env.genesis.Header(), a[0].Header())
+	r2b := newRoot(r1b, 1, a[0].Header())
 	env.insertRoot(r2b, true)
 	env.checkRootTip(r2b)
 	env.checkHead(a[0])
@@ -1170,9 +1384,9 @@ func TestInsertRootBlockConfirmsAboveHead(t *testing.T) {
 //	root chain    r0 <----- r1 <-- r2 <-- r3*
 //	                        :
 //	                        v
-//	shard chain   g[r0] <-- a1[r0] <-- a2[r1] <-- a3[r2b] <-- a4[r2b]
+//	shard chain   g     <-- a1[r0] <-- a2[r1] <-- a3[r2b] <-- a4[r2b]
 //
-//	r1 confirms g and a1, and so do its descendants. r2b becomes the root
+//	r1 confirms a1 after the genesis baseline, and so do its descendants. r2b becomes the root
 //	tip, and a2 to a4 the head in turn. r2, as heavy as r2b, does not
 //	replace it, but r3 does, so the head moves back from a4 to a2.
 func TestInsertRootBlockRewindsHead(t *testing.T) {
@@ -1180,7 +1394,7 @@ func TestInsertRootBlockRewindsHead(t *testing.T) {
 	a := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)
 	env.insert(a[0])
 
-	r1 := newRoot(env.rootGenesis, 1, env.genesis.Header(), a[0].Header())
+	r1 := newRoot(env.rootGenesis, 1, a[0].Header())
 	r2, r2b := newRoot(r1, 1), newRoot(r1, 2)
 	env.insertRoot(r1, true)
 	env.insertRoot(r2b, true)

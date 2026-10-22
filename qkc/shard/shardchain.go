@@ -33,17 +33,17 @@ import (
 )
 
 var (
-	// ErrClusterInconsistency marks failures of guarantees that other cluster
+	// ErrClusterStateInconsistency marks failures of guarantees that other cluster
 	// components must establish before calling ShardChain. These defensive
 	// checks should never fail here; a failure means an upstream guarantee was
 	// violated. They include pyquarkchain's check assertions and the requirement
 	// that confirmed local blocks be available before importing a root block.
 	// Keep the specific cause wrapped alongside it for diagnosis in logs.
-	ErrClusterInconsistency = errors.New("cluster inconsistency")
+	ErrClusterStateInconsistency = errors.New("cluster state inconsistency")
 
-	// ErrShardInconsistency marks missing or inconsistent local data that was
+	// ErrShardStateInconsistency marks missing or inconsistent local data that was
 	// already validated when stored. Incoming validation errors do not use it.
-	ErrShardInconsistency = errors.New("shard inconsistency")
+	ErrShardStateInconsistency = errors.New("shard state inconsistency")
 
 	// ErrRootChainUninitialized is returned when no root tip is known yet.
 	ErrRootChainUninitialized = errors.New("root chain not initialized")
@@ -63,6 +63,10 @@ var (
 	// ErrNotConfirmedDescendant is returned when a shard block does not extend
 	// the latest shard block confirmed by the root block it references.
 	ErrNotConfirmedDescendant = errors.New("block does not extend the last confirmed block")
+
+	// ErrInvalidRootBlock is returned when a root block has invalid genesis
+	// contents or lacks the required confirmed shard checkpoint.
+	ErrInvalidRootBlock = errors.New("invalid root block")
 
 	// ErrUnknownConfirmedBlock is returned when the root chain confirms a shard
 	// block that is not in the local chain.
@@ -118,27 +122,27 @@ func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
 	return &ShardChain{db: db, chain: chain}
 }
 
-// Init restores the shard from the target root block sent by the master on
-// connection. Only the input hash is used: the root header and last confirmed
-// shard block are read from local storage. The head is reset to that confirmed
-// block, or to the existing shard genesis if nothing has been confirmed, as in
-// pyquarkchain's init_from_root_block.
+// Init bootstraps the shard from the genesis root block sent by the master.
+// R0 carries the genesis headers of the shards; this shard checks exactly one
+// local header, G0, against its existing blockchain genesis. G0.PrevRootBlock
+// must be empty, avoiding a circular dependency between the hashes of R0 and G0.
+// The root and R0 -> G0 confirmation are stored in one batch, then the canonical
+// head and root tip are set. No stored root is required on this bootstrap path.
 //
-// This is a minimal local recovery step. The caller must arrange for the root,
-// confirmation record, shard blocks and execution state to be available first.
-// Master connection handling, missing-data synchronization, genesis creation,
-// and starting mining after success belong to the shard service layer and are
-// not implemented here.
+// A non-genesis target retains the recovery path: its root header and
+// confirmation must already be available locally. Recovery resets the head
+// to the stored confirmation. Master connection handling, missing-data
+// synchronization, genesis creation, and starting mining after success belong
+// to the shard service layer and are not implemented here.
 //
-// Until initialization succeeds, errors leave rootTip nil, so imports remain
-// blocked and Init may be retried.
-// Do not stop the underlying BlockChain here: Stop closes it permanently.
-// The service layer decides whether an unrecoverable error warrants shutdown.
+// Until initialization succeeds, errors keep the shard uninitialized and retryable.
+// A successful root batch may remain stored if the later head switch fails; rootTip is
+// published only after that switch succeeds. Init never permanently stops the blockchain.
 func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Step 1: reject repeat initialization before changing either head.
+	// Step 1: reject repeat initialization.
 	if c.rootTip != nil {
 		return ErrRootChainAlreadyInitialized
 	}
@@ -146,20 +150,89 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		return fmt.Errorf("%w: nil root block", ErrUnknownRootBlock)
 	}
 
-	// Step 2: use the locally stored checkpoint, not the received block body.
-	hash := root.Hash()
-	rootHeader := rawdb.ReadRootBlockHeader(c.db, hash)
-	if rootHeader == nil {
-		return fmt.Errorf("%w: %x", ErrUnknownRootBlock, hash)
+	var rootHeader *qkctypes.RootBlockHeader
+	var confirmed *types.Header
+	if root.Number() == 0 {
+		// Step 2a: validate the master's genesis body against the local genesis.
+		var err error
+		confirmed, err = c.validateGenesisRoot(root)
+		if err != nil {
+			return err
+		}
+		rootHeader = root.Header()
+
+		// Persist the root and its non-nil confirmation atomically. On a later
+		// head failure, the same validated bootstrap can safely be retried.
+		batch := c.db.NewBatch()
+		defer batch.Close()
+		rawdb.WriteRootBlock(batch, root)
+		rawdb.WriteLastConfirmedBlockHash(batch, root.Hash(), confirmed.Hash())
+		if err := batch.Write(); err != nil {
+			return fmt.Errorf("store genesis root %x: %w", root.Hash(), err)
+		}
+	} else {
+		// Step 2b: recover only locally stored checkpoints. The received body
+		// is not a source of recovery data.
+		rootHeader = rawdb.ReadRootBlockHeader(c.db, root.Hash())
+		if rootHeader == nil {
+			return fmt.Errorf("%w: %x", ErrUnknownRootBlock, root.Hash())
+		}
+		var err error
+		confirmed, err = c.lastConfirmed(rootHeader)
+		if err != nil {
+			return err
+		}
 	}
 
-	// Step 3: load the checkpoint's confirmation, then reconcile the shard
-	// head. setHeadForRootTip publishes rootTip only after the switch succeeds.
-	confirmed, err := c.lastConfirmed(rootHeader)
-	if err != nil {
+	// Step 3: restore the confirmed head and publish rootTip after success.
+	if err := c.setHeadForRootTip(rootHeader, confirmed); err != nil {
 		return err
 	}
-	return c.setHeadForRootTip(rootHeader, confirmed)
+	// TODO: wire Init into the shard service's master handshake, data sync and
+	// mining startup. Genesis construction/state setup stays in that service.
+	return nil
+}
+
+// validateGenesisRoot verifies the body commitment and this shard's sole
+// genesis header. Other shards' genesis hashes and heights are their own
+// responsibility; this shard only decodes their shard IDs to skip them.
+func (c *ShardChain) validateGenesisRoot(root *qkctypes.RootBlock) (*types.Header, error) {
+	config := c.chain.Config().QuarkChain
+	if config == nil {
+		return nil, errNotQuarkChain
+	}
+	if root.Number() != 0 || root.ParentHash() != (common.Hash{}) {
+		return nil, fmt.Errorf("%w: expected genesis root", ErrInvalidRootBlock)
+	}
+	if root.ShardHeaderHash() != qkctypes.CalcShardHeaderHash(root.ShardBlockHeaders()) {
+		return nil, fmt.Errorf("%w: genesis body commitment mismatch", ErrInvalidRootBlock)
+	}
+	genesis := c.chain.Genesis().Header()
+	extra, err := genesis.QKCExtra()
+	if err != nil {
+		return nil, fmt.Errorf("%w: genesis: %w", ErrShardStateInconsistency, err)
+	}
+	if extra.ShardID != config.ShardID || extra.PrevRootBlock != (common.Hash{}) {
+		return nil, fmt.Errorf("%w: genesis must have the local shard ID and an empty previous root", ErrShardStateInconsistency)
+	}
+	found := false
+	for _, header := range root.ShardBlockHeaders() {
+		extra, err := header.QKCExtra()
+		if err != nil {
+			return nil, fmt.Errorf("%w: genesis shard header: %w", ErrInvalidRootBlock, err)
+		}
+		if extra.ShardID != config.ShardID {
+			continue
+		}
+		if found || header.Number.Sign() != 0 || header.Hash() != genesis.Hash() {
+			return nil, fmt.Errorf("%w: expected exactly one matching genesis for shard %d", ErrInvalidRootBlock, config.ShardID)
+		}
+		found = true
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: missing genesis for shard %d", ErrInvalidRootBlock, config.ShardID)
+	}
+	return genesis, nil
 }
 
 // InsertShardBlock validates a block against the root chain, imports it, and
@@ -168,6 +241,11 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Genesis is handled by Init.
+	if block.NumberU64() == 0 {
+		return consensus.ErrInvalidNumber
+	}
 
 	// TODO 1. check shard id here 2. check future block in engine.VerifyBlockHeader
 
@@ -249,25 +327,28 @@ func (c *ShardChain) validateRootReference(header, parent *types.Header) (*qkcty
 	if err != nil {
 		return nil, err
 	}
-	parentPrevRoot, err := c.prevRootBlock(parent)
-	if err != nil {
-		return nil, fmt.Errorf("%w: parent: %w", ErrShardInconsistency, err)
+	// Ignore if the parent is G0 (genesis). Only later parents need the ancestry check.
+	if parent.Number.Sign() != 0 {
+		parentPrevRoot, err := c.prevRootBlock(parent)
+		if err != nil {
+			return nil, fmt.Errorf("%w: parent: %w", ErrShardStateInconsistency, err)
+		}
+		// Rule 1. pyquarkchain checks the heights first, which is implied here, as
+		// a root block is never lower than its ancestors.
+		if !c.isRootDescendant(prevRoot, parentPrevRoot) {
+			return nil, fmt.Errorf("%w: root #%d [%x..] after #%d [%x..]", ErrRootNotDescendant,
+				prevRoot.Number, prevRoot.Hash().Bytes()[:4], parentPrevRoot.Number, parentPrevRoot.Hash().Bytes()[:4])
+		}
 	}
-	// Rule 1. pyquarkchain checks the heights first, which is implied here, as
-	// a root block is never lower than its ancestors.
-	if !c.isRootDescendant(prevRoot, parentPrevRoot) {
-		return nil, fmt.Errorf("%w: root #%d [%x..] after #%d [%x..]", ErrRootNotDescendant,
-			prevRoot.Number, prevRoot.Hash().Bytes()[:4], parentPrevRoot.Number, parentPrevRoot.Hash().Bytes()[:4])
-	}
-	// Rule 2, skipped while the root chain confirms no block of the shard yet,
-	// as after genesis.
+	// Rule 2. Initialization establishes a confirmed baseline, and root
+	// imports carry it forward even when they confirm no additional blocks.
 	confirmed, err := c.lastConfirmed(prevRoot)
 	if err != nil {
 		return nil, err
 	}
 	// The block itself is not stored yet, so check its parent instead: the
 	// block extends C if and only if its parent is C or extends it.
-	if confirmed != nil && !c.isShardDescendant(parent, confirmed) {
+	if !c.isShardDescendant(parent, confirmed) {
 		return nil, fmt.Errorf("%w: confirmed #%d [%x..]", ErrNotConfirmedDescendant,
 			confirmed.Number, confirmed.Hash().Bytes()[:4])
 	}
@@ -323,16 +404,15 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 		return true, nil
 	}
 	// Rule 3, as __is_minor_block_linked_to_root_tip: "Determine whether a
-	// minor block is a descendant of a minor block confirmed by root tip". Any
-	// fork qualifies while the root chain confirms no block of the shard yet,
-	// as after genesis. pyquarkchain first checks that the block is higher than
-	// C, which is implied here: the block is new, so it is not C, and it only
-	// extends C if it is higher.
+	// minor block is a descendant of a minor block confirmed by root tip".
+	// Every initialized root has a confirmed baseline. pyquarkchain first
+	// checks that the block is higher than C, which is implied here: the block
+	// is new, so it is not C, and it only extends C if it is higher.
 	confirmed, err := c.lastConfirmed(rootTip)
 	if err != nil {
 		return false, err
 	}
-	if confirmed != nil && !c.isShardDescendant(header, confirmed) {
+	if !c.isShardDescendant(header, confirmed) {
 		return false, nil
 	}
 	// Rule 4. On a full tie, the head stays.
@@ -345,7 +425,7 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 	// block with longer root block for more cross shard tx fee.
 	currentRoot, err := c.prevRootBlock(current)
 	if err != nil {
-		return false, fmt.Errorf("%w: current head: %w", ErrShardInconsistency, err)
+		return false, fmt.Errorf("%w: current head: %w", ErrShardStateInconsistency, err)
 	}
 	return prevRoot.Number > currentRoot.Number, nil
 }
@@ -384,9 +464,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 		batch := c.db.NewBatch()
 		defer batch.Close()
 		rawdb.WriteRootBlock(batch, root)
-		if confirmed != nil {
-			rawdb.WriteLastConfirmedBlockHash(batch, root.Hash(), confirmed.Hash())
-		}
+		rawdb.WriteLastConfirmedBlockHash(batch, root.Hash(), confirmed.Hash())
 		if err := batch.Write(); err != nil {
 			return false, fmt.Errorf("store root block %x: %w", root.Hash(), err)
 		}
@@ -404,9 +482,10 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 }
 
 // validateRootBlock checks a root block against the shard and root chains, and
-// returns C, the latest shard block confirmed by the root chain up to it, or nil
-// if none is confirmed yet. It mirrors the shard-specific checks of
-// ShardState.add_root_block in pyquarkchain. The master must validate the root
+// returns C, the latest shard block confirmed by the root chain up to it.
+// A root carrying no new local blocks inherits its parent's non-nil confirmation.
+// It mirrors the shard-specific checks of ShardState.add_root_block in
+// pyquarkchain. The master must validate the root
 // block and its body before forwarding it to shards. Each shard validates its
 // minor blocks and distributes outgoing cross-shard deposits. This method checks
 // availability and consistency of local shard data.
@@ -460,15 +539,10 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	if header.Version != 0 {
 		return nil, fmt.Errorf("%w: %d", ErrRootBlockVersion, header.Version)
 	}
-	// Rule 1: the root block is higher than the root block of the shard
-	// genesis, which is known as the shard chain starts on it, and its parent
-	// is known.
-	genesisRoot, err := c.prevRootBlock(c.chain.Genesis().Header())
-	if err != nil {
-		return nil, fmt.Errorf("%w: genesis: %w", ErrShardInconsistency, err)
-	}
-	if header.Number <= genesisRoot.Number {
-		return nil, fmt.Errorf("%w: %w: root #%d, genesis root #%d", ErrClusterInconsistency, ErrRootNotAfterGenesis, header.Number, genesisRoot.Number)
+	// Rule 1: Init handles root genesis at height 0. Normal root imports
+	// must be above it and have a known parent.
+	if header.Number == 0 {
+		return nil, fmt.Errorf("%w: %w: root #0", ErrClusterStateInconsistency, ErrRootNotAfterGenesis)
 	}
 	parent := rawdb.ReadRootBlockHeader(c.db, header.ParentHash)
 	if parent == nil {
@@ -480,19 +554,19 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	// data is an ErrClusterInconsistency. Preserve the local headers' carried
 	// order for the first-block check in rule 3.
 	var blocks []*types.Header
-	for _, block := range root.MinorBlockHeaders() {
+	for _, block := range root.ShardBlockHeaders() {
 		extra, err := block.QKCExtra()
 		if err != nil {
 			return nil, fmt.Errorf("shard block %x: %w", block.Hash(), err)
 		}
 		if extra.ShardID != config.ShardID {
-			if err := c.validateXShardDeposits(block, extra, genesisRoot, config); err != nil {
+			if err := c.validateXShardDeposits(block, extra, config); err != nil {
 				return nil, err
 			}
 			continue
 		}
 		if !c.chain.HasBlock(block.Hash(), block.Number.Uint64()) {
-			return nil, fmt.Errorf("%w: %w: #%d [%x..]", ErrClusterInconsistency, ErrUnknownConfirmedBlock, block.Number, block.Hash().Bytes()[:4])
+			return nil, fmt.Errorf("%w: %w: #%d [%x..]", ErrClusterStateInconsistency, ErrUnknownConfirmedBlock, block.Number, block.Hash().Bytes()[:4])
 		}
 		blocks = append(blocks, block)
 	}
@@ -501,33 +575,30 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	}
 	// Rule 3 local continuity check. The master must validate the complete
 	// carried-header ordering and continuity; here we check the first local block
-	// against C', the parent's latest confirmation (or genesis if none).
+	// against C', the parent's latest confirmation, guaranteed by initialization
+	// and inherited by every imported root.
 	confirmed, err := c.lastConfirmed(parent)
 	if err != nil {
 		return nil, err
 	}
 	if len(blocks) > 0 {
 		first := blocks[0]
-		if confirmed == nil {
-			genesis := c.chain.Genesis().Header()
-			if first.Number.Uint64() != 0 || first.Hash() != genesis.Hash() {
-				return nil, fmt.Errorf("%w: %w: first #%d [%x..]", ErrClusterInconsistency, ErrConfirmedNotContiguous, first.Number, first.Hash().Bytes()[:4])
-			}
-		} else if first.ParentHash != confirmed.Hash() {
-			return nil, fmt.Errorf("%w: %w: first #%d [%x..]", ErrClusterInconsistency, ErrConfirmedNotContiguous, first.Number, first.Hash().Bytes()[:4])
+		if first.ParentHash != confirmed.Hash() {
+			return nil, fmt.Errorf("%w: %w: first #%d [%x..]", ErrClusterStateInconsistency, ErrConfirmedNotContiguous, first.Number, first.Hash().Bytes()[:4])
 		}
 		confirmed = blocks[len(blocks)-1]
 	}
 	// Rule 3 local ancestry check: C, the last block of this shard, or C' if
 	// there are none, references an ancestor of the root block. Even after
 	// master validation, verify this against the locally stored root chain.
-	if confirmed != nil {
+	// G0 has EmptyHash rather than a previous root to compare.
+	if confirmed.Number.Sign() != 0 {
 		prevRoot, err := c.prevRootBlock(confirmed)
 		if err != nil {
-			return nil, fmt.Errorf("%w: confirmed block: %w", ErrShardInconsistency, err)
+			return nil, fmt.Errorf("%w: confirmed block: %w", ErrShardStateInconsistency, err)
 		}
 		if !c.isRootDescendant(header, prevRoot) {
-			return nil, fmt.Errorf("%w: %w: confirmed #%d [%x..] references root #%d [%x..]", ErrClusterInconsistency, ErrConfirmedRootNotAncestor,
+			return nil, fmt.Errorf("%w: %w: confirmed #%d [%x..] references root #%d [%x..]", ErrClusterStateInconsistency, ErrConfirmedRootNotAncestor,
 				confirmed.Number, confirmed.Hash().Bytes()[:4], prevRoot.Number, prevRoot.Hash().Bytes()[:4])
 		}
 	}
@@ -542,31 +613,31 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 // a shard of the network: each shard sends to all the others, which stands for
 // the neighbor rule of pyquarkchain. A block that sends none must come with
 // none ("shouldn't have been broadcasted").
-func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QKCExtra, genesisRoot *qkctypes.RootBlockHeader, config *params.QuarkChainConfig) error {
+func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QKCExtra, config *params.QuarkChainConfig) error {
 	// The root block referenced by the block is unknown if it is older than
 	// the root block of the shard genesis: "prev_root_header can be None when
 	// the shard is not created at root height 0".
 	prevRoot := rawdb.ReadRootBlockHeader(c.db, extra.PrevRootBlock)
-	sends := prevRoot != nil && prevRoot.Number > genesisRoot.Number && config.IsXShardDestination(extra.ShardID)
+	sends := prevRoot != nil && prevRoot.Number > 0 && config.IsXShardDestination(extra.ShardID)
 	stored := rawdb.HasXShardDeposits(c.db, block.Hash())
 	switch {
 	case sends && !stored:
-		return fmt.Errorf("%w: %w: shard %d block #%d [%x..]", ErrClusterInconsistency, ErrMissingXShardDeposits, extra.ShardID, block.Number, block.Hash().Bytes()[:4])
+		return fmt.Errorf("%w: %w: shard %d block #%d [%x..]", ErrClusterStateInconsistency, ErrMissingXShardDeposits, extra.ShardID, block.Number, block.Hash().Bytes()[:4])
 	case !sends && stored:
-		return fmt.Errorf("%w: %w: shard %d block #%d [%x..]", ErrClusterInconsistency, ErrUnexpectedXShardDeposits, extra.ShardID, block.Number, block.Hash().Bytes()[:4])
+		return fmt.Errorf("%w: %w: shard %d block #%d [%x..]", ErrClusterStateInconsistency, ErrUnexpectedXShardDeposits, extra.ShardID, block.Number, block.Hash().Bytes()[:4])
 	}
 	return nil
 }
 
 // setHeadForRootTip moves the canonical head onto the shard chain of a stored
 // root block and then selects it as the root tip, given C, the latest shard block
-// confirmed by the root chain up to it, or nil if none. It mirrors the tip reset
+// confirmed by the root chain up to it. C must be non-nil. It mirrors the tip reset
 // of ShardState.add_root_block in pyquarkchain. The head must keep the two
 // properties shouldUpdateHead relies on: it extends C, and it references the
 // root tip or one of its ancestors.
 //
-// Init starts directly at C, or genesis if C is nil, matching pyquarkchain's
-// recovery behavior. Once initialized, root imports apply the two cases below.
+// Init starts directly at its genesis or recovered checkpoint C. Once initialized, root
+// imports apply the two cases below; an empty root body still inherits C.
 //
 // Case 1: C is not on the canonical chain, as the root tip confirms another
 // fork. The head moves to C, which has both properties, see rule 3 of
@@ -587,13 +658,10 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 //	R1 confirms the shard chain up to A, and the new root tip R2 up to C.
 //	C is on a fork of the head H, so the head moves from H to C, not to D.
 //
-// Case 2: C is canonical, or no shard block has been confirmed yet (as with a
-// root genesis that has no last-confirmed shard block). Starting at the current
-// head, walk back to the nearest shard block whose referenced root is the new
-// root tip or one of its ancestors. If C exists, it is the earliest block the
-// walk can reach; if C does not exist, the walk can reach the shard genesis at
-// most. This follows "we need to scan back until finding a minor block pointing
-// to the same root chain r_block is on".
+// Case 2: C is canonical. Starting at the current head, walk back to the nearest
+// shard block whose referenced root is the new root tip or one of its ancestors.
+// C is the earliest block the walk can reach. This follows "we need to scan
+// back until finding a minor block pointing to the same root chain r_block is on".
 //
 //	                     +----- R2'
 //	                     v
@@ -610,43 +678,38 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 	head := current
 	if c.rootTip == nil {
 		// Initialization restores the confirmed checkpoint, even if current
-		// is a compatible unconfirmed descendant. With no confirmation, use
-		// the existing genesis. Normal imports below may retain descendants.
+		// is a compatible unconfirmed descendant. Normal imports below may
+		// retain descendants.
 		head = confirmed
-		if head == nil {
-			head = c.chain.Genesis().Header()
-		}
-	} else if confirmed != nil && c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
+	} else if c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
 		// Case 1 for an already initialized chain.
 		head = confirmed
 	}
-	// Walk back to the nearest shard block referencing the new root tip or one
-	// of its ancestors. If C exists, do not walk past it; otherwise, stop at the
-	// shard genesis. Return ErrRootNotDescendant if the genesis creation root is
-	// not on the new root chain.
-	for {
+	// Walk back to a compatible root view, no earlier than C. G0 has no
+	// previous root, so reaching it needs no lookup or cached R0 anchor.
+	for head.Number.Sign() != 0 {
 		prevRoot, err := c.prevRootBlock(head)
 		if err != nil {
-			return fmt.Errorf("%w: shard head: %w", ErrShardInconsistency, err)
+			return fmt.Errorf("%w: shard head: %w", ErrShardStateInconsistency, err)
 		}
 		if c.isRootDescendant(rootTip, prevRoot) {
-			// If C exists, root-block validation guarantees the scan matches by C
-			// at the latest; Case 1 starts the scan at C itself.
+			// Root-block validation guarantees the scan matches by C at the
+			// latest; initialization and Case 1 start at C itself.
 			break
 		}
-		if head.Number.Uint64() == 0 {
-			// With no C, genesis is the last candidate. Its creation root must
-			// still be on the new root chain.
-			return fmt.Errorf("%w: %w: genesis references root #%d [%x..]", ErrShardInconsistency, ErrRootNotDescendant, prevRoot.Number, prevRoot.Hash().Bytes()[:4])
+		if head.Hash() == confirmed.Hash() {
+			return fmt.Errorf("%w: %w: confirmed #%d [%x..]", ErrShardStateInconsistency, ErrConfirmedRootNotAncestor, head.Number, head.Hash().Bytes()[:4])
 		}
 		if head = c.chain.GetHeader(head.ParentHash, head.Number.Uint64()-1); head == nil {
-			return fmt.Errorf("%w: %w: shard head parent missing", ErrShardInconsistency, consensus.ErrUnknownAncestor)
+			return fmt.Errorf("%w: %w: shard head parent missing", ErrShardStateInconsistency, consensus.ErrUnknownAncestor)
 		}
 	}
-	if head.Hash() != current.Hash() {
+	// Init must also ask core to accept an unchanged head, so a stopped chain
+	// or missing execution state cannot be published as successfully initialized.
+	if c.rootTip == nil || head.Hash() != current.Hash() {
 		block := c.chain.GetBlock(head.Hash(), head.Number.Uint64())
 		if block == nil {
-			return fmt.Errorf("%w: %w: head #%d [%x..]", ErrShardInconsistency, consensus.ErrUnknownAncestor, head.Number, head.Hash().Bytes()[:4])
+			return fmt.Errorf("%w: %w: head #%d [%x..]", ErrShardStateInconsistency, consensus.ErrUnknownAncestor, head.Number, head.Hash().Bytes()[:4])
 		}
 		if _, err := c.chain.SetCanonical(block); err != nil {
 			return fmt.Errorf("set canonical head %x: %w", head.Hash(), err)
@@ -658,8 +721,7 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 	return nil
 }
 
-// prevRootBlock returns the header of the root block referenced by a shard
-// block.
+// prevRootBlock returns the header of the root block referenced by a shard block.
 func (c *ShardChain) prevRootBlock(header *types.Header) (*qkctypes.RootBlockHeader, error) {
 	extra, err := header.QKCExtra()
 	if err != nil {
@@ -673,16 +735,18 @@ func (c *ShardChain) prevRootBlock(header *types.Header) (*qkctypes.RootBlockHea
 }
 
 // lastConfirmed returns the header of the latest shard block confirmed by the
-// root chain up to the given root block, or nil if none is confirmed yet.
+// root chain up to the given root block. A successful read always returns a
+// non-nil header. A missing confirmation makes the root invalid. A recorded
+// confirmation whose local block is missing is a shard-state inconsistency.
 func (c *ShardChain) lastConfirmed(root *qkctypes.RootBlockHeader) (*types.Header, error) {
 	hash := rawdb.ReadLastConfirmedBlockHash(c.db, root.Hash())
 	if hash == (common.Hash{}) {
-		return nil, nil
+		return nil, fmt.Errorf("%w: root #%d [%x..] has no confirmation", ErrInvalidRootBlock, root.Number, root.Hash().Bytes()[:4])
 	}
 	header := c.chain.GetHeaderByHash(hash)
 	if header == nil {
 		// InsertRootBlock only stores confirmations of locally available blocks.
-		return nil, fmt.Errorf("%w: %w: %x", ErrShardInconsistency, ErrUnknownConfirmedBlock, hash)
+		return nil, fmt.Errorf("%w: %w: %x", ErrShardStateInconsistency, ErrUnknownConfirmedBlock, hash)
 	}
 	return header, nil
 }
