@@ -175,7 +175,7 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		// is not a source of recovery data.
 		rootHeader = rawdb.ReadRootBlockHeader(c.db, root.Hash())
 		if rootHeader == nil {
-			return fmt.Errorf("%w: %x", ErrUnknownRootBlock, root.Hash())
+			return fmt.Errorf("%w: %w: %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, root.Hash())
 		}
 		var err error
 		confirmed, err = c.lastConfirmed(rootHeader)

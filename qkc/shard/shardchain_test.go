@@ -449,8 +449,12 @@ func TestShardChainInitUnknownRoot(t *testing.T) {
 			if nilInput {
 				input = nil
 			}
-			if err := env.sc.Init(input); !errors.Is(err, ErrUnknownRootBlock) {
+			err := env.sc.Init(input)
+			if !errors.Is(err, ErrUnknownRootBlock) {
 				t.Fatalf("unknown checkpoint: %v", err)
+			}
+			if !nilInput && !errors.Is(err, ErrClusterStateInconsistency) {
+				t.Fatalf("missing cluster state inconsistency: %v", err)
 			}
 			if env.sc.rootTip != nil || qkcrawdb.HasRootBlock(env.db, root.Hash()) {
 				t.Fatal("unknown checkpoint initialized the chain or was persisted")
