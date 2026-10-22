@@ -66,6 +66,15 @@ func (bc *BlockChain) SetXShardInbox(inbox XShardInbox) {
 	bc.xshardInbox = inbox
 }
 
+// XShardDeposits opens the inbox used by block validation for block construction.
+// The caller must validate the root ancestry before opening the inbox.
+func (bc *BlockChain) XShardDeposits(parent *types.Header, prevRootBlock common.Hash) (XShardDeposits, error) {
+	if bc.xshardInbox == nil {
+		return nil, errors.New("cross-shard inbox not configured")
+	}
+	return bc.xshardInbox.Deposits(parent, prevRootBlock)
+}
+
 // validateXShardDeposits checks the cross-shard deposits of a block of a
 // QuarkChain shard once it ran, given the receipts of its transactions:
 //

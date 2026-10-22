@@ -139,6 +139,7 @@ type generateParams struct {
 	slotNum        *uint64           // The slot number (amsterdam field).
 	targetGasLimit *uint64           // The target gas limit requested by the CL (amsterdam field).
 	noTxs          bool              // Flag whether an empty block without any transaction is expected
+	qkc            *types.QKCExtra   // Shard fields; mandatory deposits are included even with noTxs
 
 	forceOverrides    bool // Flag whether we should overwrite extraData and transactions
 	overrideExtraData []byte
@@ -177,6 +178,17 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	}
 	// Also add size of withdrawals to work block size.
 	work.size += uint64(genParam.withdrawals.Size())
+
+	if genParam.qkc != nil {
+		parent := miner.chain.GetHeader(work.header.ParentHash, work.header.Number.Uint64()-1)
+		deposits, err := miner.chain.XShardDeposits(parent, genParam.qkc.PrevRootBlock)
+		if err != nil {
+			return &newPayloadResult{err: err}
+		}
+		if err := miner.commitXShardDeposits(ctx, work, deposits); err != nil {
+			return &newPayloadResult{err: err}
+		}
+	}
 
 	if !genParam.noTxs {
 		// If forceOverrides is true and overrideTxs is not empty, commit the override transactions
@@ -241,6 +253,11 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	_, _, assembleSpanEnd := telemetry.StartSpan(ctx, "miner.AssembleBlock")
 	block := core.AssembleBlock(miner.chain, work.header, work.state, &body, work.receipts, work.bal)
 	assembleSpanEnd(nil)
+	if genParam.qkc != nil && block.AccessList() != nil {
+		if err := block.AccessList().ValidateSize(block.GasLimit()); err != nil {
+			return &newPayloadResult{err: err}
+		}
+	}
 
 	// Check for db errors. If anything happened during the mining or IntermediateRoot, such as a
 	// weird flush or a trie node missing, we need to bail out and not create a block.
@@ -308,6 +325,9 @@ func (miner *Miner) prepareWork(ctx context.Context, genParams *generateParams, 
 	if genParams.forceOverrides {
 		header.Extra = genParams.overrideExtraData
 	}
+	if genParams.qkc != nil {
+		header.Extra = genParams.qkc.Encode()
+	}
 	// Set the randomness field from the beacon chain if it's available.
 	if genParams.random != (common.Hash{}) {
 		header.MixDigest = genParams.random
@@ -328,6 +348,9 @@ func (miner *Miner) prepareWork(ctx context.Context, genParams *generateParams, 
 	}
 	// Apply EIP-4844, EIP-4788.
 	if miner.chainConfig.IsCancun(header.Number, header.Time) {
+		if genParams.qkc != nil && genParams.beaconRoot == nil {
+			return nil, errors.New("no beacon root set post-cancun")
+		}
 		var excessBlobGas uint64
 		if miner.chainConfig.IsCancun(parent.Number, parent.Time) {
 			excessBlobGas = eip4844.CalcExcessBlobGas(miner.chainConfig, parent, timestamp)
@@ -658,7 +681,12 @@ func totalFees(block *types.Block, receipts []*types.Receipt) *big.Int {
 	feesWei := new(big.Int)
 	var gasUsed, product big.Int
 	for i, tx := range block.Transactions() {
-		minerFee, _ := tx.EffectiveGasTip(baseFee)
+		var minerFee *big.Int
+		if tx.Type() == types.DepositTxType {
+			minerFee = tx.GasPrice()
+		} else {
+			minerFee, _ = tx.EffectiveGasTip(baseFee)
+		}
 		gasUsed.SetUint64(receipts[i].GasUsed)
 		product.Mul(&gasUsed, minerFee)
 		feesWei.Add(feesWei, &product)

@@ -64,9 +64,14 @@ type ShardChain struct {
 }
 
 // NewShardChain creates a shard chain on top of the given chain, reading the
-// root blocks from db.
+// root blocks and incoming deposits from db. For a QuarkChain configuration,
+// construction and validation share the inbox backed by this database.
 func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
-	return &ShardChain{db: db, chain: chain}
+	c := &ShardChain{db: db, chain: chain}
+	if config := chain.Config().QuarkChain; config != nil {
+		chain.SetXShardInbox(NewXShardInbox(config, c))
+	}
+	return c
 }
 
 // InsertShardBlock validates a block against the root chain, imports it, and
