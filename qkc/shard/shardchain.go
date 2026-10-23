@@ -618,7 +618,7 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 	// the root block of the shard genesis: "prev_root_header can be None when
 	// the shard is not created at root height 0".
 	prevRoot := rawdb.ReadRootBlockHeader(c.db, extra.PrevRootBlock)
-	sends := prevRoot != nil && prevRoot.Number > 0 && config.IsXShardDestination(extra.ShardID)
+	sends := prevRoot != nil && config.IsXShardDestination(extra.ShardID)
 	stored := rawdb.HasXShardDeposits(c.db, block.Hash())
 	switch {
 	case sends && !stored:
