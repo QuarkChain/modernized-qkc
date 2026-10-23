@@ -16,6 +16,12 @@
 
 package wire
 
+import (
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/holiman/uint256"
+)
+
 // The go:generate directive below runs from this package directory; it cds to
 // the repository root so the generator paths are stable and can be copied
 // into documentation.
@@ -92,4 +98,74 @@ type HelloCommand struct {
 	PeerPort             uint16
 	RootBlockHeader      []byte `ssz-max:"4294967295"` // SSZ encoding of RootBlockHeader.
 	GenesisRootBlockHash [HashLength]byte
+}
+
+// ArtificialTxConfig carries the current mining target intervals from Master.
+type ArtificialTxConfig struct {
+	TargetRootBlockTime  uint32
+	TargetMinorBlockTime uint32
+}
+
+// ShardStats accompanies each accepted chain block so Master can update its
+// per-chain status. The legacy branch is represented by the chain ID.
+type ShardStats struct {
+	ChainID            uint32
+	Height             uint64
+	Difficulty         uint256.Int
+	CoinbaseAddress    common.Address
+	Timestamp          uint64
+	TxCount60s         uint32
+	PendingTxCount     uint32
+	TotalTxCount       uint32
+	BlockCount60s      uint32
+	StaleBlockCount60s uint32
+	LastBlockTime      uint32
+}
+
+// AddMinorBlockHeaderRequest reports an accepted chain block to Master. The
+// Ethereum header carries the QuarkChain fields in its Extra data.
+type AddMinorBlockHeaderRequest struct {
+	BlockHeader    *types.Header
+	TxCount        uint32
+	XShardTxCount  uint32
+	CoinbaseAmount uint256.Int
+	ShardStats     ShardStats
+}
+
+// AddMinorBlockHeaderResponse returns the current mining target intervals.
+type AddMinorBlockHeaderResponse struct {
+	ErrorCode          uint32
+	ArtificialTxConfig ArtificialTxConfig
+}
+
+type AddMinorBlockHeaderListRequest struct {
+	BlockHeaders    []types.Header `ssz-max:"4294967295"`
+	CoinbaseAmounts []uint256.Int  `ssz-max:"4294967295"`
+}
+
+type AddMinorBlockHeaderListResponse struct {
+	ErrorCode uint32
+}
+
+// AddXshardTxListRequest delivers the deposits emitted by one source block to
+// one destination chain. An empty, present list means that block sent this
+// chain no deposits; the receiver must still record it for the inbox cursor.
+// Each deposit has its own format version; the legacy list version is not part
+// of this new protocol.
+type AddXshardTxListRequest struct {
+	ChainID        uint32
+	MinorBlockHash [HashLength]byte
+	Deposits       []types.DepositTx `ssz-max:"4294967295"`
+}
+
+type AddXshardTxListResponse struct {
+	ErrorCode uint32
+}
+
+type BatchAddXshardTxListRequest struct {
+	AddXshardTxListRequestList []AddXshardTxListRequest `ssz-max:"4294967295"`
+}
+
+type BatchAddXshardTxListResponse struct {
+	ErrorCode uint32
 }

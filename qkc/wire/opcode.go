@@ -22,8 +22,9 @@ package wire
 //   - ClusterOp: cluster RPC opcodes (Master ↔ chain, chain ↔ chain),
 //     0x80–0xFF, defined relative to ClusterOpBase.
 //
-// The currently defined set includes cluster connection opcodes and the
-// initial peer handshake. Add opcodes as protocol operations are introduced,
+// The currently defined set includes cluster connection and chain business
+// opcodes plus the initial peer handshake. Add opcodes as operations are
+// introduced,
 // assigning unique values within the appropriate range. Opcode ranges identify
 // operation families, not frame types: a peer command keeps its CommandOp when
 // relayed through a MasterFrame to a chain or virtual peer for dispatch.
@@ -41,6 +42,16 @@ const (
 	ClusterOpPong                    ClusterOp = 2 + ClusterOpBase // 0x82
 	ClusterOpConnectToChainsRequest  ClusterOp = 3 + ClusterOpBase // 0x83
 	ClusterOpConnectToChainsResponse ClusterOp = 4 + ClusterOpBase // 0x84
+
+	// Chain-to-Master block notifications and chain-to-chain deposits.
+	ClusterOpAddMinorBlockHeaderRequest      ClusterOp = 17 + ClusterOpBase // 0x91
+	ClusterOpAddMinorBlockHeaderResponse     ClusterOp = 18 + ClusterOpBase // 0x92
+	ClusterOpAddXshardTxListRequest          ClusterOp = 19 + ClusterOpBase // 0x93
+	ClusterOpAddXshardTxListResponse         ClusterOp = 20 + ClusterOpBase // 0x94
+	ClusterOpBatchAddXshardTxListRequest     ClusterOp = 33 + ClusterOpBase // 0xa1
+	ClusterOpBatchAddXshardTxListResponse    ClusterOp = 34 + ClusterOpBase // 0xa2
+	ClusterOpAddMinorBlockHeaderListRequest  ClusterOp = 59 + ClusterOpBase // 0xbb
+	ClusterOpAddMinorBlockHeaderListResponse ClusterOp = 60 + ClusterOpBase // 0xbc
 )
 
 // CommandOp identifies peer command operations. They are carried in PeerFrame

@@ -18,8 +18,13 @@ package wire
 
 import (
 	"bytes"
+	"math/big"
 	"reflect"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/holiman/uint256"
 )
 
 // ---- opcode → message registry ----
@@ -85,6 +90,123 @@ func roundTripSSZ(t *testing.T, msg SSZMessage) {
 	}
 	if !bytes.Equal(enc, dec) {
 		t.Fatalf("round trip mismatch:\n  got  %x\n  want %x", dec, enc)
+	}
+}
+
+func TestChainHeaderMessagesSSZ(t *testing.T) {
+	withdrawals := common.HexToHash("0x11")
+	blobGas := uint64(7)
+	slot := uint64(8)
+	header := &types.Header{
+		ParentHash:      common.HexToHash("0x12"),
+		Coinbase:        common.HexToAddress("0x13"),
+		Difficulty:      big.NewInt(0),
+		Number:          big.NewInt(42),
+		GasLimit:        1000000,
+		GasUsed:         21000,
+		Time:            12345,
+		Extra:           bytes.Repeat([]byte{0x42}, types.QKCExtraSize),
+		BaseFee:         big.NewInt(100),
+		WithdrawalsHash: &withdrawals,
+		BlobGasUsed:     &blobGas,
+		SlotNumber:      &slot,
+	}
+	header.Bloom[0] = 0x25
+	msg := &AddMinorBlockHeaderRequest{BlockHeader: header, TxCount: 3, XShardTxCount: 2}
+	encoded, err := msg.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != msg.SizeSSZ() {
+		t.Fatalf("header message size: got %d, want %d", len(encoded), msg.SizeSSZ())
+	}
+	var decoded AddMinorBlockHeaderRequest
+	if err := decoded.UnmarshalSSZ(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.BlockHeader.Hash() != header.Hash() {
+		t.Fatalf("header hash changed in SSZ round trip: got %s, want %s", decoded.BlockHeader.Hash(), header.Hash())
+	}
+	if _, err := msg.HashTreeRoot(); err != nil {
+		t.Fatalf("header hash tree root: %v", err)
+	}
+
+	list := &AddMinorBlockHeaderListRequest{
+		BlockHeaders:    types.HeaderListSSZ{header, {Difficulty: big.NewInt(0), Number: big.NewInt(43)}},
+		CoinbaseAmounts: [][32]byte{{1}, {2}},
+	}
+	listEncoded, err := list.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listEncoded) != list.SizeSSZ() {
+		t.Fatalf("header list size: got %d, want %d", len(listEncoded), list.SizeSSZ())
+	}
+	var decodedList AddMinorBlockHeaderListRequest
+	if err := decodedList.UnmarshalSSZ(listEncoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decodedList.BlockHeaders) != len(list.BlockHeaders) {
+		t.Fatalf("header list length changed: got %d, want %d", len(decodedList.BlockHeaders), len(list.BlockHeaders))
+	}
+	for i := range list.BlockHeaders {
+		if decodedList.BlockHeaders[i].Hash() != list.BlockHeaders[i].Hash() {
+			t.Fatalf("header %d changed in SSZ round trip", i)
+		}
+	}
+	if _, err := list.HashTreeRoot(); err != nil {
+		t.Fatalf("header list hash tree root: %v", err)
+	}
+}
+
+func TestCrossChainDepositsSSZ(t *testing.T) {
+	to := common.HexToAddress("0x1234")
+	deposit := &types.DepositTx{
+		Version:         types.DepositTxVersion,
+		SourceBlockHash: common.HexToHash("0x56"),
+		SourceLogIndex:  9,
+		From:            common.HexToAddress("0x78"),
+		To:              &to,
+		Value:           uint256.NewInt(1000),
+		GasPrice:        uint256.NewInt(2),
+		Gas:             21000,
+		IsMove:          true,
+		Data:            []byte{1, 2, 3},
+	}
+	msg := &AddXshardTxListRequest{
+		ChainID:        2,
+		MinorBlockHash: common.HexToHash("0xab"),
+		Deposits:       types.DepositListSSZ{deposit},
+	}
+	encoded, err := msg.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != msg.SizeSSZ() {
+		t.Fatalf("deposit message size: got %d, want %d", len(encoded), msg.SizeSSZ())
+	}
+	var decoded AddXshardTxListRequest
+	if err := decoded.UnmarshalSSZ(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Deposits, msg.Deposits) {
+		t.Fatalf("deposit changed in SSZ round trip: got %#v, want %#v", decoded.Deposits, msg.Deposits)
+	}
+	if _, err := msg.HashTreeRoot(); err != nil {
+		t.Fatalf("deposit hash tree root: %v", err)
+	}
+
+	empty := &AddXshardTxListRequest{ChainID: 2, MinorBlockHash: msg.MinorBlockHash}
+	var decodedEmpty AddXshardTxListRequest
+	encoded, err = empty.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decodedEmpty.UnmarshalSSZ(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if decodedEmpty.Deposits == nil || len(decodedEmpty.Deposits) != 0 {
+		t.Fatal("empty deposit list must decode as a present empty list")
 	}
 }
 
