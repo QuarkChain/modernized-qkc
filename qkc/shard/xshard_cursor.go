@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
@@ -56,6 +57,30 @@ type XShardChain interface {
 	// XShardDeposits returns the deposits sent to the shard by the block of
 	// another shard with the given hash, or nil if they are not received.
 	XShardDeposits(hash common.Hash) []*types.DepositTx
+}
+
+// RootBlock reads a root block received by the shard.
+func (c *ShardChain) RootBlock(hash common.Hash) *qkctypes.RootBlock {
+	return rawdb.ReadRootBlock(c.db, hash)
+}
+
+// RootBlockByNumber reads a root block on the ancestry of tip, including forks.
+func (c *ShardChain) RootBlockByNumber(tip common.Hash, number uint64) *qkctypes.RootBlock {
+	for header := rawdb.ReadRootBlockHeader(c.db, tip); header != nil; header = rawdb.ReadRootBlockHeader(c.db, header.ParentHash) {
+		if uint64(header.Number) == number {
+			return c.RootBlock(header.Hash())
+		}
+		if uint64(header.Number) < number {
+			return nil
+		}
+	}
+	return nil
+}
+
+// XShardDeposits reads the incoming deposits of a confirmed source block.
+// A nil result means the deposit list has not been received, even if empty.
+func (c *ShardChain) XShardDeposits(hash common.Hash) []*types.DepositTx {
+	return rawdb.ReadXShardDeposits(c.db, hash)
 }
 
 // xShardCursor walks the deposits of a shard in the order the shard applies
