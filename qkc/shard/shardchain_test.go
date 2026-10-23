@@ -19,6 +19,7 @@ package shard
 import (
 	"context"
 	"errors"
+	"maps"
 	"math/big"
 	"strings"
 	"testing"
@@ -87,6 +88,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		ExtraData:  (&types.QKCExtra{ShardID: 0}).Encode(),
 		Alloc:      core.SystemContractAllocs(),
 	}
+	maps.Copy(gspec.Alloc, core.PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 	env.genDb, _, _ = core.GenerateChainWithGenesis(gspec, env.engine, 0, nil)
 
 	chain, err := core.NewBlockChain(env.db, gspec, env.engine, nil)
@@ -961,10 +963,10 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 //	test passes remote headers to validateRootBlock to check cross-shard deposits.
 //	The target is shard 0, shard 1 is in its network config, and r0 is the root
 //	referenced by the shard genesis. Under these conditions:
-//	  1. b1[r0] has deposits, so validation fails: deposits are unexpected at r0.
-//	  2. b2[r0] has no deposits, so validation accepts it.
+//	  1. b1[r0] has deposits, so validation accepts it.
+//	  2. b2[r0] has no deposits, so validation fails: deposits are required at r0.
 //	  3. b3[r1] has deposits, so validation accepts it; b4[r1] has none, so
-//	     validation fails because deposits are required after r0.
+//	     validation fails because deposits are required at r1 too.
 //	  4. t1[r1] is from shard 7, outside the network config, but has deposits;
 //	     validation fails because shard 7 does not send deposits to shard 0.
 func TestInsertRootBlockValidation(t *testing.T) {
@@ -986,12 +988,12 @@ func TestInsertRootBlockValidation(t *testing.T) {
 	qkcrawdb.WriteXShardDeposits(env.db, b1.Hash(), nil)
 	qkcrawdb.WriteXShardDeposits(env.db, b3.Hash(), nil)
 	qkcrawdb.WriteXShardDeposits(env.db, t1.Hash(), nil)
-	b2Extra, err := b2.QKCExtra()
+	b1Extra, err := b1.QKCExtra()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.sc.validateXShardDeposits(b2, b2Extra, env.config.QuarkChain); err != nil {
-		t.Fatalf("block referencing the shard genesis root should not require deposits: %v", err)
+	if err := env.sc.validateXShardDeposits(b1, b1Extra, env.config.QuarkChain); err != nil {
+		t.Fatalf("block referencing the genesis root with an empty deposit list: %v", err)
 	}
 	env.chain.Config().QuarkChain.MaxBlocksPerRootBlock = 1
 
@@ -1013,10 +1015,10 @@ func TestInsertRootBlockValidation(t *testing.T) {
 		{"unknown block", newRoot(r1, 1, env.makeBlocks(blocks[0], 1, r1, 3)[0].Header()), ErrUnknownConfirmedBlock, true},
 		{"too many blocks", newRoot(r1, 1, blocks[1].Header(), blocks[2].Header()), ErrTooManyConfirmedBlocks, false},
 
-		// Rule 2: deposits are required for b4, unexpected for b1 at r0,
+		// Rule 2: deposits are required for b2 at r0 and b4 at r1,
 		// and unexpected for t1 because its shard is outside the network.
 		{"missing deposits", newRoot(r1, 1, b4), ErrMissingXShardDeposits, true},
-		{"deposits at genesis root", newRoot(r1, 1, b1), ErrUnexpectedXShardDeposits, true},
+		{"missing deposits at genesis root", newRoot(r1, 1, b2), ErrMissingXShardDeposits, true},
 		{"deposits from unknown shard", newRoot(r1, 1, t1), ErrUnexpectedXShardDeposits, true},
 
 		// Rule 3: x carries a3, which is not a child of a1, then b2, which
@@ -1046,13 +1048,64 @@ func TestInsertRootBlockValidation(t *testing.T) {
 	env.checkRootTip(r1)
 	env.checkHead(blocks[2])
 
-	// r2 carries a2, b2 and b3. b2 references r0 and has no deposits; b3
-	// references r1 and has deposits. The shard 1 references move forward.
-	r2 := newRoot(r1, 1, blocks[1].Header(), b2, b3)
+	// r2 carries a2, b1, b2 and b3. All remote blocks have deposit lists;
+	// b1 and b2 reference r0, while b3 references r1.
+	qkcrawdb.WriteXShardDeposits(env.db, b2.Hash(), nil)
+	r2 := newRoot(r1, 1, blocks[1].Header(), b1, b2, b3)
 	env.insertRoot(r2, true)
 	env.checkRootTip(r2)
 	env.checkLastConfirmed(r2, blocks[1])
 	env.checkHead(blocks[2])
+}
+
+func TestValidateXShardDeposits(t *testing.T) {
+	r0 := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{}, nil, nil)
+	r1 := newRoot(r0, 1)
+	unknown := newRoot(r0, 2)
+	config := &params.QuarkChainConfig{ShardID: 0, ShardIDs: []uint32{0, 1}}
+	tests := []struct {
+		name    string
+		shardID uint32
+		root    *qkctypes.RootBlock
+		stored  bool
+		err     error
+	}{
+		{"unknown root without deposits", 1, unknown, false, ErrUnknownRootBlock},
+		{"unknown root with deposits", 1, unknown, true, ErrUnknownRootBlock},
+		{"genesis root without deposits", 1, r0, false, ErrMissingXShardDeposits},
+		{"genesis root with empty deposits", 1, r0, true, nil},
+		{"later root without deposits", 1, r1, false, ErrMissingXShardDeposits},
+		{"later root with empty deposits", 1, r1, true, nil},
+		{"unknown shard without deposits", 7, r1, false, nil},
+		{"unknown shard with deposits", 7, r1, true, ErrUnexpectedXShardDeposits},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := rawdb.NewMemoryDatabase()
+			t.Cleanup(func() { db.Close() })
+			qkcrawdb.WriteRootBlock(db, r0)
+			qkcrawdb.WriteRootBlock(db, r1)
+			block := makeShardHeaders(test.shardID, 1, test.root)[0]
+			extra, err := block.QKCExtra()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.stored {
+				qkcrawdb.WriteXShardDeposits(db, block.Hash(), nil)
+			}
+			chain := &ShardChain{db: db}
+			err = chain.validateXShardDeposits(block, extra, config)
+			if !errors.Is(err, test.err) {
+				t.Fatalf("error mismatch: have %v, want %v", err, test.err)
+			}
+			if errors.Is(err, ErrClusterStateInconsistency) != (test.err != nil) {
+				t.Fatalf("cluster inconsistency classification mismatch: %v", err)
+			}
+			if test.err == ErrUnknownRootBlock && !strings.Contains(err.Error(), test.root.Hash().Hex()[2:]) {
+				t.Fatalf("missing root hash in error: %v", err)
+			}
+		})
+	}
 }
 
 // The cluster must make local shard blocks available before a root confirms

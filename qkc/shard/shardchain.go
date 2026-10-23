@@ -606,19 +606,20 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 }
 
 // validateXShardDeposits checks that the cross-shard deposits sent to this shard
-// by a block of another shard, carried by a root block, are stored if and only
-// if the block sends any, as in ShardState.add_root_block in pyquarkchain. A
-// block sends deposits, possibly an empty list, once cross-shard transactions
-// are enabled, after the root block of the shard genesis, and if it comes from
-// a shard of the network: each shard sends to all the others, which stands for
-// the neighbor rule of pyquarkchain. A block that sends none must come with
-// none ("shouldn't have been broadcasted").
+// by a block of another shard, carried by a root block, are stored as required
+// by ShardState.add_root_block in pyquarkchain. Here all shards start at R0 and
+// send deposit lists to every other shard in the configured network, including
+// for ordinary blocks referencing R0. An empty list records that the block sent
+// this shard nothing. Blocks from shards outside the network must have no list
+// ("shouldn't have been broadcasted").
 func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QKCExtra, config *params.QuarkChainConfig) error {
-	// The root block referenced by the block is unknown if it is older than
-	// the root block of the shard genesis: "prev_root_header can be None when
-	// the shard is not created at root height 0".
-	prevRoot := rawdb.ReadRootBlockHeader(c.db, extra.PrevRootBlock)
-	sends := prevRoot != nil && config.IsXShardDestination(extra.ShardID)
+	// All shards start at R0, so an unknown root cannot be explained by this
+	// shard having been created after the referenced root, as in pyquarkchain.
+	exist := rawdb.HasRootBlock(c.db, extra.PrevRootBlock)
+	if !exist {
+		return fmt.Errorf("%w: %w: shard %d block #%d [%x..] references root %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, extra.ShardID, block.Number, block.Hash().Bytes()[:4], extra.PrevRootBlock)
+	}
+	sends := config.IsXShardDestination(extra.ShardID)
 	stored := rawdb.HasXShardDeposits(c.db, block.Hash())
 	switch {
 	case sends && !stored:
