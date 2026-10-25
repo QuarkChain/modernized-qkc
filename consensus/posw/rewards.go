@@ -27,28 +27,34 @@ import (
 )
 
 // accumulateRewards credits the shard's subsidy share, without uncle rewards or
-// transaction fees. Like goquarkchain, split the configured subsidy before decay.
+// transaction fees. Like pyquarkchain, floor the decayed subsidy before splitting
+// the shard share, then floor that share separately.
 // OriginalBlockNumber continues the old chain's schedule across regenesis.
 func accumulateRewards(config *params.QuarkChainConfig, state vm.StateDB, header *types.Header) {
 	if header.Number.Sign() == 0 {
 		return
 	}
 	c := config.Reward
-	localRate := new(big.Rat).Sub(big.NewRat(1, 1), c.RewardTaxRate)
-	reward := new(big.Int).Mul(c.CoinbaseAmount.ToBig(), localRate.Num())
-	reward.Div(reward, localRate.Denom())
+	reward := c.CoinbaseAmount.ToBig()
 	height := new(big.Int).Add(header.Number, new(big.Int).SetUint64(config.OriginalBlockNumber))
 	epoch := height.Div(height, new(big.Int).SetUint64(c.EpochInterval))
-	if c.DecayDivisor > 1 {
-		// Every epoch divides by at least two. Avoid constructing enormous powers
-		// once the integer subsidy is already guaranteed to be zero.
-		if epoch.Cmp(big.NewInt(int64(reward.BitLen()))) >= 0 {
+	if c.DecayFactor.Cmp(big.NewRat(1, 1)) < 0 {
+		// For a factor n/d < 1, (n/d)^d <= ((d-1)/d)^d < 1/2.
+		// After d*BitLen epochs the integer subsidy is zero. The validated
+		// denominator is at most 100, bounding exponentiation even at huge heights.
+		zeroEpoch := new(big.Int).Mul(c.DecayFactor.Denom(), big.NewInt(int64(reward.BitLen())))
+		if epoch.Cmp(zeroEpoch) >= 0 {
 			reward.SetInt64(0)
 		} else {
-			divisor := new(big.Int).Exp(new(big.Int).SetUint64(c.DecayDivisor), epoch, nil)
-			reward.Div(reward, divisor)
+			numerator := new(big.Int).Exp(c.DecayFactor.Num(), epoch, nil)
+			denominator := new(big.Int).Exp(c.DecayFactor.Denom(), epoch, nil)
+			reward.Mul(reward, numerator)
+			reward.Div(reward, denominator)
 		}
 	}
+	localRate := new(big.Rat).Sub(big.NewRat(1, 1), c.RewardTaxRate)
+	reward.Mul(reward, localRate.Num())
+	reward.Div(reward, localRate.Denom())
 	amount, _ := uint256.FromBig(reward)
 	state.AddBalance(header.Coinbase, amount, tracing.BalanceIncreaseRewardMineBlock)
 }

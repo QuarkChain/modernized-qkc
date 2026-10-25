@@ -26,7 +26,7 @@ import (
 )
 
 func TestPoWRewardConfigJSON(t *testing.T) {
-	input := `{"pow":{"adjustmentCutoff":7,"adjustmentFactor":512,"minimumDifficulty":"100"},"reward":{"coinbaseAmount":"5000000000000000000","epochInterval":12600000,"decayDivisor":2,"rewardTaxRate":"1/2"},"originalBlockNumber":12345678}`
+	input := `{"pow":{"adjustmentCutoff":7,"adjustmentFactor":512,"minimumDifficulty":"100"},"reward":{"coinbaseAmount":"5000000000000000000","epochInterval":12600000,"decayFactor":"0.88","rewardTaxRate":"1/2"},"originalBlockNumber":12345678}`
 	var config QuarkChainConfig
 	if err := json.Unmarshal([]byte(input), &config); err != nil {
 		t.Fatal(err)
@@ -36,6 +36,9 @@ func TestPoWRewardConfigJSON(t *testing.T) {
 	}
 	if err := config.Reward.Check(); err != nil {
 		t.Fatal(err)
+	}
+	if config.Reward.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 {
+		t.Fatalf("decay factor: have %s, want 22/25", config.Reward.DecayFactor)
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
@@ -49,6 +52,31 @@ func TestPoWRewardConfigJSON(t *testing.T) {
 		config.Reward.RewardTaxRate = rate
 		if err := config.Reward.Check(); err == nil {
 			t.Fatalf("accepted reward tax %v", rate)
+		}
+	}
+}
+
+func TestRewardDecayFactorValidation(t *testing.T) {
+	for _, test := range []struct {
+		factor *big.Rat
+		valid  bool
+	}{
+		{nil, false},
+		{big.NewRat(-1, 2), false},
+		{big.NewRat(3, 2), false},
+		{big.NewRat(1, 101), false},
+		{big.NewRat(0, 1), true},
+		{big.NewRat(1, 2), true},
+		{big.NewRat(22, 25), true},
+		{big.NewRat(99, 100), true},
+		{big.NewRat(1, 1), true},
+	} {
+		config := &RewardConfig{
+			CoinbaseAmount: uint256.NewInt(100), EpochInterval: 10,
+			DecayFactor: test.factor, RewardTaxRate: big.NewRat(1, 2),
+		}
+		if err := config.Check(); (err == nil) != test.valid {
+			t.Fatalf("factor %v: error %v, want valid %v", test.factor, err, test.valid)
 		}
 	}
 }

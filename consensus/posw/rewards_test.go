@@ -39,7 +39,7 @@ func TestRegenesisRewards(t *testing.T) {
 			Reward: &params.RewardConfig{
 				CoinbaseAmount: uint256.NewInt(100),
 				EpochInterval:  10,
-				DecayDivisor:   2,
+				DecayFactor:    big.NewRat(1, 2),
 				RewardTaxRate:  big.NewRat(1, 2),
 			},
 			OriginalBlockNumber: test.offset,
@@ -53,5 +53,68 @@ func TestRegenesisRewards(t *testing.T) {
 		if got := db.GetBalance(h.Coinbase); !got.Eq(uint256.NewInt(test.want)) {
 			t.Fatalf("height %d offset %d: %s want %d", test.number, test.offset, got, test.want)
 		}
+	}
+}
+
+func TestRewardDecay(t *testing.T) {
+	// Expected balances follow pyquarkchain: floor the epoch decay first,
+	// then multiply by the local fee rate and floor again.
+	for _, test := range []struct {
+		name   string
+		factor string
+		amount uint64
+		epoch  uint64
+		want   uint64
+	}{
+		{"before decay", "22/25", 100, 0, 50},
+		{"first epoch", "22/25", 100, 1, 44},
+		{"second epoch", "22/25", 100, 2, 38},
+		{"round once after exponentiation", "22/25", 100, 3, 34},
+		{"slow decay", "22/25", 100, 6, 23},
+		{"decay before tax", "22/25", 3, 1, 1},
+		{"denominator limit", "99/100", 100, 100, 18},
+		{"huge epoch", "99/100", 100, math.MaxUint64, 0},
+		{"no decay", "1", 100, math.MaxUint64, 50},
+		{"zero factor before decay", "0", 100, 0, 50},
+		{"zero factor after decay", "0", 100, 1, 0},
+		{"zero subsidy", "22/25", 0, 0, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			factor, ok := new(big.Rat).SetString(test.factor)
+			if !ok {
+				t.Fatal("invalid test factor")
+			}
+			config := &params.QuarkChainConfig{
+				Reward: &params.RewardConfig{
+					CoinbaseAmount: uint256.NewInt(test.amount),
+					EpochInterval:  1,
+					DecayFactor:    factor,
+					RewardTaxRate:  big.NewRat(1, 2),
+				},
+				OriginalBlockNumber: test.epoch,
+			}
+			if err := config.Reward.Check(); err != nil {
+				t.Fatal(err)
+			}
+			// A positive new block number with epoch zero is needed to exercise
+			// the subsidy before its first decay without crediting genesis.
+			if test.epoch == 0 {
+				config.Reward.EpochInterval = 2
+			} else {
+				config.OriginalBlockNumber--
+			}
+			db, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &types.Header{Number: big.NewInt(1), Coinbase: common.HexToAddress("0x01")}
+			accumulateRewards(config, db, h)
+			if got := db.GetBalance(h.Coinbase); !got.Eq(uint256.NewInt(test.want)) {
+				t.Fatalf("balance %s, want %d", got, test.want)
+			}
+			if factor.RatString() != test.factor {
+				t.Fatalf("decay factor mutated: %s", factor)
+			}
+		})
 	}
 }

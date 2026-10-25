@@ -43,14 +43,21 @@ func (c *PoWConfig) Check() error {
 type RewardConfig struct {
 	CoinbaseAmount *uint256.Int `json:"coinbaseAmount"`
 	EpochInterval  uint64       `json:"epochInterval"`
-	// DecayDivisor is 2 for the reference chains' one-half subsidy per epoch.
-	DecayDivisor  uint64   `json:"decayDivisor"`
+	// DecayFactor is the fraction retained per epoch, e.g. "22/25" for 0.88.
+	DecayFactor   *big.Rat `json:"decayFactor"`
 	RewardTaxRate *big.Rat `json:"rewardTaxRate"` // Root share, e.g. "1/2".
 }
 
 func (c *RewardConfig) Check() error {
-	if c == nil || c.CoinbaseAmount == nil || c.EpochInterval == 0 || c.DecayDivisor == 0 || c.RewardTaxRate == nil {
-		return errors.New("posw: block subsidy, epoch interval, decay divisor and reward tax rate are required")
+	if c == nil || c.CoinbaseAmount == nil || c.EpochInterval == 0 || c.DecayFactor == nil || c.RewardTaxRate == nil {
+		return errors.New("posw: block subsidy, epoch interval, decay factor and reward tax rate are required")
+	}
+	if c.DecayFactor.Sign() < 0 || c.DecayFactor.Cmp(big.NewRat(1, 1)) > 0 {
+		return errors.New("posw: reward decay factor must be between zero and one")
+	}
+	// Match pyquarkchain's block_reward_decay_factor denominator limit.
+	if c.DecayFactor.Denom().Cmp(big.NewInt(100)) > 0 {
+		return errors.New("posw: reward decay factor denominator must not exceed 100")
 	}
 	if c.RewardTaxRate.Sign() < 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) > 0 {
 		return errors.New("posw: reward tax rate must be between zero and one")
