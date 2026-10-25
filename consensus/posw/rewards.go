@@ -38,20 +38,10 @@ func accumulateRewards(config *params.QuarkChainConfig, state vm.StateDB, header
 	reward := c.CoinbaseAmount.ToBig()
 	height := new(big.Int).Add(header.Number, new(big.Int).SetUint64(config.OriginalBlockNumber))
 	epoch := height.Div(height, new(big.Int).SetUint64(c.EpochInterval))
-	if c.DecayFactor.Cmp(big.NewRat(1, 1)) < 0 {
-		// For a factor n/d < 1, (n/d)^d <= ((d-1)/d)^d < 1/2.
-		// After d*BitLen epochs the integer subsidy is zero. The validated
-		// denominator is at most 100, bounding exponentiation even at huge heights.
-		zeroEpoch := new(big.Int).Mul(c.DecayFactor.Denom(), big.NewInt(int64(reward.BitLen())))
-		if epoch.Cmp(zeroEpoch) >= 0 {
-			reward.SetInt64(0)
-		} else {
-			numerator := new(big.Int).Exp(c.DecayFactor.Num(), epoch, nil)
-			denominator := new(big.Int).Exp(c.DecayFactor.Denom(), epoch, nil)
-			reward.Mul(reward, numerator)
-			reward.Div(reward, denominator)
-		}
-	}
+	numerator := new(big.Int).Exp(c.DecayFactor.Num(), epoch, nil)
+	denominator := new(big.Int).Exp(c.DecayFactor.Denom(), epoch, nil)
+	reward.Mul(reward, numerator)
+	reward.Div(reward, denominator)
 	localRate := new(big.Rat).Sub(big.NewRat(1, 1), c.RewardTaxRate)
 	reward.Mul(reward, localRate.Num())
 	reward.Div(reward, localRate.Denom())

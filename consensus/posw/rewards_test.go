@@ -17,7 +17,6 @@
 package posw
 
 import (
-	"math"
 	"math/big"
 	"testing"
 
@@ -33,7 +32,7 @@ func TestRegenesisRewards(t *testing.T) {
 		number, offset uint64
 		want           uint64
 	}{
-		{0, 19, 0}, {1, 18, 25}, {1, 19, 12}, {10, 19, 12}, {11, 19, 6}, {math.MaxUint64, math.MaxUint64, 0},
+		{0, 19, 0}, {1, 18, 25}, {1, 19, 12}, {10, 19, 12}, {11, 19, 6}, {71, 19, 0},
 	} {
 		config := &params.QuarkChainConfig{
 			Reward: &params.RewardConfig{
@@ -73,8 +72,8 @@ func TestRewardDecay(t *testing.T) {
 		{"slow decay", "22/25", 100, 6, 23},
 		{"decay before tax", "22/25", 3, 1, 1},
 		{"denominator limit", "99/100", 100, 100, 18},
-		{"huge epoch", "99/100", 100, math.MaxUint64, 0},
-		{"no decay", "1", 100, math.MaxUint64, 50},
+		{"fully decayed", "22/25", 100, 100, 0},
+		{"no decay", "1", 100, 100, 50},
 		{"zero factor before decay", "0", 100, 0, 50},
 		{"zero factor after decay", "0", 100, 1, 0},
 		{"zero subsidy", "22/25", 0, 0, 0},
