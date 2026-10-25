@@ -26,13 +26,13 @@ import (
 
 // PoWConfig defines the bomb-free Homestead adjustment used by both QKC chains.
 type PoWConfig struct {
-	AdjustmentCutoff  uint64       `json:"adjustmentCutoff"`
-	AdjustmentFactor  uint64       `json:"adjustmentFactor"`
-	MinimumDifficulty *uint256.Int `json:"minimumDifficulty"`
+	AdjustmentCutoff  uint64   `json:"adjustmentCutoff"`
+	AdjustmentFactor  uint64   `json:"adjustmentFactor"`
+	MinimumDifficulty *big.Int `json:"minimumDifficulty"`
 }
 
 func (c *PoWConfig) Check() error {
-	if c == nil || c.AdjustmentCutoff == 0 || c.AdjustmentFactor == 0 || c.MinimumDifficulty == nil || c.MinimumDifficulty.IsZero() {
+	if c == nil || c.AdjustmentCutoff == 0 || c.AdjustmentFactor == 0 || c.MinimumDifficulty == nil || c.MinimumDifficulty.Sign() <= 0 {
 		return errors.New("posw: positive cutoff, factor and minimum difficulty are required")
 	}
 	return nil

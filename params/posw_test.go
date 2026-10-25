@@ -26,7 +26,7 @@ import (
 )
 
 func TestPoWRewardConfigJSON(t *testing.T) {
-	input := `{"pow":{"adjustmentCutoff":7,"adjustmentFactor":512,"minimumDifficulty":"100"},"reward":{"coinbaseAmount":"5000000000000000000","epochInterval":12600000,"decayFactor":"0.88","rewardTaxRate":"1/2"},"originalBlockNumber":12345678}`
+	input := `{"pow":{"adjustmentCutoff":7,"adjustmentFactor":512,"minimumDifficulty":100},"reward":{"coinbaseAmount":"5000000000000000000","epochInterval":12600000,"decayFactor":"0.88","rewardTaxRate":"1/2"},"originalBlockNumber":12345678}`
 	var config QuarkChainConfig
 	if err := json.Unmarshal([]byte(input), &config); err != nil {
 		t.Fatal(err)
@@ -52,6 +52,16 @@ func TestPoWRewardConfigJSON(t *testing.T) {
 		config.Reward.RewardTaxRate = rate
 		if err := config.Reward.Check(); err == nil {
 			t.Fatalf("accepted reward tax %v", rate)
+		}
+	}
+}
+
+func TestMinimumDifficultyValidation(t *testing.T) {
+	for _, minimum := range []*big.Int{nil, big.NewInt(-1), big.NewInt(0), big.NewInt(1)} {
+		config := &PoWConfig{AdjustmentCutoff: 7, AdjustmentFactor: 512, MinimumDifficulty: minimum}
+		valid := minimum != nil && minimum.Sign() > 0
+		if err := config.Check(); (err == nil) != valid {
+			t.Fatalf("minimum difficulty %v: error %v, want valid %v", minimum, err, valid)
 		}
 	}
 }

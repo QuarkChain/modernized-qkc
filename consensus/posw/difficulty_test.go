@@ -26,7 +26,7 @@ import (
 )
 
 func TestDifficultyReference(t *testing.T) {
-	config := &params.PoWConfig{AdjustmentCutoff: 10, AdjustmentFactor: 2048, MinimumDifficulty: uint256.NewInt(1)}
+	config := &params.PoWConfig{AdjustmentCutoff: 10, AdjustmentFactor: 2048, MinimumDifficulty: big.NewInt(1)}
 	for _, test := range []struct{ delta, want uint64 }{{0, 2049000}, {9, 2049000}, {10, 2048000}, {20, 2047000}, {1000, 1949000}, {math.MaxUint64, 1949000}} {
 		parent := big.NewInt(2048000)
 		if got := CalcDifficulty(config, test.delta, 0, parent); !got.IsUint64() || got.Uint64() != test.want {
@@ -39,6 +39,11 @@ func TestDifficultyReference(t *testing.T) {
 	config.MinimumDifficulty.SetUint64(2000000)
 	if got := CalcDifficulty(config, 1000, 0, big.NewInt(2048000)); got.Int64() != 2000000 {
 		t.Fatal(got)
+	} else {
+		got.SetInt64(0)
+		if config.MinimumDifficulty.Int64() != 2000000 {
+			t.Fatal("result aliases configured minimum difficulty")
+		}
 	}
 }
 

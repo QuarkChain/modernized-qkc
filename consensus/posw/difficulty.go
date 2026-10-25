@@ -34,8 +34,8 @@ func CalcDifficulty(config *params.PoWConfig, timestamp, parentTimestamp uint64,
 	}
 	diff := new(big.Int).Div(parentDifficulty, new(big.Int).SetUint64(config.AdjustmentFactor))
 	diff.Mul(diff, adjustment).Add(diff, parentDifficulty)
-	if minimum := config.MinimumDifficulty.ToBig(); diff.Cmp(minimum) < 0 {
-		return minimum
+	if diff.Cmp(config.MinimumDifficulty) < 0 {
+		diff.Set(config.MinimumDifficulty)
 	}
 	return diff
 }
