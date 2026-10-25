@@ -807,6 +807,16 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		if err := c.QuarkChain.PoSW.Check(); err != nil {
 			return err
 		}
+		if c.QuarkChain.PoW != nil {
+			if err := c.QuarkChain.PoW.Check(); err != nil {
+				return err
+			}
+		}
+		if c.QuarkChain.Reward != nil {
+			if err := c.QuarkChain.Reward.Check(); err != nil {
+				return err
+			}
+		}
 	}
 	type fork struct {
 		name      string

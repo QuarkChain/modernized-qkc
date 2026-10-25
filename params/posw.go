@@ -18,10 +18,45 @@ package params
 
 import (
 	"errors"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 )
+
+// PoWConfig defines the bomb-free Homestead adjustment used by both QKC chains.
+type PoWConfig struct {
+	AdjustmentCutoff  uint64       `json:"adjustmentCutoff"`
+	AdjustmentFactor  uint64       `json:"adjustmentFactor"`
+	MinimumDifficulty *uint256.Int `json:"minimumDifficulty"`
+}
+
+func (c *PoWConfig) Check() error {
+	if c == nil || c.AdjustmentCutoff == 0 || c.AdjustmentFactor == 0 || c.MinimumDifficulty == nil || c.MinimumDifficulty.IsZero() {
+		return errors.New("posw: positive cutoff, factor and minimum difficulty are required")
+	}
+	return nil
+}
+
+// RewardConfig defines block subsidies only. Transaction fees are split during
+// transaction execution, independently of consensus finalization.
+type RewardConfig struct {
+	CoinbaseAmount *uint256.Int `json:"coinbaseAmount"`
+	EpochInterval  uint64       `json:"epochInterval"`
+	// DecayDivisor is 2 for the reference chains' one-half subsidy per epoch.
+	DecayDivisor  uint64   `json:"decayDivisor"`
+	RewardTaxRate *big.Rat `json:"rewardTaxRate"` // Root share, e.g. "1/2".
+}
+
+func (c *RewardConfig) Check() error {
+	if c == nil || c.CoinbaseAmount == nil || c.EpochInterval == 0 || c.DecayDivisor == 0 || c.RewardTaxRate == nil {
+		return errors.New("posw: block subsidy, epoch interval, decay divisor and reward tax rate are required")
+	}
+	if c.RewardTaxRate.Sign() < 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) > 0 {
+		return errors.New("posw: reward tax rate must be between zero and one")
+	}
+	return nil
+}
 
 var (
 	// RootStakingContractAddress hosts the staking contract only on shard 0.

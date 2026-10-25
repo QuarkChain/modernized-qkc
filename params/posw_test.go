@@ -18,11 +18,40 @@ package params
 
 import (
 	"encoding/json"
+	"math/big"
 	"reflect"
 	"testing"
 
 	"github.com/holiman/uint256"
 )
+
+func TestPoWRewardConfigJSON(t *testing.T) {
+	input := `{"pow":{"adjustmentCutoff":7,"adjustmentFactor":512,"minimumDifficulty":"100"},"reward":{"coinbaseAmount":"5000000000000000000","epochInterval":12600000,"decayDivisor":2,"rewardTaxRate":"1/2"},"originalBlockNumber":12345678}`
+	var config QuarkChainConfig
+	if err := json.Unmarshal([]byte(input), &config); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PoW.Check(); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Reward.Check(); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundtrip QuarkChainConfig
+	if err := json.Unmarshal(encoded, &roundtrip); err != nil || !reflect.DeepEqual(config, roundtrip) {
+		t.Fatalf("config JSON round trip: %s, %v", encoded, err)
+	}
+	for _, rate := range []*big.Rat{big.NewRat(-1, 2), big.NewRat(3, 2)} {
+		config.Reward.RewardTaxRate = rate
+		if err := config.Reward.Check(); err == nil {
+			t.Fatalf("accepted reward tax %v", rate)
+		}
+	}
+}
 
 func TestPoSWConfig(t *testing.T) {
 	var config *PoSWConfig
