@@ -25,8 +25,11 @@ import (
 
 // CalcDifficulty is shared by root and shard consensus. It is Homestead's
 // adjustment with configurable parameters and no difficulty bomb, matching
-// goquarkchain's EthDifficultyCalculator. Callers validate timestamps first.
-func CalcDifficulty(config *params.PoWConfig, timestamp, parentTimestamp uint64, parentDifficulty *big.Int) *big.Int {
+// goquarkchain's EthDifficultyCalculator. Before calling, header validation must
+// reject timestamp <= parentTimestamp, and block producers must choose a strictly
+// later timestamp. Like consensus.Engine.CalcDifficulty, this function calculates
+// difficulty for valid inputs and does not return header validation errors.
+func CalcDifficulty(config *params.PoSWConfig, timestamp, parentTimestamp uint64, parentDifficulty *big.Int) *big.Int {
 	adjustment := new(big.Int).SetUint64((timestamp - parentTimestamp) / config.AdjustmentCutoff)
 	adjustment.Sub(big.NewInt(1), adjustment)
 	if adjustment.Cmp(big.NewInt(-99)) < 0 {
@@ -44,15 +47,17 @@ func CalcDifficulty(config *params.PoWConfig, timestamp, parentTimestamp uint64,
 // counts all blocks by this coinbase among the preceding windowSize-1 ancestors,
 // including ordinary PoW blocks. The candidate occupies the last window slot.
 // Stakes and the window must come from the candidate's parent fork/state.
-func GetAdjustedDifficulty(config *params.PoSWConfig, difficulty *big.Int, stakes *uint256.Int, mined uint64) *big.Int {
+// number is the candidate's height on the new chain; the config applies the old height offset.
+// The configuration determines whether the stake requirement decays by epoch.
+func GetAdjustedDifficulty(config *params.PoSWConfig, number, difficulty *big.Int, stakes *uint256.Int, mined uint64) *big.Int {
 	diff := new(big.Int).Set(difficulty)
-	if config == nil || !config.Enabled || stakes == nil {
+	if config == nil || !config.StakingEnabled || stakes == nil || number.Sign() == 0 {
 		return diff
 	}
-	quota := new(uint256.Int).Div(stakes, config.StakePerBlock)
+	quota := new(big.Int).Div(stakes.ToBig(), config.StakePerBlockAt(number))
 	// Compare before narrowing: large stakes must not wrap a uint64 quota.
 	threshold := config.WindowSize
-	if quota.LtUint64(threshold) {
+	if quota.Cmp(new(big.Int).SetUint64(threshold)) < 0 {
 		threshold = quota.Uint64()
 	}
 	if mined < threshold {

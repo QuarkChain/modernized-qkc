@@ -51,12 +51,7 @@ type QuarkChainConfig struct {
 	ShardID  uint32   `json:"shardId"`  // ID of this shard
 	ShardIDs []uint32 `json:"shardIds"` // IDs of all shards in the network, this one included
 
-	PoSW   *PoSWConfig   `json:"posw,omitempty"` // PoSW configuration for this shard
-	PoW    *PoWConfig    `json:"pow,omitempty"`
-	Reward *RewardConfig `json:"reward,omitempty"`
-	// OriginalBlockNumber is the old chain's stop height represented by genesis.
-	// Only reward epochs use this offset; new block numbers still start at zero.
-	OriginalBlockNumber uint64 `json:"originalBlockNumber,omitempty"`
+	PoSW *PoSWConfig `json:"posw"` // Required consensus configuration for this shard.
 }
 
 // String implements the stringer interface.

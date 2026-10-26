@@ -35,7 +35,6 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
-	"github.com/holiman/uint256"
 )
 
 func TestSetupGenesis(t *testing.T) {
@@ -342,7 +341,7 @@ func TestBinaryGenesisCommit(t *testing.T) {
 
 func genesisConfig(shardID uint32) *params.ChainConfig {
 	config := *params.AllEthashProtocolChanges
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: shardID}
+	config.QuarkChain = params.NewTestQuarkChainConfig(shardID)
 	return &config
 }
 
@@ -376,9 +375,12 @@ func TestStakingGenesisFromConfig(t *testing.T) {
 	for _, scheme := range []string{rawdb.HashScheme, rawdb.PathScheme} {
 		for _, shardID := range []uint32{0, 1} {
 			t.Run(scheme+"/"+strconv.FormatUint(uint64(shardID), 10), func(t *testing.T) {
-				for _, posw := range []*params.PoSWConfig{nil, {}, {Enabled: true, WindowSize: 256, StakePerBlock: uint256.NewInt(100), DiffDivider: 20}} {
+				for _, stakingEnabled := range []bool{false, true} {
 					config := genesisConfig(shardID)
-					config.QuarkChain.PoSW = posw
+					config.QuarkChain.PoSW.StakingEnabled = stakingEnabled
+					config.QuarkChain.PoSW.WindowSize = 256
+					config.QuarkChain.PoSW.StakePerBlock = big.NewInt(100)
+					config.QuarkChain.PoSW.DiffDivider = 20
 					alloc := PoSWStakingContractAllocs(shardID)
 					funded := common.HexToAddress("0xabcd")
 					alloc[funded] = types.Account{Balance: big.NewInt(42)}

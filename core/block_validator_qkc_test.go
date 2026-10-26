@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"math/big"
 	"testing"
 
@@ -156,13 +157,14 @@ func TestValidateXShardDeposits(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			config := *params.MergedTestChainConfig
-			config.QuarkChain = &params.QuarkChainConfig{ShardID: 1, ShardIDs: []uint32{0, 1}}
+			config.QuarkChain = params.NewTestQuarkChainConfig(1, 0, 1)
 			gspec := &Genesis{
 				Config:    &config,
 				GasLimit:  gasLimit,
 				ExtraData: (&types.QKCExtra{}).Encode(),
 				Alloc:     withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),
 			}
+			maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 			engine := qkcTestEngine{beacon.New(ethash.NewFaker())}
 			extra := types.QKCExtra{
 				PrevRootBlock:  prevRoot,
