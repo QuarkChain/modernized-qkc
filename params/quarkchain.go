@@ -49,7 +49,7 @@ type QuarkChainConfig struct {
 	// pyquarkchain. Zero means no cap.
 	MaxBlocksPerRootBlock uint64 `json:"maxBlocksPerRootBlock,omitempty"`
 
-	PoSW *PoSWConfig `json:"posw,omitempty"` // PoSW configuration for this shard}
+	PoSW *PoSWConfig `json:"posw,omitempty"` // PoSW configuration for this shard
 }
 
 // String implements the stringer interface.

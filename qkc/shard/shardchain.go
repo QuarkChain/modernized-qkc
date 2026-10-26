@@ -108,6 +108,10 @@ var (
 // ShardChain is the consensus layer of a shard. It imports shard blocks into
 // the underlying chain under the root chain rules, imports the root blocks, and
 // selects the canonical shard head.
+//
+// ShardChain exclusively manages the underlying chain's canonical head and
+// canonical hash mappings. Callers must not independently change the head or
+// import canonical headers through core.BlockChain.
 type ShardChain struct {
 	db    ethdb.KeyValueStore // Database of the root blocks seen by the shard
 	chain *core.BlockChain
@@ -489,9 +493,9 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 // block and its body before forwarding it to shards. Each shard validates its
 // minor blocks and distributes outgoing cross-shard deposits. This method checks
 // availability and consistency of local shard data.
-// Failures of these cluster guarantees wrap ErrClusterInconsistency;
-// missing already-validated local data wraps ErrShardInconsistency. Ordinary
-// input validation errors keep their specific error classification.
+// Failures of these cluster guarantees wrap ErrClusterStateInconsistency;
+// missing already-validated local data wraps ErrShardStateInconsistency.
+// Ordinary input validation errors keep their specific error classification.
 //
 // Rule 1: the master must validate root consensus, including proof of work
 // and total difficulty. Locally, the referenced parent must be available, and
@@ -551,8 +555,8 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	// Rule 2: the master or peer shard must ensure every carried local-shard
 	// block and relevant cross-shard deposit list is available before this root
 	// block is imported. Check these guarantees defensively here; missing required
-	// data is an ErrClusterInconsistency. Preserve the local headers' carried
-	// order for the first-block check in rule 3.
+	// data is an ErrClusterStateInconsistency. Preserve the local headers'
+	// carried order for the first-block check in rule 3.
 	var blocks []*types.Header
 	for _, block := range root.ShardBlockHeaders() {
 		extra, err := block.QKCExtra()
@@ -660,10 +664,12 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 //	R1 confirms the shard chain up to A, and the new root tip R2 up to C.
 //	C is on a fork of the head H, so the head moves from H to C, not to D.
 //
-// Case 2: C is canonical. Starting at the current head, walk back to the nearest
-// shard block whose referenced root is the new root tip or one of its ancestors.
-// C is the earliest block the walk can reach. This follows "we need to scan
-// back until finding a minor block pointing to the same root chain r_block is on".
+// Case 2: C is canonical. Since ShardChain manages both the head and canonical
+// mappings, C is the current head or one of its ancestors. Starting at the
+// current head, walk back to the nearest shard block whose referenced root is
+// the new root tip or one of its ancestors. C is the earliest block the walk
+// can reach. This follows "we need to scan back until finding a minor block
+// pointing to the same root chain r_block is on".
 //
 //	                     +----- R2'
 //	                     v
@@ -676,20 +682,19 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 //	R1, and Y and H reference R2', the former root tip. With R3 as the new
 //	root tip, the head moves back from H to X.
 func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confirmed *types.Header) error {
+	if c.rootTip == nil || c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
+		// Initialization and case 1 select C directly. Init must also ask core
+		// to accept an unchanged head before publishing the root tip.
+		if err := c.setCanonicalByHead(confirmed); err != nil {
+			return err
+		}
+		c.rootTip = rootTip
+		return nil
+	}
+	// Case 2: scan above C, which is already compatible with rootTip. Stopping
+	// at C also avoids looking up G0's empty previous-root reference.
 	current := c.chain.CurrentBlock()
 	head := current
-	if c.rootTip == nil {
-		// Initialization restores the confirmed checkpoint, even if current
-		// is a compatible unconfirmed descendant. Normal imports below may
-		// retain descendants.
-		head = confirmed
-	} else if c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
-		// Case 1 for an already initialized chain.
-		head = confirmed
-	}
-	// Only case 2 needs to scan above C, which is already compatible with rootTip.
-	// Initialization and case 1 select C directly and skip the loop. Stopping at
-	// C also avoids looking up G0's empty previous-root reference.
 	for head.Number.Cmp(confirmed.Number) > 0 {
 		prevRoot, err := c.prevRootBlock(head)
 		if err != nil {
@@ -702,20 +707,26 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 			return fmt.Errorf("%w: %w: shard head parent missing", ErrShardStateInconsistency, consensus.ErrUnknownAncestor)
 		}
 	}
-	// Init must also ask core to accept an unchanged head, so a stopped chain
-	// or missing execution state cannot be published as successfully initialized.
-	if c.rootTip == nil || head.Hash() != current.Hash() {
-		block := c.chain.GetBlock(head.Hash(), head.Number.Uint64())
-		if block == nil {
-			return fmt.Errorf("%w: %w: head #%d [%x..]", ErrShardStateInconsistency, consensus.ErrUnknownAncestor, head.Number, head.Hash().Bytes()[:4])
-		}
-		if _, err := c.chain.SetCanonical(block); err != nil {
-			return fmt.Errorf("set canonical head %x: %w", head.Hash(), err)
+	if head.Hash() != current.Hash() {
+		if err := c.setCanonicalByHead(head); err != nil {
+			return err
 		}
 	}
 	// Advance the in-memory root tip even when the shard head already matches.
 	// After a restart, root-block initialization sets it before imports resume.
 	c.rootTip = rootTip
+	return nil
+}
+
+// setCanonicalByHead loads the block for head and makes it canonical.
+func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
+	block := c.chain.GetBlock(head.Hash(), head.Number.Uint64())
+	if block == nil {
+		return fmt.Errorf("%w: %w: head #%d [%x..]", ErrShardStateInconsistency, consensus.ErrUnknownAncestor, head.Number, head.Hash().Bytes()[:4])
+	}
+	if _, err := c.chain.SetCanonical(block); err != nil {
+		return fmt.Errorf("set canonical head %x: %w", head.Hash(), err)
+	}
 	return nil
 }
 

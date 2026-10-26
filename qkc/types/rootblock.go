@@ -300,7 +300,7 @@ func sszMerkleRoot(leaves []common.Hash) common.Hash {
 // must treat the returned data and pointed-to headers as read-only. Mutators
 // may only be called while the block is exclusively owned. Once published to
 // other goroutines, the block must be treated as immutable. A block returned by
-// WithBody has not had ShardBlockHeaders recomputed; call Finalize before treating
+// WithBody has not had ShardHeaderHash recomputed; call Finalize before treating
 // it as a complete block.
 type RootBlock struct {
 	header            *RootBlockHeader
