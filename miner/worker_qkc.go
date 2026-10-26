@@ -47,6 +47,7 @@ func (miner *Miner) commitXShardDeposits(ctx context.Context, env *environment, 
 			return err
 		}
 		if deposit == nil {
+			// Record the EOF cursor; subsequent Next calls leave it unchanged.
 			extra.Cursor = deposits.Cursor()
 			break
 		}
