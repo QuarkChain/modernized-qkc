@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"math/big"
 	"strings"
 	"testing"
@@ -226,6 +227,7 @@ func TestValidateXShardDeposits(t *testing.T) {
 				ExtraData: (&types.QKCExtra{}).Encode(),
 				Alloc:     withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),
 			}
+			maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 			engine := qkcTestEngine{beacon.New(ethash.NewFaker())}
 			extra := types.QKCExtra{
 				PrevRootBlock:  prevRoot,
