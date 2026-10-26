@@ -28,6 +28,8 @@ import (
 	"github.com/holiman/uint256"
 )
 
+const getLockedStakesSelector = "0xfd8c4646"
+
 var _ consensus.StakingReader = (*BlockChain)(nil)
 
 // GetLockedStakes executes the shard staking getter at the requested parent
@@ -46,8 +48,9 @@ func (bc *BlockChain) GetLockedStakes(parent *types.Header, staker common.Addres
 	rules := bc.chainConfig.Rules(parent.Number, true, parent.Time)
 	statedb.Prepare(rules, common.Address{}, common.Address{}, &address, vm.ActivePrecompiles(rules), nil)
 	input := make([]byte, 36)
-	// getLockedStakes(address); the second return value (root signer) is unused.
-	copy(input, common.FromHex("0xfd8c4646"))
+	// getLockedStakes(address); the second return value (signer) is used by
+	// root-chain consensus and is unused here on the shard.
+	copy(input, common.FromHex(getLockedStakesSelector))
 	copy(input[16:], staker[:])
 	evm := vm.NewEVM(NewEVMBlockContext(parent, bc, nil), statedb, bc.chainConfig, vm.Config{})
 	output, _, err := evm.StaticCall(common.Address{}, address, input, vm.NewGasBudget(100_000, 100_000))
