@@ -1,0 +1,51 @@
+# Shared network definitions. EVM ChainID values identify individual shards.
+NetworkID = 2
+
+[Root.PoSW]
+Enabled = true
+WindowSize = 256
+StakePerBlock = "1000000000000000000000000000000"
+DiffDivider = 20
+
+[[Shards]]
+ChainID = "100001"
+HomesteadBlock = "0"
+EIP150Block = "0"
+EIP155Block = "0"
+EIP158Block = "0"
+ByzantiumBlock = "0"
+ConstantinopleBlock = "0"
+PetersburgBlock = "0"
+IstanbulBlock = "0"
+BerlinBlock = "0"
+LondonBlock = "0"
+
+[Shards.QuarkChain]
+ShardID = 0
+# Omitted ShardIDs defaults to all shards in this network.
+
+# This shard's PoSW is disabled independently of the root chain.
+[Shards.QuarkChain.PoSW]
+Enabled = false
+
+[[Shards]]
+ChainID = "100002"
+HomesteadBlock = "0"
+EIP150Block = "0"
+EIP155Block = "0"
+EIP158Block = "0"
+ByzantiumBlock = "0"
+ConstantinopleBlock = "0"
+PetersburgBlock = "0"
+IstanbulBlock = "0"
+BerlinBlock = "0"
+LondonBlock = "0"
+
+[Shards.QuarkChain]
+ShardID = 1
+
+[Shards.QuarkChain.PoSW]
+Enabled = true
+WindowSize = 128
+StakePerBlock = "500000000000000000000000000000"
+DiffDivider = 10

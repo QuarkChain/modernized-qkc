@@ -1,0 +1,20 @@
+# NetworkFile is relative to this file. Other paths follow geth: relative to cwd.
+NetworkFile = "network.toml"
+
+[Node]
+DataDir = "./qkc-data"
+IPCPath = "qkc.ipc"
+HTTPHost = "127.0.0.1"
+HTTPPort = 8545
+HTTPModules = ["eth", "net", "web3"]
+WSHost = ""
+
+[Node.P2P]
+ListenAddr = ":30303"
+MaxPeers = 25
+NoDiscovery = true
+
+[Eth]
+SyncMode = "full"
+DatabaseCache = 512
+RPCGasCap = 50000000
