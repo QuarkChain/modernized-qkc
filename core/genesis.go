@@ -555,7 +555,7 @@ func (g *Genesis) toBlockWithRoot(root common.Hash) *types.Block {
 		}
 		if conf.IsAmsterdam(num, g.Timestamp) {
 			head.SlotNumber = g.SlotNumber
-			if head.SlotNumber == nil {
+			if conf.QuarkChain != nil || head.SlotNumber == nil {
 				head.SlotNumber = new(uint64)
 			}
 			head.BlockAccessListHash = &types.EmptyBlockAccessListHash

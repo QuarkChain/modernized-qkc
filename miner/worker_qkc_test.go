@@ -19,6 +19,7 @@ package miner
 import (
 	"context"
 	"errors"
+	"maps"
 	"math/big"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
@@ -127,6 +129,7 @@ func TestBuildXShardDeposits(t *testing.T) {
 						config.AmsterdamTime = new(uint64)
 					}
 					alloc := core.SystemContractAllocs()
+					maps.Copy(alloc, core.PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 					alloc[testBankAddress] = types.Account{Balance: testBankFunds}
 					// Deposits to a contract must remain moves, even if its code reverts.
 					alloc[testUserAddress] = types.Account{Code: common.FromHex("0x60006000fd"), Balance: new(big.Int)}
@@ -175,18 +178,10 @@ func TestBuildXShardDeposits(t *testing.T) {
 					miner := New(NewMockBackend(chain, pool), mc, engine)
 					args := &generateParams{
 						timestamp: 1, forceTime: true, parentHash: chain.Genesis().Hash(),
-						coinbase: common.Address{0xcc}, beaconRoot: new(common.Hash), slotNum: new(uint64),
-						qkc: &types.QKCExtra{ShardID: 1, PrevRootBlock: common.Hash{0x77}}, noTxs: tt.noTxs,
+						coinbase: common.Address{0xcc},
+						qkc:      &types.QKCExtra{ShardID: 1, PrevRootBlock: common.Hash{0x77}}, noTxs: tt.noTxs,
 					}
 					result := miner.generateWork(context.Background(), args, false)
-					if amsterdam && tt.limit < 2*params.XShardSendGas {
-						// System calls alone exceed the BAL budget. Reject the candidate
-						// rather than returning a block that cannot be imported.
-						if result.err == nil || !strings.Contains(result.err.Error(), "block access list exceeds size constraint") {
-							t.Fatalf("expected access-list size error, got %v", result.err)
-						}
-						return
-					}
 					if tt.missingInbox {
 						if result.err == nil {
 							t.Fatal("built without an inbox")
@@ -201,6 +196,16 @@ func TestBuildXShardDeposits(t *testing.T) {
 					}
 					if result.err != nil {
 						t.Fatal(result.err)
+					}
+					header := result.block.Header()
+					if header.ParentBeaconRoot == nil || *header.ParentBeaconRoot != (common.Hash{}) {
+						t.Fatal("QKC beacon root is not zero")
+					}
+					if amsterdam && (header.SlotNumber == nil || *header.SlotNumber != 0) {
+						t.Fatal("QKC slot number is not zero")
+					}
+					if got := result.stateDB.GetState(params.BeaconRootsAddress, common.BigToHash(big.NewInt(1))); got != (common.Hash{}) {
+						t.Fatalf("beacon timestamp written by QKC builder: %x", got)
 					}
 					extra, err := result.block.Header().QKCExtra()
 					if err != nil {
@@ -235,8 +240,27 @@ func TestBuildXShardDeposits(t *testing.T) {
 					if got := result.stateDB.GetBalance(args.coinbase).ToBig(); got.Cmp(result.fees) != 0 {
 						t.Fatalf("coinbase fees %v, reported %v", got, result.fees)
 					}
-					// Re-execution runs the unchanged validateXShardDeposits rules.
-					if _, err := chain.InsertChain([]*types.Block{result.block}); err != nil {
+					// Exercise the wire encoding before re-execution and deposit validation.
+					encoded, err := rlp.EncodeToBytes(result.block)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var decoded types.Block
+					if err := rlp.DecodeBytes(encoded, &decoded); err != nil {
+						t.Fatal(err)
+					}
+					if decoded.Hash() != result.block.Hash() {
+						t.Fatal("RLP round trip changed block hash")
+					}
+					_, err = chain.InsertChain([]*types.Block{&decoded})
+					if amsterdam && tt.limit < 2*params.XShardSendGas {
+						// Like geth, construction permits this candidate; import rejects its oversized BAL.
+						if err == nil || !strings.Contains(err.Error(), "block access list exceeds size constraint") {
+							t.Fatalf("expected access-list size error on import, got %v", err)
+						}
+						return
+					}
+					if err != nil {
 						t.Fatalf("import built block: %v", err)
 					}
 				})

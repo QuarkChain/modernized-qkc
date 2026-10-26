@@ -19,6 +19,7 @@ package shard
 import (
 	"context"
 	"errors"
+	"maps"
 	"math/big"
 	"testing"
 
@@ -58,6 +59,7 @@ func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, miner
 	}
 	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 	alloc := core.SystemContractAllocs()
+	maps.Copy(alloc, core.PoSWStakingContractAllocs(shardID))
 	alloc[crypto.PubkeyToAddress(key.PublicKey)] = types.Account{Balance: big.NewInt(params.Ether)}
 	genesis := &core.Genesis{
 		Config: &config, GasLimit: 54000, Alloc: alloc,
@@ -95,7 +97,7 @@ func TestBuildShardBlock(t *testing.T) {
 				t.Fatal(err)
 			}
 			root := env.sc.rootTip().Hash()
-			args := miner.QKCBlockArgs{Timestamp: 1, FeeRecipient: common.Address{0xcc}, BeaconRoot: new(common.Hash)}
+			args := miner.QKCBlockArgs{Timestamp: 1, FeeRecipient: common.Address{0xcc}}
 			block, err := env.sc.BuildBlock(context.Background(), pool, config, args)
 			if err != nil {
 				t.Fatal(err)
@@ -145,7 +147,7 @@ func TestBuildShardBlockRootReferences(t *testing.T) {
 	ctx := context.Background()
 	root3 := env.sc.rootTip().Hash()
 	root1 := env.sc.RootBlockByNumber(root3, 1)
-	args := miner.QKCBlockArgs{Timestamp: 1, PrevRootBlock: root1.Hash(), BeaconRoot: new(common.Hash), NoTxs: true}
+	args := miner.QKCBlockArgs{Timestamp: 1, PrevRootBlock: root1.Hash(), NoTxs: true}
 	a, err := env.sc.BuildBlock(ctx, pool, config, args)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +196,7 @@ func TestBuildShardBlockMissingDeposits(t *testing.T) {
 	root := newRoot(env.sc.RootBlock(env.sc.rootTip().Hash()), 99).WithBody([]*types.Header{source}, nil)
 	env.addRoot(root, nil)
 	env.setRootTip(root)
-	args := miner.QKCBlockArgs{Timestamp: 1, BeaconRoot: new(common.Hash), NoTxs: true}
+	args := miner.QKCBlockArgs{Timestamp: 1, NoTxs: true}
 	// The old three deposits exhaust the budget, but the validator still probes
 	// the next source list to distinguish backlog from EOF.
 	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); !errors.Is(err, ErrXShardDepositsMissing) {
@@ -214,7 +216,7 @@ func TestBuildShardBlockMissingDeposits(t *testing.T) {
 
 func TestBuildShardBlockInputs(t *testing.T) {
 	env, pool, config := newMiningEnv(t, 1)
-	args := miner.QKCBlockArgs{Timestamp: 1, BeaconRoot: new(common.Hash)}
+	args := miner.QKCBlockArgs{Timestamp: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := env.sc.BuildBlock(ctx, pool, config, args); !errors.Is(err, context.Canceled) {
@@ -227,12 +229,8 @@ func TestBuildShardBlockInputs(t *testing.T) {
 	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); err == nil {
 		t.Fatal("accepted invalid timestamp")
 	}
-	args.Timestamp, args.BeaconRoot = 1, nil
-	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); err == nil {
-		t.Fatal("accepted missing beacon root")
-	}
+	args.Timestamp = 1
 	qkcrawdb.WriteRootHeadHash(env.db, common.Hash{})
-	args.BeaconRoot = new(common.Hash)
 	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); !errors.Is(err, ErrRootChainUninitialized) {
 		t.Fatalf("missing root tip: %v", err)
 	}

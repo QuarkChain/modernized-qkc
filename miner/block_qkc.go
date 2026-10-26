@@ -26,15 +26,13 @@ import (
 
 // QKCBlockArgs specifies a shard candidate. The shard consensus layer selects
 // Parent and PrevRootBlock and validates their ancestry before calling the miner.
-// Timestamp must be later than the parent's timestamp. Fork inputs have the same
-// meaning as in geth's payload builder; difficulty and rewards belong to the engine.
+// Timestamp must be later than the parent's timestamp. Difficulty and rewards
+// belong to the engine; Ethereum beacon fields are fixed internally.
 type QKCBlockArgs struct {
 	Parent         common.Hash
 	PrevRootBlock  common.Hash
 	Timestamp      uint64
 	FeeRecipient   common.Address
-	BeaconRoot     *common.Hash
-	SlotNum        *uint64
 	TargetGasLimit *uint64
 	NoTxs          bool // Skip pool transactions, but always include mandatory deposits.
 }
@@ -60,8 +58,6 @@ func (miner *Miner) BuildQKCBlock(ctx context.Context, args QKCBlockArgs) (*type
 		timestamp:      args.Timestamp,
 		forceTime:      true,
 		coinbase:       args.FeeRecipient,
-		beaconRoot:     args.BeaconRoot,
-		slotNum:        args.SlotNum,
 		targetGasLimit: args.TargetGasLimit,
 		noTxs:          args.NoTxs,
 		qkc: &types.QKCExtra{

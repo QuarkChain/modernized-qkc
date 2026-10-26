@@ -346,6 +346,24 @@ func genesisConfig(shardID uint32) *params.ChainConfig {
 	return &config
 }
 
+func TestGenesisQKCSlotNumber(t *testing.T) {
+	for _, qkc := range []bool{false, true} {
+		config := *params.MergedTestChainConfig
+		config.AmsterdamTime = new(uint64)
+		if qkc {
+			config.QuarkChain = &params.QuarkChainConfig{}
+		}
+		genesis := &Genesis{Config: &config, SlotNumber: u64(17)}
+		want := uint64(17)
+		if qkc {
+			want = 0
+		}
+		if slot := genesis.ToBlock().SlotNumber(); slot == nil || *slot != want {
+			t.Fatalf("qkc=%v: slot %v, want %d", qkc, slot, want)
+		}
+	}
+}
+
 func TestStakingGenesisAlloc(t *testing.T) {
 	root := common.HexToAddress("0x514b430000000000000000000000000000000001")
 	shard := common.HexToAddress("0x514b430000000000000000000000000000000002")

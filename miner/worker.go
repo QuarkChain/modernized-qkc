@@ -253,11 +253,6 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	_, _, assembleSpanEnd := telemetry.StartSpan(ctx, "miner.AssembleBlock")
 	block := core.AssembleBlock(miner.chain, work.header, work.state, &body, work.receipts, work.bal)
 	assembleSpanEnd(nil)
-	if genParam.qkc != nil && block.AccessList() != nil {
-		if err := block.AccessList().ValidateSize(block.GasLimit()); err != nil {
-			return &newPayloadResult{err: err}
-		}
-	}
 
 	// Check for db errors. If anything happened during the mining or IntermediateRoot, such as a
 	// weird flush or a trie node missing, we need to bail out and not create a block.
@@ -348,9 +343,6 @@ func (miner *Miner) prepareWork(ctx context.Context, genParams *generateParams, 
 	}
 	// Apply EIP-4844, EIP-4788.
 	if miner.chainConfig.IsCancun(header.Number, header.Time) {
-		if genParams.qkc != nil && genParams.beaconRoot == nil {
-			return nil, errors.New("no beacon root set post-cancun")
-		}
 		var excessBlobGas uint64
 		if miner.chainConfig.IsCancun(parent.Number, parent.Time) {
 			excessBlobGas = eip4844.CalcExcessBlobGas(miner.chainConfig, parent, timestamp)
@@ -358,13 +350,20 @@ func (miner *Miner) prepareWork(ctx context.Context, genParams *generateParams, 
 		header.BlobGasUsed = new(uint64)
 		header.ExcessBlobGas = &excessBlobGas
 		header.ParentBeaconRoot = genParams.beaconRoot
+		if miner.chainConfig.QuarkChain != nil {
+			// Keep the geth header encoding without an Ethereum beacon dependency.
+			header.ParentBeaconRoot = new(common.Hash)
+		}
 	}
 	// Apply EIP-7843.
 	if miner.chainConfig.IsAmsterdam(header.Number, header.Time) {
-		if genParams.slotNum == nil {
+		header.SlotNumber = genParams.slotNum
+		if miner.chainConfig.QuarkChain != nil {
+			// QKC has no beacon slots; SLOTNUM consequently returns zero.
+			header.SlotNumber = new(uint64)
+		} else if genParams.slotNum == nil {
 			return nil, errors.New("no slot number set post-amsterdam")
 		}
-		header.SlotNumber = genParams.slotNum
 	}
 	// Could potentially happen if starting to mine in an odd state.
 	// Note genParams.coinbase can be different with header.Coinbase
