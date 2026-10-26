@@ -61,9 +61,6 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 	// Header validity is known at this point. Here we verify that uncles, transactions
 	// and withdrawals given in the block body match the header.
 	header := block.Header()
-	if err := v.validateQKCBeaconFields(header); err != nil {
-		return err
-	}
 	if err := v.bc.engine.VerifyUncles(v.bc, block); err != nil {
 		return err
 	}

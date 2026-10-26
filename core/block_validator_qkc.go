@@ -66,29 +66,6 @@ func (bc *BlockChain) SetXShardInbox(inbox XShardInbox) {
 	bc.xshardInbox = inbox
 }
 
-// validateQKCBeaconFields enforces the reserved values in imported shard blocks.
-// The fields retain geth's fork-dependent presence and RLP encoding.
-func (v *BlockValidator) validateQKCBeaconFields(header *types.Header) error {
-	if v.config.QuarkChain == nil {
-		return nil
-	}
-	if v.config.IsCancun(header.Number, header.Time) {
-		if header.ParentBeaconRoot == nil || *header.ParentBeaconRoot != (common.Hash{}) {
-			return errors.New("qkc beacon root must be zero after cancun")
-		}
-	} else if header.ParentBeaconRoot != nil {
-		return errors.New("qkc beacon root present before cancun")
-	}
-	if v.config.IsAmsterdam(header.Number, header.Time) {
-		if header.SlotNumber == nil || *header.SlotNumber != 0 {
-			return errors.New("qkc slot number must be zero after amsterdam")
-		}
-	} else if header.SlotNumber != nil {
-		return errors.New("qkc slot number present before amsterdam")
-	}
-	return nil
-}
-
 // XShardDeposits opens the inbox used by block validation for block construction.
 // The caller must validate the root ancestry before opening the inbox.
 func (bc *BlockChain) XShardDeposits(parent *types.Header, prevRootBlock common.Hash) (XShardDeposits, error) {
