@@ -60,7 +60,7 @@ type ShardChain struct {
 	db    ethdb.KeyValueStore // Database of the root blocks seen by the shard
 	chain *core.BlockChain
 
-	mu sync.Mutex // Serializes block imports and head updates
+	mu sync.Mutex // Serializes block imports and shard/root tip selection and updates
 }
 
 // NewShardChain creates a shard chain on top of the given chain, reading the

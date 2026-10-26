@@ -36,10 +36,13 @@ func (c *ShardChain) BuildBlock(ctx context.Context, pool *txpool.TxPool, config
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Select both tips under the lock shared with head updates.
+	c.mu.Lock()
 	parent := c.chain.CurrentBlock()
 	if args.Parent != (common.Hash{}) {
 		parent = c.chain.GetHeaderByHash(args.Parent)
 		if parent == nil {
+			c.mu.Unlock()
 			return nil, consensus.ErrUnknownAncestor
 		}
 	}
@@ -47,10 +50,12 @@ func (c *ShardChain) BuildBlock(ctx context.Context, pool *txpool.TxPool, config
 	if args.PrevRootBlock == (common.Hash{}) {
 		root := c.rootTip()
 		if root == nil {
+			c.mu.Unlock()
 			return nil, ErrRootChainUninitialized
 		}
 		args.PrevRootBlock = root.Hash()
 	}
+	c.mu.Unlock()
 	header := &types.Header{Extra: (&types.QKCExtra{PrevRootBlock: args.PrevRootBlock}).Encode()}
 	if _, err := c.validateRootReference(header, parent); err != nil {
 		return nil, err
