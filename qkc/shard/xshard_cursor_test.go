@@ -229,7 +229,7 @@ func TestXShardInboxErrors(t *testing.T) {
 	if _, err := shard1.Deposits(&types.Header{Number: new(big.Int), Difficulty: new(big.Int)}, roots[3].Hash()); err == nil {
 		t.Error("walked from a parent without a cursor")
 	}
-	invalidMinorIndex := uint64(len(roots[1].MinorBlockHeaders())) + 1
+	invalidMinorIndex := uint64(len(roots[1].ShardBlockHeaders())) + 1
 	if _, err := shard1.Deposits(cursorAt(1, invalidMinorIndex, 0), roots[3].Hash()); !errors.Is(err, ErrInconsistentClusterState) {
 		t.Errorf("cursor source index out of range: error %v, want %v", err, ErrInconsistentClusterState)
 	}

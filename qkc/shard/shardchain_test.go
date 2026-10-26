@@ -1188,18 +1188,17 @@ func TestInsertShardBlockForkChoiceError(t *testing.T) {
 	if env.chain.HasBlock(fork.Hash(), fork.NumberU64()) {
 		t.Fatal("block inserted despite fork-choice inconsistency")
 	}
-	if _, err := env.sc.InsertRootBlock(root); !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrClusterStateInconsistency) {
-		t.Fatalf("missing known-root confirmation error mismatch: %v", err)
-	}
+	// Known roots are ignored without rereading their stored confirmation.
+	env.insertRoot(root, false)
 	env.checkRootTip(root)
 	env.checkHead(blocks[1])
 }
 
 // TestShardChainMissingConfirmation checks the stored-data contract after
-// initialization. A root without a confirmation is invalid in every read
-// path; it is distinct from a recorded confirmation whose local block is missing.
+// initialization. Every path that reads a confirmation rejects a missing one;
+// this is distinct from a recorded confirmation whose local block is missing.
 func TestShardChainMissingConfirmation(t *testing.T) {
-	for _, flow := range []string{"root reference", "fork choice", "root parent", "known root"} {
+	for _, flow := range []string{"root reference", "fork choice", "root parent"} {
 		t.Run(flow, func(t *testing.T) {
 			env := newTestEnv(t)
 			blocks := env.makeBlocks(env.genesis, 2, env.rootGenesis, 1)
@@ -1228,8 +1227,6 @@ func TestShardChainMissingConfirmation(t *testing.T) {
 				if qkcrawdb.HasRootBlock(env.db, nextRoot.Hash()) {
 					t.Fatal("root stored despite missing parent confirmation")
 				}
-			case "known root":
-				_, err = env.sc.InsertRootBlock(root)
 			}
 			if !errors.Is(err, ErrInvalidRootBlock) || errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardStateInconsistency) || errors.Is(err, ErrClusterStateInconsistency) {
 				t.Fatalf("missing stored confirmation: %v", err)
@@ -1336,19 +1333,20 @@ func (batch *failingRootBatch) Write() error {
 	return batch.Batch.Write()
 }
 
-// TestInsertRootBlockRetry checks that failed storage and head updates leave
-// the old root tip selected, and that retrying completes the switch. In
-// particular, a stored root must still participate in fork choice and use its
-// own confirmation rather than that of the old root tip.
-func TestInsertRootBlockRetry(t *testing.T) {
+// TestInsertRootBlockFailureRecovery checks the head-first import ordering.
+// Head failures leave the root unknown; batch failures leave the head advanced
+// but the old root tip selected. A failed root can be re-imported once writes
+// succeed. Restart recovery first restores a locally stored checkpoint with Init.
+func TestInsertRootBlockFailureRecovery(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		failAt     int
-		stopChain  bool
-		rootStored bool
+		name      string
+		failAt    int
+		stopChain bool
+		restart   bool
 	}{
-		{name: "root storage", failAt: 1},
-		{name: "shard head", stopChain: true, rootStored: true},
+		{name: "root storage reimport", failAt: 1},
+		{name: "root storage restart", failAt: 1, restart: true},
+		{name: "shard head restart", stopChain: true, restart: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			env := newTestEnv(t)
@@ -1374,26 +1372,28 @@ func TestInsertRootBlockRetry(t *testing.T) {
 				t.Fatalf("error mismatch: have %v, want %v", err, writeErr)
 			}
 			env.checkRootTip(r1)
-			if stored := qkcrawdb.HasRootBlock(env.db, r2.Hash()); stored != test.rootStored {
-				t.Fatalf("root storage mismatch: have %v, want %v", stored, test.rootStored)
+			if qkcrawdb.HasRootBlock(env.db, r2.Hash()) {
+				t.Fatal("root stored despite failed insertion")
 			}
-			if test.rootStored {
-				env.checkLastConfirmed(r2, b[0])
-			} else if hash := qkcrawdb.ReadLastConfirmedBlockHash(env.db, r2.Hash()); hash != (common.Hash{}) {
+			if hash := qkcrawdb.ReadLastConfirmedBlockHash(env.db, r2.Hash()); hash != (common.Hash{}) {
 				t.Fatalf("confirmation stored despite failed root storage: %x", hash)
 			}
-			env.checkHead(a[2])
-
 			if test.stopChain {
-				chain, err := core.NewBlockChain(env.db, nil, env.engine, nil)
-				if err != nil {
-					t.Fatalf("failed to restart chain: %v", err)
-				}
-				env.chain = chain
-				env.sc = NewShardChain(env.sc.db, chain)
+				env.checkHead(a[2])
+			} else {
+				env.checkHead(b[0])
+			}
+
+			if test.restart {
+				env.chain.Stop()
+				env.reopenChain()
+				env.sc = NewShardChain(env.sc.db, env.chain)
+				// r2 was never stored, so recovery uses the valid r1 checkpoint.
 				if err := env.sc.Init(r1); err != nil {
 					t.Fatalf("failed to initialize restarted shard chain: %v", err)
 				}
+				env.checkRootTip(r1)
+				env.checkHead(a[0])
 			}
 			env.insertRoot(r2, true)
 			env.checkRootTip(r2)

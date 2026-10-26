@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -192,6 +193,7 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 	if err := c.setHeadForRootTip(rootHeader, confirmed); err != nil {
 		return err
 	}
+	c.rootTip = rootHeader
 	// TODO: wire Init into the shard service's master handshake, data sync and
 	// mining startup. Genesis construction/state setup stays in that service.
 	return nil
@@ -437,9 +439,10 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 // InsertRootBlock validates a root block against the shard chain, stores it,
 // and makes it the root tip if the fork choice rule selects it, moving the
 // canonical head onto the shard chain it confirms. It reports whether the root
-// tip changed. Known root blocks reuse their stored confirmation and participate
-// in fork choice, allowing an interrupted tip update to be retried. It mirrors
-// ShardState.add_root_block in pyquarkchain.
+// tip changed. Known root blocks are ignored. Head and root writes are not one
+// transaction; a failed root-batch write may leave the head changed. Subsequent
+// root imports or service initialization may restore consistency.
+// It mirrors ShardState.add_root_block in pyquarkchain.
 //
 // Unlike shard blocks, root blocks are chosen by total difficulty: "Switch to
 // the root block with higher total diff". On a tie, the root tip stays.
@@ -451,36 +454,40 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	if rootTip == nil {
 		return false, ErrRootChainUninitialized
 	}
-	// Step 1: reuse the stored confirmation of a known root block, or validate
-	// and persist a new root block together with its latest confirmed shard block.
-	var confirmed *types.Header
-	var err error
 	if rawdb.HasRootBlock(c.db, root.Hash()) {
-		confirmed, err = c.lastConfirmed(root.Header())
-		if err != nil {
-			return false, err
-		}
-	} else {
-		confirmed, err = c.validateRootBlock(root)
-		if err != nil {
-			return false, err
-		}
-		batch := c.db.NewBatch()
-		defer batch.Close()
-		rawdb.WriteRootBlock(batch, root)
-		rawdb.WriteLastConfirmedBlockHash(batch, root.Hash(), confirmed.Hash())
-		if err := batch.Write(); err != nil {
-			return false, fmt.Errorf("store root block %x: %w", root.Hash(), err)
-		}
+		return false, nil
+	}
+	// Step 1: validate the root and find its latest confirmed shard block.
+	confirmed, err := c.validateRootBlock(root)
+	if err != nil {
+		return false, err
 	}
 	// Step 2: the fork choice.
 	switched := root.TotalDifficulty().Cmp(&rootTip.TotalDifficulty) > 0
-	// Step 3: reconcile the shard head before updating the root tip. On error,
-	// the root tip stays unchanged, so the stored root block can retry the switch.
+	// Step 3: reconcile the shard head before storing the root.
+	previousHead := c.chain.CurrentBlock().Hash()
 	if switched {
 		if err := c.setHeadForRootTip(root.Header(), confirmed); err != nil {
+			log.Error("Failed to set shard head for root block", "root", root.Hash(), "rootTip", rootTip.Hash(), "confirmed", confirmed.Hash(), "previousHead", previousHead, "head", c.chain.CurrentBlock().Hash(), "err", err)
 			return false, err
 		}
+	}
+	// Step 4: store the root and its confirmation together, then publish the tip.
+	batch := c.db.NewBatch()
+	defer batch.Close()
+	rawdb.WriteRootBlock(batch, root)
+	rawdb.WriteLastConfirmedBlockHash(batch, root.Hash(), confirmed.Hash())
+	if err := batch.Write(); err != nil {
+		// TODO: Handle the edge case where the shard head switches successfully but
+		// the root batch fails. For now, log and return the error. Subsequent root
+		// imports, including re-importing the failed root, may restore consistency.
+		// If normal imports cannot resume, restart the node. Startup calls Init with
+		// the master's recovery root to restore the shard head and root tip.
+		log.Error("Failed to store root block", "root", root.Hash(), "rootTip", rootTip.Hash(), "confirmed", confirmed.Hash(), "previousHead", previousHead, "head", c.chain.CurrentBlock().Hash(), "err", err)
+		return false, fmt.Errorf("store root block %x: %w", root.Hash(), err)
+	}
+	if switched {
+		c.rootTip = root.Header()
 	}
 	return switched, nil
 }
@@ -634,11 +641,11 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 	return nil
 }
 
-// setHeadForRootTip moves the canonical head onto the shard chain of a stored
-// root block and then selects it as the root tip, given C, the latest shard block
-// confirmed by the root chain up to it. C must be a non-nil, validated checkpoint
-// compatible with rootTip. It mirrors the tip reset of ShardState.add_root_block
-// in pyquarkchain. The head must keep the two
+// setHeadForRootTip moves the canonical head onto the shard chain of the target
+// root block, given C, the latest shard block confirmed by the root chain up to
+// it. C must be a non-nil, validated checkpoint compatible with rootTip. The caller
+// publishes rootTip after all required writes succeed. It mirrors the tip reset
+// of ShardState.add_root_block in pyquarkchain. The head must keep the two
 // properties shouldUpdateHead relies on: it extends C, and it references the
 // root tip or one of its ancestors.
 //
@@ -688,7 +695,6 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 		if err := c.setCanonicalByHead(confirmed); err != nil {
 			return err
 		}
-		c.rootTip = rootTip
 		return nil
 	}
 	// Case 2: scan above C, which is already compatible with rootTip. Stopping
@@ -712,9 +718,6 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 			return err
 		}
 	}
-	// Advance the in-memory root tip even when the shard head already matches.
-	// After a restart, root-block initialization sets it before imports resume.
-	c.rootTip = rootTip
 	return nil
 }
 
