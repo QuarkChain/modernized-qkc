@@ -16,16 +16,12 @@
 
 package wire
 
-import (
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/holiman/uint256"
-)
+import "github.com/ethereum/go-ethereum/common"
 
 // The go:generate directive below runs from this package directory; it cds to
 // the repository root so the generator paths are stable and can be copied
 // into documentation.
-//go:generate sh -c "cd ../.. && go run github.com/ferranbt/fastssz/sszgen --path qkc/wire/messages.go --output qkc/wire/messages_ssz.go"
+//go:generate sh -c "cd ../.. && go run github.com/ferranbt/fastssz/sszgen --path qkc/wire/messages.go --output qkc/wire/messages_ssz.go --include common/types.go"
 
 // =============================================================================
 // Wire-level constants
@@ -41,6 +37,12 @@ const SignatureLength = 65
 
 // UInt128Length is the byte length of a uint128.
 const UInt128Length = 16
+
+// UInt256Length is the byte length of a uint256.
+const UInt256Length = 32
+
+// Data is an opaque byte payload. Its sender and receiver own the inner format.
+type Data []byte
 
 // =============================================================================
 // §1  Cluster initialisation
@@ -60,7 +62,7 @@ type PingRequest struct {
 	// ID and does not mean root.
 	ChainID    uint32
 	HasRootTip bool
-	RootTip    []byte `ssz-max:"4294967295"` // SSZ encoding of RootBlock when HasRootTip is true.
+	RootTip    Data `ssz-max:"4294967295"` // SSZ-encoded RootBlock when HasRootTip is true.
 }
 
 // PongResponse (ClusterOp.PONG, 0x82) is the chain's response to PING and
@@ -93,11 +95,11 @@ type ConnectToChainsResponse struct {
 type HelloCommand struct {
 	Version              uint32
 	NetworkID            uint32
-	PeerID               [HashLength]byte
+	PeerID               common.Hash
 	PeerIP               [UInt128Length]byte
 	PeerPort             uint16
-	RootBlockHeader      []byte `ssz-max:"4294967295"` // SSZ encoding of RootBlockHeader.
-	GenesisRootBlockHash [HashLength]byte
+	RootBlockHeader      Data `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeader.
+	GenesisRootBlockHash common.Hash
 }
 
 // ArtificialTxConfig carries the current mining target intervals from Master.
@@ -111,7 +113,7 @@ type ArtificialTxConfig struct {
 type ShardStats struct {
 	ChainID            uint32
 	Height             uint64
-	Difficulty         uint256.Int
+	Difficulty         [UInt256Length]byte
 	CoinbaseAddress    common.Address
 	Timestamp          uint64
 	TxCount60s         uint32
@@ -122,14 +124,14 @@ type ShardStats struct {
 	LastBlockTime      uint32
 }
 
-// AddMinorBlockHeaderRequest reports an accepted chain block to Master. The
-// Ethereum header carries the QuarkChain fields in its Extra data.
+// AddMinorBlockHeaderRequest reports an accepted minor block to Master.
+// MinorBlockHeader carries an RLP-encoded Ethereum header as a byte list.
 type AddMinorBlockHeaderRequest struct {
-	BlockHeader    *types.Header
-	TxCount        uint32
-	XShardTxCount  uint32
-	CoinbaseAmount uint256.Int
-	ShardStats     ShardStats
+	MinorBlockHeader Data `ssz-max:"4294967295"`
+	TxCount          uint32
+	XShardTxCount    uint32
+	CoinbaseAmount   [UInt256Length]byte
+	ShardStats       ShardStats
 }
 
 // AddMinorBlockHeaderResponse returns the current mining target intervals.
@@ -139,8 +141,8 @@ type AddMinorBlockHeaderResponse struct {
 }
 
 type AddMinorBlockHeaderListRequest struct {
-	BlockHeaders    []types.Header `ssz-max:"4294967295"`
-	CoinbaseAmounts []uint256.Int  `ssz-max:"4294967295"`
+	MinorBlockHeaderList []Data                `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
+	CoinbaseAmounts      [][UInt256Length]byte `ssz-max:"4294967295"`
 }
 
 type AddMinorBlockHeaderListResponse struct {
@@ -154,8 +156,8 @@ type AddMinorBlockHeaderListResponse struct {
 // of this new protocol.
 type AddXshardTxListRequest struct {
 	ChainID        uint32
-	MinorBlockHash [HashLength]byte
-	Deposits       []types.DepositTx `ssz-max:"4294967295"`
+	MinorBlockHash common.Hash
+	DepositTxList  []Data `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
 }
 
 type AddXshardTxListResponse struct {

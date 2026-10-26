@@ -7,9 +7,9 @@ hand.
 ## Add a message
 
 1. Add a Go struct to `messages.go` with fields in protocol order. Use fixed
-   width integers and arrays for fixed-size values, `[]byte` for variable byte
-   strings, and `[]T` for variable lists. For nested variable lists, use one
-   limit per dimension and `ssz-size:"?,?"`.
+   width integers and arrays for fixed-size values, `[]byte` for byte strings,
+   `Data` for opaque serialized values, and `[]T` for variable lists. For nested
+   variable lists, use one limit per dimension and `ssz-size:"?,?"`.
 2. For variable-length fields, add `ssz-max` with a numeric limit. Use a
    protocol-defined limit when one is known, or the current broad limit
    `4294967295` otherwise. Use fixed Go types or `ssz-size:"N"` for
@@ -25,17 +25,22 @@ hand.
 5. Add codec round-trip, malformed-input, and golden-encoding cases to
    `messages_test.go`.
 
-The `go:generate` directive changes to the repository root before invoking
-`sszgen` and passes repository-relative source and output paths. No list of
-message type names needs to be maintained in the generator command: it scans
-the message source file and generates codecs for its structs.
+The `go:generate` directive runs `sszgen` against the message schemas. The
+generator scans their structs; named types from other packages must be made
+available through its `--include` option when the schema uses them.
+
+Use `Data` (`[]byte`) or `[]Data` when the wire layer only needs to carry an
+already serialized value. Its inner structure and encoding can be as complex
+as the sender and receiver require: the sender encodes it, the receiver decodes
+and validates it, and SSZ only frames the bytes. Keep the field's SSZ size
+limit and the inner format's contract explicit at their respective boundaries.
 
 ## SSZ field rules
 
 - `uintN` and `[N]byte` encode as fixed-size values.
-- `[]byte` is a `ByteList`; its actual length is determined by SSZ offsets and
-  the enclosing message boundary, not by a legacy length prefix.
-- `[]T` is a `List[T]`; `[][]byte` is a list of byte lists. Each dynamic list
+- `[]byte` and `Data` are `ByteList` values; their actual length is determined
+  by SSZ offsets and the enclosing message boundary.
+- `[]T` is a `List[T]`; `[]Data` is a list of byte lists. Each dynamic list
   uses offsets to locate its elements.
 - SSZ integers and offsets are little-endian. The transport layer carries the
   encoded SSZ bytes as the message payload.

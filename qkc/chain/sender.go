@@ -1,7 +1,20 @@
-// Copyright 2026-2027, QuarkChain.
+// Copyright 2026-2027 The quarkchain Authors
+// This file is part of the quarkchain library.
+//
+// The quarkchain library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The quarkchain library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
 // Package chain defines typed outbound boundaries used by chain business logic.
-// PeerConn traffic is deferred in Sender until its wire messages are added.
 package chain
 
 import (
@@ -10,8 +23,8 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
-// Sender is the chain-side application port for Master communication. The
-// chain process composition owns the connection and implements these methods;
+// Sender is the chain-side application port for outbound communication. The
+// chain process composition owns the connections and implements these methods;
 // chain services receive only this interface.
 //
 // Every method names a protocol operation and uses its concrete message types.
@@ -20,20 +33,16 @@ import (
 type Sender interface {
 	// ── Chain → Master reports ──
 
-	// SendMinorBlockHeaderToMaster reports one accepted minor block header and
-	// returns the master's response (which may carry updated chain settings).
+	// SendMinorBlockHeaderToMaster and SendMinorBlockHeaderListToMaster report
+	// new minor block headers to the master.
 	SendMinorBlockHeaderToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderRequest) (*wire.AddMinorBlockHeaderResponse, error)
-	// SendMinorBlockHeaderListToMaster reports a batch of accepted headers.
 	SendMinorBlockHeaderListToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderListRequest) (*wire.AddMinorBlockHeaderListResponse, error)
 
 	// ── Chain → chain mesh (xshard deposits) ──
 
-	// SendXshardTxListToChain sends cross-chain deposits to the destination
-	// chain. chainID is the destination route key. A nonzero remote error_code
-	// is returned as an error; callers do not consume the response payload.
+	// SendXshardTxList broadcasts req to the connections serving branch;
+	// chainID is the routing key.
 	SendXshardTxListToChain(ctx context.Context, chainID uint32, req *wire.AddXshardTxListRequest) error
-	// SendBatchXshardTxListToChain sends a batch of cross-chain deposits to the
-	// destination chain. A nonzero remote error_code is returned as an error.
 	SendBatchXshardTxListToChain(ctx context.Context, chainID uint32, req *wire.BatchAddXshardTxListRequest) error
 
 	// Deferred: virtual-peer RPCs and commands that use PeerConn. Enable after

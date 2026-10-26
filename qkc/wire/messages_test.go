@@ -24,6 +24,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
@@ -38,6 +40,14 @@ func TestNewClusterMessageRegistry(t *testing.T) {
 		{ClusterOpPong, &PongResponse{}},
 		{ClusterOpConnectToChainsRequest, &ConnectToChainsRequest{}},
 		{ClusterOpConnectToChainsResponse, &ConnectToChainsResponse{}},
+		{ClusterOpAddMinorBlockHeaderRequest, &AddMinorBlockHeaderRequest{}},
+		{ClusterOpAddMinorBlockHeaderResponse, &AddMinorBlockHeaderResponse{}},
+		{ClusterOpAddXshardTxListRequest, &AddXshardTxListRequest{}},
+		{ClusterOpAddXshardTxListResponse, &AddXshardTxListResponse{}},
+		{ClusterOpBatchAddXshardTxListRequest, &BatchAddXshardTxListRequest{}},
+		{ClusterOpBatchAddXshardTxListResponse, &BatchAddXshardTxListResponse{}},
+		{ClusterOpAddMinorBlockHeaderListRequest, &AddMinorBlockHeaderListRequest{}},
+		{ClusterOpAddMinorBlockHeaderListResponse, &AddMinorBlockHeaderListResponse{}},
 	}
 	for _, c := range cases {
 		got, err := NewClusterMessage(c.op)
@@ -95,8 +105,6 @@ func roundTripSSZ(t *testing.T, msg SSZMessage) {
 
 func TestChainHeaderMessagesSSZ(t *testing.T) {
 	withdrawals := common.HexToHash("0x11")
-	blobGas := uint64(7)
-	slot := uint64(8)
 	header := &types.Header{
 		ParentHash:      common.HexToHash("0x12"),
 		Coinbase:        common.HexToAddress("0x13"),
@@ -108,11 +116,13 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 		Extra:           bytes.Repeat([]byte{0x42}, types.QKCExtraSize),
 		BaseFee:         big.NewInt(100),
 		WithdrawalsHash: &withdrawals,
-		BlobGasUsed:     &blobGas,
-		SlotNumber:      &slot,
 	}
 	header.Bloom[0] = 0x25
-	msg := &AddMinorBlockHeaderRequest{BlockHeader: header, TxCount: 3, XShardTxCount: 2}
+	headerData, err := rlp.EncodeToBytes(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := &AddMinorBlockHeaderRequest{MinorBlockHeader: Data(headerData), TxCount: 3, XShardTxCount: 2}
 	encoded, err := msg.MarshalSSZ()
 	if err != nil {
 		t.Fatal(err)
@@ -124,16 +134,28 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	if err := decoded.UnmarshalSSZ(encoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.BlockHeader.Hash() != header.Hash() {
-		t.Fatalf("header hash changed in SSZ round trip: got %s, want %s", decoded.BlockHeader.Hash(), header.Hash())
+	if !bytes.Equal(decoded.MinorBlockHeader, headerData) {
+		t.Fatal("SSZ changed the encoded header")
+	}
+	var decodedHeader types.Header
+	if err := rlp.DecodeBytes(decoded.MinorBlockHeader, &decodedHeader); err != nil {
+		t.Fatal(err)
+	}
+	if decodedHeader.Hash() != header.Hash() {
+		t.Fatalf("header hash changed in round trip: got %s, want %s", decodedHeader.Hash(), header.Hash())
 	}
 	if _, err := msg.HashTreeRoot(); err != nil {
 		t.Fatalf("header hash tree root: %v", err)
 	}
 
+	secondHeader := &types.Header{Difficulty: big.NewInt(0), Number: big.NewInt(43)}
+	secondHeaderData, err := rlp.EncodeToBytes(secondHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	list := &AddMinorBlockHeaderListRequest{
-		BlockHeaders:    types.HeaderListSSZ{header, {Difficulty: big.NewInt(0), Number: big.NewInt(43)}},
-		CoinbaseAmounts: [][32]byte{{1}, {2}},
+		MinorBlockHeaderList: []Data{Data(headerData), Data(secondHeaderData)},
+		CoinbaseAmounts:      [][32]byte{{1}, {2}},
 	}
 	listEncoded, err := list.MarshalSSZ()
 	if err != nil {
@@ -146,11 +168,18 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	if err := decodedList.UnmarshalSSZ(listEncoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decodedList.BlockHeaders) != len(list.BlockHeaders) {
-		t.Fatalf("header list length changed: got %d, want %d", len(decodedList.BlockHeaders), len(list.BlockHeaders))
+	if len(decodedList.MinorBlockHeaderList) != len(list.MinorBlockHeaderList) {
+		t.Fatalf("header list length changed: got %d, want %d", len(decodedList.MinorBlockHeaderList), len(list.MinorBlockHeaderList))
 	}
-	for i := range list.BlockHeaders {
-		if decodedList.BlockHeaders[i].Hash() != list.BlockHeaders[i].Hash() {
+	for i, data := range list.MinorBlockHeaderList {
+		if !bytes.Equal(decodedList.MinorBlockHeaderList[i], data) {
+			t.Fatalf("header %d bytes changed in SSZ round trip", i)
+		}
+		var got types.Header
+		if err := rlp.DecodeBytes(decodedList.MinorBlockHeaderList[i], &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Hash() != []*types.Header{header, secondHeader}[i].Hash() {
 			t.Fatalf("header %d changed in SSZ round trip", i)
 		}
 	}
@@ -173,10 +202,14 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 		IsMove:          true,
 		Data:            []byte{1, 2, 3},
 	}
+	depositData, err := rlp.EncodeToBytes(deposit)
+	if err != nil {
+		t.Fatal(err)
+	}
 	msg := &AddXshardTxListRequest{
 		ChainID:        2,
 		MinorBlockHash: common.HexToHash("0xab"),
-		Deposits:       types.DepositListSSZ{deposit},
+		DepositTxList:  []Data{Data(depositData)},
 	}
 	encoded, err := msg.MarshalSSZ()
 	if err != nil {
@@ -189,8 +222,15 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 	if err := decoded.UnmarshalSSZ(encoded); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(decoded.Deposits, msg.Deposits) {
-		t.Fatalf("deposit changed in SSZ round trip: got %#v, want %#v", decoded.Deposits, msg.Deposits)
+	if len(decoded.DepositTxList) != 1 || !bytes.Equal(decoded.DepositTxList[0], depositData) {
+		t.Fatal("SSZ changed the encoded deposit")
+	}
+	var decodedDeposit types.DepositTx
+	if err := rlp.DecodeBytes(decoded.DepositTxList[0], &decodedDeposit); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(&decodedDeposit, deposit) {
+		t.Fatalf("deposit changed in round trip: got %#v, want %#v", &decodedDeposit, deposit)
 	}
 	if _, err := msg.HashTreeRoot(); err != nil {
 		t.Fatalf("deposit hash tree root: %v", err)
@@ -205,8 +245,46 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 	if err := decodedEmpty.UnmarshalSSZ(encoded); err != nil {
 		t.Fatal(err)
 	}
-	if decodedEmpty.Deposits == nil || len(decodedEmpty.Deposits) != 0 {
+	if decodedEmpty.DepositTxList == nil || len(decodedEmpty.DepositTxList) != 0 {
 		t.Fatal("empty deposit list must decode as a present empty list")
+	}
+}
+
+func TestRootBlockPayloadsSSZ(t *testing.T) {
+	header := &qkctypes.RootBlockHeader{Version: 1, Number: 2, Extra: []byte("root")}
+	headerData, err := header.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := &HelloCommand{RootBlockHeader: Data(headerData)}
+	var decodedHello HelloCommand
+	if err := decodedHello.UnmarshalSSZ(mustMarshalSSZ(t, hello)); err != nil {
+		t.Fatal(err)
+	}
+	var decodedHeader qkctypes.RootBlockHeader
+	if err := decodedHeader.UnmarshalSSZ(decodedHello.RootBlockHeader); err != nil {
+		t.Fatal(err)
+	}
+	if decodedHeader.Hash() != header.Hash() {
+		t.Fatal("root block header changed in SSZ message")
+	}
+
+	block := qkctypes.NewRootBlock(header, nil, nil)
+	blockData, err := block.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ping := &PingRequest{HasRootTip: true, RootTip: Data(blockData)}
+	var decodedPing PingRequest
+	if err := decodedPing.UnmarshalSSZ(mustMarshalSSZ(t, ping)); err != nil {
+		t.Fatal(err)
+	}
+	var decodedBlock qkctypes.RootBlock
+	if err := decodedBlock.UnmarshalSSZ(decodedPing.RootTip); err != nil {
+		t.Fatal(err)
+	}
+	if decodedBlock.Hash() != block.Hash() {
+		t.Fatal("root block changed in SSZ message")
 	}
 }
 
@@ -277,11 +355,11 @@ func TestHelloCommandSSZRoundTrip(t *testing.T) {
 	msg := &HelloCommand{
 		Version:              1,
 		NetworkID:            2,
-		PeerID:               [HashLength]byte{1, 2, 3},
+		PeerID:               common.Hash{1, 2, 3},
 		PeerIP:               [UInt128Length]byte{127, 0, 0, 1},
 		PeerPort:             38291,
 		RootBlockHeader:      []byte{0xaa, 0xbb},
-		GenesisRootBlockHash: [HashLength]byte{4, 5, 6},
+		GenesisRootBlockHash: common.Hash{4, 5, 6},
 	}
 	roundTripSSZ(t, msg)
 }
