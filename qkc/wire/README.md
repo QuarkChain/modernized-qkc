@@ -29,11 +29,9 @@ The `go:generate` directive runs `sszgen` against the message schemas. The
 generator scans their structs; named types from other packages must be made
 available through its `--include` option when the schema uses them.
 
-Use `Data` (`[]byte`) or `[]Data` when the wire layer only needs to carry an
-already serialized value. Its inner structure and encoding can be as complex
-as the sender and receiver require: the sender encodes it, the receiver decodes
-and validates it, and SSZ only frames the bytes. Keep the field's SSZ size
-limit and the inner format's contract explicit at their respective boundaries.
+Use `Data` or `[]Data` for objects the generator cannot encode directly: callers
+encode them with their native codec (RLP for geth, SSZ for QKC root objects),
+and SSZ carries the resulting bytes unchanged.
 
 ## SSZ field rules
 
@@ -43,9 +41,10 @@ limit and the inner format's contract explicit at their respective boundaries.
 - `[]T` is a `List[T]`; `[]Data` is a list of byte lists. Each dynamic list
   uses offsets to locate its elements.
 - SSZ integers and offsets are little-endian. The transport layer carries the
-  encoded SSZ bytes as the message payload.
+  encoded SSZ bytes as the message payload; byte arrays are copied unchanged.
 - SSZ has no implicit nullable Go pointer. Represent presence explicitly in
   the schema and test both present and absent cases.
+
 For nested variable lists, provide one `ssz-max` value per dimension and use
 `ssz-size:"?,?"`. The current `4294967295` tags are broad placeholders and can
 be revisited later; see the TODO in `messages.go`.

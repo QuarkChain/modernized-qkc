@@ -23,26 +23,24 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
-// Sender is the chain-side application port for outbound communication. The
-// chain process composition owns the connections and implements these methods;
-// chain services receive only this interface.
-//
-// Every method names a protocol operation and uses its concrete message types.
-// The implementation handles opcode selection, serialization, request
-// correlation, and route selection.
+// Sender is the chain-side outbound interface, implemented by process composition.
+// Methods handle routing, SSZ encoding and request correlation, and wait for RPC
+// acknowledgements; transport failures and nonzero response codes return errors.
 type Sender interface {
 	// ── Chain → Master reports ──
 
 	// SendMinorBlockHeaderToMaster and SendMinorBlockHeaderListToMaster report
-	// new minor block headers to the master.
+	// validated minor block headers to the master.
 	SendMinorBlockHeaderToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderRequest) (*wire.AddMinorBlockHeaderResponse, error)
 	SendMinorBlockHeaderListToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderListRequest) (*wire.AddMinorBlockHeaderListResponse, error)
 
 	// ── Chain → chain mesh (xshard deposits) ──
 
-	// SendXshardTxList broadcasts req to the connections serving branch;
-	// chainID is the routing key.
+	// SendXshardTxListToChain delivers req to all hosts serving chainID.
+	// chainID is the destination QuarkChainConfig.ShardID and must equal req.ChainID.
 	SendXshardTxListToChain(ctx context.Context, chainID uint32, req *wire.AddXshardTxListRequest) error
+
+	// SendBatchXshardTxListToChain delivers a batch whose entries all target chainID.
 	SendBatchXshardTxListToChain(ctx context.Context, chainID uint32, req *wire.BatchAddXshardTxListRequest) error
 
 	// Deferred: virtual-peer RPCs and commands that use PeerConn. Enable after

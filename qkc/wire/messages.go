@@ -38,10 +38,11 @@ const SignatureLength = 65
 // UInt128Length is the byte length of a uint128.
 const UInt128Length = 16
 
-// UInt256Length is the byte length of a uint256.
+// UInt256Length is the byte length of a uint256; numeric fields use little-endian.
 const UInt256Length = 32
 
-// Data is an opaque byte payload. Its sender and receiver own the inner format.
+// Data carries an already encoded object unchanged through SSZ: RLP for geth
+// objects, SSZ for QKC root objects.
 type Data []byte
 
 // =============================================================================
@@ -108,10 +109,9 @@ type ArtificialTxConfig struct {
 	TargetMinorBlockTime uint32
 }
 
-// ShardStats accompanies each accepted chain block so Master can update its
-// per-chain status. The legacy branch is represented by the chain ID.
+// ShardStats reports shard status to Master; Difficulty is QKCDifficulty().
 type ShardStats struct {
-	ChainID            uint32
+	ChainID            uint32 // QuarkChainConfig.ShardID, not the Ethereum signing chain ID.
 	Height             uint64
 	Difficulty         [UInt256Length]byte
 	CoinbaseAddress    common.Address
@@ -125,12 +125,12 @@ type ShardStats struct {
 }
 
 // AddMinorBlockHeaderRequest reports an accepted minor block to Master.
-// MinorBlockHeader carries an RLP-encoded Ethereum header as a byte list.
+// MinorBlockHeader carries an RLP-encoded geth header.
 type AddMinorBlockHeaderRequest struct {
 	MinorBlockHeader Data `ssz-max:"4294967295"`
 	TxCount          uint32
 	XShardTxCount    uint32
-	CoinbaseAmount   [UInt256Length]byte
+	CoinbaseAmount   [UInt256Length]byte // Shard miner's base reward in QKC base units, excluding fees.
 	ShardStats       ShardStats
 }
 
@@ -140,6 +140,8 @@ type AddMinorBlockHeaderResponse struct {
 	ArtificialTxConfig ArtificialTxConfig
 }
 
+// AddMinorBlockHeaderListRequest reports headers during sync, with one reward per
+// header in the same order; encoding and reward semantics match the single report.
 type AddMinorBlockHeaderListRequest struct {
 	MinorBlockHeaderList []Data                `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
 	CoinbaseAmounts      [][UInt256Length]byte `ssz-max:"4294967295"`
@@ -149,21 +151,20 @@ type AddMinorBlockHeaderListResponse struct {
 	ErrorCode uint32
 }
 
-// AddXshardTxListRequest delivers the deposits emitted by one source block to
-// one destination chain. An empty, present list means that block sent this
-// chain no deposits; the receiver must still record it for the inbox cursor.
-// Each deposit has its own format version; the legacy list version is not part
-// of this new protocol.
+// AddXshardTxListRequest delivers one source block's deposits to a destination
+// shard, including empty lists for the inbox cursor. Each item is RLP(DepositTx),
+// without the 0x7e transaction prefix, in source log order.
 type AddXshardTxListRequest struct {
-	ChainID        uint32
-	MinorBlockHash common.Hash
-	DepositTxList  []Data `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
+	ChainID        uint32      // Destination QuarkChainConfig.ShardID.
+	MinorBlockHash common.Hash // Source block hash.
+	DepositTxList  []Data      `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
 }
 
 type AddXshardTxListResponse struct {
 	ErrorCode uint32
 }
 
+// BatchAddXshardTxListRequest groups lists for one destination shard.
 type BatchAddXshardTxListRequest struct {
 	AddXshardTxListRequestList []AddXshardTxListRequest `ssz-max:"4294967295"`
 }
