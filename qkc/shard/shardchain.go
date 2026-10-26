@@ -588,9 +588,9 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 		}
 		confirmed = blocks[len(blocks)-1]
 	}
-	// Rule 3 local ancestry check: C, the last block of this shard, or C' if
-	// there are none, references an ancestor of the root block. Even after
-	// master validation, verify this against the locally stored root chain.
+	// Rule 3 local ancestry check: C, the last block of this confirmed shard,
+	// or C' if there are none, references an ancestor of the root block. Even
+	// after master validation, verify this against the locally stored root chain.
 	// G0 has EmptyHash rather than a previous root to compare.
 	if confirmed.Number.Sign() != 0 {
 		prevRoot, err := c.prevRootBlock(confirmed)
@@ -632,8 +632,9 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 
 // setHeadForRootTip moves the canonical head onto the shard chain of a stored
 // root block and then selects it as the root tip, given C, the latest shard block
-// confirmed by the root chain up to it. C must be non-nil. It mirrors the tip reset
-// of ShardState.add_root_block in pyquarkchain. The head must keep the two
+// confirmed by the root chain up to it. C must be a non-nil, validated checkpoint
+// compatible with rootTip. It mirrors the tip reset of ShardState.add_root_block
+// in pyquarkchain. The head must keep the two
 // properties shouldUpdateHead relies on: it extends C, and it references the
 // root tip or one of its ancestors.
 //
@@ -686,20 +687,16 @@ func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confir
 		// Case 1 for an already initialized chain.
 		head = confirmed
 	}
-	// Walk back to a compatible root view, no earlier than C. G0 has no
-	// previous root, so reaching it needs no lookup or cached R0 anchor.
-	for head.Number.Sign() != 0 {
+	// Only case 2 needs to scan above C, which is already compatible with rootTip.
+	// Initialization and case 1 select C directly and skip the loop. Stopping at
+	// C also avoids looking up G0's empty previous-root reference.
+	for head.Number.Cmp(confirmed.Number) > 0 {
 		prevRoot, err := c.prevRootBlock(head)
 		if err != nil {
 			return fmt.Errorf("%w: shard head: %w", ErrShardStateInconsistency, err)
 		}
 		if c.isRootDescendant(rootTip, prevRoot) {
-			// Root-block validation guarantees the scan matches by C at the
-			// latest; initialization and Case 1 start at C itself.
 			break
-		}
-		if head.Hash() == confirmed.Hash() {
-			return fmt.Errorf("%w: %w: confirmed #%d [%x..]", ErrShardStateInconsistency, ErrConfirmedRootNotAncestor, head.Number, head.Hash().Bytes()[:4])
 		}
 		if head = c.chain.GetHeader(head.ParentHash, head.Number.Uint64()-1); head == nil {
 			return fmt.Errorf("%w: %w: shard head parent missing", ErrShardStateInconsistency, consensus.ErrUnknownAncestor)
