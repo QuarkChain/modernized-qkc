@@ -19,6 +19,7 @@ package core
 import (
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -31,6 +32,68 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
+
+func TestQKCBeaconFields(t *testing.T) {
+	config := *params.MergedTestChainConfig
+	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1}
+	config.CancunTime, config.PragueTime, config.OsakaTime = u64(20), u64(20), u64(20)
+	config.AmsterdamTime = u64(30)
+	gspec := &Genesis{
+		Config: &config, GasLimit: 30_000_000,
+		ExtraData: (&types.QKCExtra{}).Encode(),
+		Alloc:     withSystemContracts(PoSWStakingContractAllocs(1)),
+	}
+	engine := qkcTestEngine{beacon.New(ethash.NewFaker())}
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 3, func(_ int, b *BlockGen) {
+		b.SetExtra(gspec.ExtraData)
+	})
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	for _, block := range blocks {
+		header := block.Header()
+		if config.IsCancun(header.Number, header.Time) {
+			if header.ParentBeaconRoot == nil || *header.ParentBeaconRoot != (common.Hash{}) {
+				t.Fatal("chain maker did not reserve a zero beacon root")
+			}
+		}
+		if config.IsAmsterdam(header.Number, header.Time) && (header.SlotNumber == nil || *header.SlotNumber != 0) {
+			t.Fatal("chain maker did not reserve slot zero")
+		}
+		for _, tc := range []struct {
+			name string
+			edit func(*types.Header)
+		}{
+			{"beacon root", func(h *types.Header) {
+				if h.ParentBeaconRoot == nil {
+					h.ParentBeaconRoot = new(common.Hash)
+				} else {
+					h.ParentBeaconRoot = nil
+				}
+			}},
+			{"beacon root", func(h *types.Header) { h.ParentBeaconRoot = &common.Hash{1} }},
+			{"slot number", func(h *types.Header) {
+				if h.SlotNumber == nil {
+					h.SlotNumber = new(uint64)
+				} else {
+					h.SlotNumber = nil
+				}
+			}},
+			{"slot number", func(h *types.Header) { h.SlotNumber = u64(1) }},
+		} {
+			invalid := block.Header()
+			tc.edit(invalid)
+			if _, err := chain.InsertChain([]*types.Block{block.WithSeal(invalid)}); err == nil || !strings.Contains(err.Error(), "qkc "+tc.name) {
+				t.Fatalf("block %d %s: unexpected import error %v", block.NumberU64(), tc.name, err)
+			}
+		}
+		if _, err := chain.InsertChain([]*types.Block{block}); err != nil {
+			t.Fatalf("import generated block %d: %v", block.NumberU64(), err)
+		}
+	}
+}
 
 // qkcTestEngine is the beacon engine without header verification, which
 // rejects the QuarkChain extra data as too long.
