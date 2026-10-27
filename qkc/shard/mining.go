@@ -38,6 +38,11 @@ func (c *ShardChain) BuildBlock(ctx context.Context, pool *txpool.TxPool, config
 	}
 	// Select both tips under the lock shared with head updates.
 	c.mu.Lock()
+	root := c.rootTip
+	if root == nil {
+		c.mu.Unlock()
+		return nil, ErrRootChainUninitialized
+	}
 	parent := c.chain.CurrentBlock()
 	if args.Parent != (common.Hash{}) {
 		parent = c.chain.GetHeaderByHash(args.Parent)
@@ -48,11 +53,6 @@ func (c *ShardChain) BuildBlock(ctx context.Context, pool *txpool.TxPool, config
 	}
 	args.Parent = parent.Hash()
 	if args.PrevRootBlock == (common.Hash{}) {
-		root := c.rootTip()
-		if root == nil {
-			c.mu.Unlock()
-			return nil, ErrRootChainUninitialized
-		}
 		args.PrevRootBlock = root.Hash()
 	}
 	c.mu.Unlock()

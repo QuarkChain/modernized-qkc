@@ -130,11 +130,11 @@ func newXShardCursor(config *params.QuarkChainConfig, chain XShardChain, pos typ
 		return nil, fmt.Errorf("%w: missing root block #%d below %x", ErrInconsistentClusterState, pos.RootBlockHeight, maxRoot)
 	}
 	// The imported parent's cursor must fit the root block it points to.
-	if c.minorIndex > uint64(len(c.root.MinorBlockHeaders())) {
-		return nil, fmt.Errorf("%w: invalid cross-shard cursor %+v: root block #%d has %d source blocks", ErrInconsistentClusterState, pos, c.root.NumberU64(), len(c.root.MinorBlockHeaders()))
+	if c.minorIndex > uint64(len(c.root.ShardBlockHeaders())) {
+		return nil, fmt.Errorf("%w: invalid cross-shard cursor %+v: root block #%d has %d source blocks", ErrInconsistentClusterState, pos, c.root.NumberU64(), len(c.root.ShardBlockHeaders()))
 	}
 	if c.minorIndex > 0 {
-		header := c.root.MinorBlockHeaders()[c.minorIndex-1]
+		header := c.root.ShardBlockHeaders()[c.minorIndex-1]
 		// The parent already consumed deposits from this source block.
 		if c.deposits = chain.XShardDeposits(header.Hash()); c.deposits == nil {
 			return nil, fmt.Errorf("%w: missing deposits of block %x", ErrInconsistentClusterState, header.Hash())
@@ -164,7 +164,7 @@ func (c *xShardCursor) Next() (*types.DepositTx, error) {
 		}
 		// Move on to the next source block of the root block, skipping the
 		// blocks of the shard itself.
-		if headers := c.root.MinorBlockHeaders(); c.minorIndex < uint64(len(headers)) {
+		if headers := c.root.ShardBlockHeaders(); c.minorIndex < uint64(len(headers)) {
 			c.minorIndex++
 			c.depositIndex = 0
 			c.deposits = nil

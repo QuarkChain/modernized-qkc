@@ -46,10 +46,6 @@ func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, miner
 		t: t, db: rawdb.NewMemoryDatabase(), config: &config,
 		engine: noVerifyEngine{beacon.New(ethash.NewFaker())}, rootGenesis: roots[0],
 	}
-	for _, root := range roots {
-		env.addRoot(root, nil)
-	}
-	env.setRootTip(roots[len(roots)-1])
 	incoming := shard1
 	if shardID == 0 {
 		incoming = shard0
@@ -63,7 +59,7 @@ func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, miner
 	alloc[crypto.PubkeyToAddress(key.PublicKey)] = types.Account{Balance: big.NewInt(params.Ether)}
 	genesis := &core.Genesis{
 		Config: &config, GasLimit: 54000, Alloc: alloc,
-		ExtraData: (&types.QKCExtra{ShardID: shardID, PrevRootBlock: roots[0].Hash(), Cursor: pos(1, 0, 0)}).Encode(),
+		ExtraData: (&types.QKCExtra{ShardID: shardID, Cursor: pos(1, 0, 0)}).Encode(),
 	}
 	chain, err := core.NewBlockChain(env.db, genesis, env.engine, nil)
 	if err != nil {
@@ -72,6 +68,12 @@ func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, miner
 	t.Cleanup(chain.Stop)
 	env.chain, env.genesis = chain, chain.Genesis()
 	env.sc = NewShardChain(env.db, chain)
+	for _, root := range roots {
+		env.addRoot(root, env.genesis)
+	}
+	if err := env.sc.Init(roots[len(roots)-1]); err != nil {
+		t.Fatal(err)
+	}
 	poolConfig := legacypool.DefaultConfig
 	poolConfig.Journal = ""
 	pool, err := txpool.New(poolConfig.PriceLimit, chain, []txpool.SubPool{legacypool.New(poolConfig, chain)})
@@ -96,7 +98,7 @@ func TestBuildShardBlock(t *testing.T) {
 			if err := pool.Add([]*types.Transaction{userTx}, true)[0]; err != nil {
 				t.Fatal(err)
 			}
-			root := env.sc.rootTip().Hash()
+			root := env.sc.rootTip.Hash()
 			args := miner.QKCBlockArgs{Timestamp: 1, FeeRecipient: common.Address{0xcc}}
 			block, err := env.sc.BuildBlock(context.Background(), pool, config, args)
 			if err != nil {
@@ -145,7 +147,7 @@ func TestBuildShardBlock(t *testing.T) {
 func TestBuildShardBlockRootReferences(t *testing.T) {
 	env, pool, config := newMiningEnv(t, 1)
 	ctx := context.Background()
-	root3 := env.sc.rootTip().Hash()
+	root3 := env.sc.rootTip.Hash()
 	root1 := env.sc.RootBlockByNumber(root3, 1)
 	args := miner.QKCBlockArgs{Timestamp: 1, PrevRootBlock: root1.Hash(), NoTxs: true}
 	a, err := env.sc.BuildBlock(ctx, pool, config, args)
@@ -161,7 +163,7 @@ func TestBuildShardBlockRootReferences(t *testing.T) {
 	env.insert(b)
 	env.checkHead(a)
 	fork := newRoot(env.rootGenesis, 99)
-	env.addRoot(fork, nil)
+	env.addRoot(fork, env.genesis)
 	qkcrawdb.WriteLastConfirmedBlockHash(env.db, root3, a.Hash())
 	for _, tt := range []struct {
 		name         string
@@ -193,8 +195,8 @@ func TestBuildShardBlockRootReferences(t *testing.T) {
 func TestBuildShardBlockMissingDeposits(t *testing.T) {
 	env, pool, config := newMiningEnv(t, 1)
 	source := sourceBlock(0, 99)
-	root := newRoot(env.sc.RootBlock(env.sc.rootTip().Hash()), 99).WithBody([]*types.Header{source}, nil)
-	env.addRoot(root, nil)
+	root := newRoot(env.sc.RootBlock(env.sc.rootTip.Hash()), 99).WithBody([]*types.Header{source}, nil)
+	env.addRoot(root, env.genesis)
 	env.setRootTip(root)
 	args := miner.QKCBlockArgs{Timestamp: 1, NoTxs: true}
 	// The old three deposits exhaust the budget, but the validator still probes
@@ -230,8 +232,11 @@ func TestBuildShardBlockInputs(t *testing.T) {
 		t.Fatal("accepted invalid timestamp")
 	}
 	args.Timestamp = 1
-	qkcrawdb.WriteRootHeadHash(env.db, common.Hash{})
-	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); !errors.Is(err, ErrRootChainUninitialized) {
-		t.Fatalf("missing root tip: %v", err)
+	env.sc = NewShardChain(env.db, env.chain)
+	for _, root := range []common.Hash{{}, env.rootGenesis.Hash()} {
+		args.PrevRootBlock = root
+		if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); !errors.Is(err, ErrRootChainUninitialized) {
+			t.Fatalf("uninitialized root tip with previous root %x: %v", root, err)
+		}
 	}
 }
