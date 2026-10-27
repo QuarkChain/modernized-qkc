@@ -18,11 +18,10 @@ package shard
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/miner"
 )
@@ -31,10 +30,16 @@ import (
 // select the current shard head and root tip, respectively. These references are
 // fixed before execution, so a concurrent head update cannot change the candidate.
 // Pool transactions follow mandatory deposits; NoTxs skips only pool transactions.
-// The caller owns pool and is responsible for sealing and importing the result.
-func (c *ShardChain) BuildBlock(ctx context.Context, pool *txpool.TxPool, config miner.Config, args miner.QKCBlockArgs) (*types.Block, error) {
+// The builder must be the node's miner for this shard's underlying blockchain;
+// reuse it so runtime miner settings apply. The caller seals and imports the result.
+//
+// TODO: Bind eth.Miner() at ShardChain initialization when node wiring is added.
+func (c *ShardChain) BuildBlock(ctx context.Context, builder *miner.Miner, args miner.QKCBlockArgs) (*types.Block, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if builder == nil {
+		return nil, errors.New("miner not configured")
 	}
 	// Select both tips under the lock shared with head updates.
 	c.mu.Lock()
@@ -60,14 +65,5 @@ func (c *ShardChain) BuildBlock(ctx context.Context, pool *txpool.TxPool, config
 	if _, err := c.validateRootReference(header, parent); err != nil {
 		return nil, err
 	}
-	builder := miner.New(miningBackend{c.chain, pool}, config, c.chain.Engine())
 	return builder.BuildQKCBlock(ctx, args)
 }
-
-type miningBackend struct {
-	chain *core.BlockChain
-	pool  *txpool.TxPool
-}
-
-func (b miningBackend) BlockChain() *core.BlockChain { return b.chain }
-func (b miningBackend) TxPool() *txpool.TxPool       { return b.pool }

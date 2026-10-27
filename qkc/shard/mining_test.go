@@ -38,7 +38,15 @@ import (
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 )
 
-func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, miner.Config) {
+type miningBackend struct {
+	chain *core.BlockChain
+	pool  *txpool.TxPool
+}
+
+func (b miningBackend) BlockChain() *core.BlockChain { return b.chain }
+func (b miningBackend) TxPool() *txpool.TxPool       { return b.pool }
+
+func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, *miner.Miner) {
 	roots, _, _, _, _, shard0, shard1 := testRootChain()
 	config := *params.MergedTestChainConfig
 	config.QuarkChain = &params.QuarkChainConfig{ShardID: shardID, ShardIDs: []uint32{0, 1, 2}}
@@ -83,13 +91,13 @@ func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, miner
 	t.Cleanup(func() { pool.Close() })
 	minerConfig := miner.DefaultConfig
 	minerConfig.GasCeil = genesis.GasLimit
-	return env, pool, minerConfig
+	return env, pool, miner.New(miningBackend{chain, pool}, minerConfig, env.engine)
 }
 
 func TestBuildShardBlock(t *testing.T) {
 	for _, shardID := range []uint32{0, 1} {
 		t.Run(string(rune('0'+shardID)), func(t *testing.T) {
-			env, pool, config := newMiningEnv(t, shardID)
+			env, pool, builder := newMiningEnv(t, shardID)
 			key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 			userTx := types.MustSignNewTx(key, types.LatestSigner(env.config), &types.DynamicFeeTx{
 				ChainID: env.config.ChainID, Gas: params.TxGas, To: &common.Address{0xee},
@@ -100,7 +108,7 @@ func TestBuildShardBlock(t *testing.T) {
 			}
 			root := env.sc.rootTip.Hash()
 			args := miner.QKCBlockArgs{Timestamp: 1, FeeRecipient: common.Address{0xcc}}
-			block, err := env.sc.BuildBlock(context.Background(), pool, config, args)
+			block, err := env.sc.BuildBlock(context.Background(), builder, args)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +134,7 @@ func TestBuildShardBlock(t *testing.T) {
 			env.checkHead(block)
 			// Resume the real cursor from the imported parent, without replaying deposits.
 			args.Timestamp, args.NoTxs = 2, true
-			next, err := env.sc.BuildBlock(context.Background(), nil, config, args)
+			next, err := env.sc.BuildBlock(context.Background(), builder, args)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,18 +153,18 @@ func TestBuildShardBlock(t *testing.T) {
 }
 
 func TestBuildShardBlockRootReferences(t *testing.T) {
-	env, pool, config := newMiningEnv(t, 1)
+	env, _, builder := newMiningEnv(t, 1)
 	ctx := context.Background()
 	root3 := env.sc.rootTip.Hash()
 	root1 := env.sc.RootBlockByNumber(root3, 1)
 	args := miner.QKCBlockArgs{Timestamp: 1, PrevRootBlock: root1.Hash(), NoTxs: true}
-	a, err := env.sc.BuildBlock(ctx, pool, config, args)
+	a, err := env.sc.BuildBlock(ctx, builder, args)
 	if err != nil {
 		t.Fatal(err)
 	}
 	env.insert(a)
 	args.Parent, args.Timestamp = env.genesis.Hash(), 2
-	b, err := env.sc.BuildBlock(ctx, pool, config, args)
+	b, err := env.sc.BuildBlock(ctx, builder, args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,13 +186,13 @@ func TestBuildShardBlockRootReferences(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			args.Parent, args.PrevRootBlock, args.Timestamp = tt.parent, tt.root, 3
-			if _, err := env.sc.BuildBlock(ctx, pool, config, args); !errors.Is(err, tt.want) {
+			if _, err := env.sc.BuildBlock(ctx, builder, args); !errors.Is(err, tt.want) {
 				t.Fatalf("error %v, want %v", err, tt.want)
 			}
 		})
 	}
 	args.Parent, args.PrevRootBlock, args.Timestamp = a.Hash(), root3, 3
-	next, err := env.sc.BuildBlock(ctx, pool, config, args)
+	next, err := env.sc.BuildBlock(ctx, builder, args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +200,58 @@ func TestBuildShardBlockRootReferences(t *testing.T) {
 	env.checkHead(next)
 }
 
+func TestBuildShardBlockMinerSettings(t *testing.T) {
+	env, pool, builder := newMiningEnv(t, 1)
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	userTx := types.MustSignNewTx(key, types.LatestSigner(env.config), &types.DynamicFeeTx{
+		ChainID: env.config.ChainID, Gas: params.TxGas, To: &common.Address{0xee},
+		GasFeeCap: big.NewInt(2 * params.GWei), GasTipCap: big.NewInt(params.GWei),
+	})
+	if err := pool.Add([]*types.Transaction{userTx}, true)[0]; err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild on the same parent so only the live miner settings change.
+	for _, tt := range []struct {
+		name    string
+		gasCeil uint64
+		tip     int64
+		wantTxs int
+	}{
+		{"initial", 54000, params.GWei / 1000, 4},
+		{"higher gas ceiling and tip", 108000, 2 * params.GWei, 3},
+		{"restored", 54000, params.GWei / 1000, 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder.SetGasCeil(tt.gasCeil)
+			if err := builder.SetGasTip(big.NewInt(tt.tip)); err != nil {
+				t.Fatal(err)
+			}
+			block, err := env.sc.BuildBlock(context.Background(), builder, miner.QKCBlockArgs{Timestamp: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := core.CalcGasLimit(env.genesis.GasLimit(), tt.gasCeil); block.GasLimit() != want {
+				t.Fatalf("gas limit %d, want %d", block.GasLimit(), want)
+			}
+			txs := block.Transactions()
+			if len(txs) != tt.wantTxs {
+				t.Fatalf("transaction count %d, want %d", len(txs), tt.wantTxs)
+			}
+			for _, tx := range txs[:3] {
+				if tx.Type() != types.DepositTxType {
+					t.Fatal("miner tip filter excluded mandatory deposits")
+				}
+			}
+			if tt.wantTxs == 4 && txs[3].Hash() != userTx.Hash() {
+				t.Fatal("missing pool transaction")
+			}
+		})
+	}
+	env.checkHead(env.genesis)
+}
+
 func TestBuildShardBlockMissingDeposits(t *testing.T) {
-	env, pool, config := newMiningEnv(t, 1)
+	env, _, builder := newMiningEnv(t, 1)
 	source := sourceBlock(0, 99)
 	root := newRoot(env.sc.RootBlock(env.sc.rootTip.Hash()), 99).WithBody([]*types.Header{source}, nil)
 	env.addRoot(root, env.genesis)
@@ -201,11 +259,11 @@ func TestBuildShardBlockMissingDeposits(t *testing.T) {
 	args := miner.QKCBlockArgs{Timestamp: 1, NoTxs: true}
 	// The old three deposits exhaust the budget, but the validator still probes
 	// the next source list to distinguish backlog from EOF.
-	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); !errors.Is(err, ErrXShardDepositsMissing) {
+	if _, err := env.sc.BuildBlock(context.Background(), builder, args); !errors.Is(err, ErrXShardDepositsMissing) {
 		t.Fatalf("error %v, want missing deposits", err)
 	}
 	qkcrawdb.WriteXShardDeposits(env.db, source.Hash(), nil)
-	block, err := env.sc.BuildBlock(context.Background(), pool, config, args)
+	block, err := env.sc.BuildBlock(context.Background(), builder, args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,25 +275,36 @@ func TestBuildShardBlockMissingDeposits(t *testing.T) {
 }
 
 func TestBuildShardBlockInputs(t *testing.T) {
-	env, pool, config := newMiningEnv(t, 1)
+	env, _, builder := newMiningEnv(t, 1)
 	args := miner.QKCBlockArgs{Timestamp: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := env.sc.BuildBlock(ctx, pool, config, args); !errors.Is(err, context.Canceled) {
+	if _, err := env.sc.BuildBlock(ctx, builder, args); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
-	if _, err := env.sc.BuildBlock(context.Background(), nil, config, args); err == nil {
+	if _, err := env.sc.BuildBlock(context.Background(), nil, args); err == nil {
+		t.Fatal("accepted missing miner")
+	}
+	withoutPool := miner.New(miningBackend{chain: env.chain}, miner.DefaultConfig, env.engine)
+	if _, err := env.sc.BuildBlock(context.Background(), withoutPool, args); err == nil {
 		t.Fatal("accepted missing pool")
 	}
+	args.NoTxs = true
+	if block, err := env.sc.BuildBlock(context.Background(), withoutPool, args); err != nil {
+		t.Fatalf("NoTxs without pool: %v", err)
+	} else if len(block.Transactions()) != 3 {
+		t.Fatalf("NoTxs omitted deposits: got %d transactions, want 3", len(block.Transactions()))
+	}
+	args.NoTxs = false
 	args.Timestamp = 0
-	if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); err == nil {
+	if _, err := env.sc.BuildBlock(context.Background(), builder, args); err == nil {
 		t.Fatal("accepted invalid timestamp")
 	}
 	args.Timestamp = 1
 	env.sc = NewShardChain(env.db, env.chain)
 	for _, root := range []common.Hash{{}, env.rootGenesis.Hash()} {
 		args.PrevRootBlock = root
-		if _, err := env.sc.BuildBlock(context.Background(), pool, config, args); !errors.Is(err, ErrRootChainUninitialized) {
+		if _, err := env.sc.BuildBlock(context.Background(), builder, args); !errors.Is(err, ErrRootChainUninitialized) {
 			t.Fatalf("uninitialized root tip with previous root %x: %v", root, err)
 		}
 	}
