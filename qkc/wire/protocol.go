@@ -65,6 +65,10 @@ func NewClusterMessage(op ClusterOp) (SSZMessage, error) {
 		return &ConnectToChainsRequest{}, nil
 	case ClusterOpConnectToChainsResponse:
 		return &ConnectToChainsResponse{}, nil
+	case ClusterOpAddRootBlockRequest:
+		return &AddRootBlockRequest{}, nil
+	case ClusterOpAddRootBlockResponse:
+		return &AddRootBlockResponse{}, nil
 	case ClusterOpAddMinorBlockHeaderRequest:
 		return &AddMinorBlockHeaderRequest{}, nil
 	case ClusterOpAddMinorBlockHeaderResponse:
@@ -73,14 +77,10 @@ func NewClusterMessage(op ClusterOp) (SSZMessage, error) {
 		return &AddXshardTxListRequest{}, nil
 	case ClusterOpAddXshardTxListResponse:
 		return &AddXshardTxListResponse{}, nil
-	case ClusterOpBatchAddXshardTxListRequest:
-		return &BatchAddXshardTxListRequest{}, nil
-	case ClusterOpBatchAddXshardTxListResponse:
-		return &BatchAddXshardTxListResponse{}, nil
-	case ClusterOpAddMinorBlockHeaderListRequest:
-		return &AddMinorBlockHeaderListRequest{}, nil
-	case ClusterOpAddMinorBlockHeaderListResponse:
-		return &AddMinorBlockHeaderListResponse{}, nil
+	case ClusterOpGetRootChainStakesRequest:
+		return &GetRootChainStakesRequest{}, nil
+	case ClusterOpGetRootChainStakesResponse:
+		return &GetRootChainStakesResponse{}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown ClusterOp: 0x%x", op)

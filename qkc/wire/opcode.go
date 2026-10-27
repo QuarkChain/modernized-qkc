@@ -43,15 +43,21 @@ const (
 	ClusterOpConnectToChainsRequest  ClusterOp = 3 + ClusterOpBase // 0x83
 	ClusterOpConnectToChainsResponse ClusterOp = 4 + ClusterOpBase // 0x84
 
-	// Chain-to-Master block notifications and chain-to-chain deposits.
-	ClusterOpAddMinorBlockHeaderRequest      ClusterOp = 17 + ClusterOpBase // 0x91
-	ClusterOpAddMinorBlockHeaderResponse     ClusterOp = 18 + ClusterOpBase // 0x92
-	ClusterOpAddXshardTxListRequest          ClusterOp = 19 + ClusterOpBase // 0x93
-	ClusterOpAddXshardTxListResponse         ClusterOp = 20 + ClusterOpBase // 0x94
-	ClusterOpBatchAddXshardTxListRequest     ClusterOp = 33 + ClusterOpBase // 0xa1
-	ClusterOpBatchAddXshardTxListResponse    ClusterOp = 34 + ClusterOpBase // 0xa2
-	ClusterOpAddMinorBlockHeaderListRequest  ClusterOp = 59 + ClusterOpBase // 0xbb
-	ClusterOpAddMinorBlockHeaderListResponse ClusterOp = 60 + ClusterOpBase // 0xbc
+	// Master-to-chain root block update.
+	ClusterOpAddRootBlockRequest  ClusterOp = 5 + ClusterOpBase // 0x85
+	ClusterOpAddRootBlockResponse ClusterOp = 6 + ClusterOpBase // 0x86
+
+	// Chain-to-Master block notification.
+	ClusterOpAddMinorBlockHeaderRequest  ClusterOp = 17 + ClusterOpBase // 0x91
+	ClusterOpAddMinorBlockHeaderResponse ClusterOp = 18 + ClusterOpBase // 0x92
+
+	// Chain-to-chain deposits.
+	ClusterOpAddXshardTxListRequest  ClusterOp = 19 + ClusterOpBase // 0x93
+	ClusterOpAddXshardTxListResponse ClusterOp = 20 + ClusterOpBase // 0x94
+
+	// Master-to-chain staking query.
+	ClusterOpGetRootChainStakesRequest  ClusterOp = 65 + ClusterOpBase // 0xc1
+	ClusterOpGetRootChainStakesResponse ClusterOp = 66 + ClusterOpBase // 0xc2
 )
 
 // CommandOp identifies peer command operations. They are carried in P2PFrame

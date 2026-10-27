@@ -140,17 +140,6 @@ type AddMinorBlockHeaderResponse struct {
 	ArtificialTxConfig ArtificialTxConfig
 }
 
-// AddMinorBlockHeaderListRequest reports headers during sync, with one reward per
-// header in the same order; encoding and reward semantics match the single report.
-type AddMinorBlockHeaderListRequest struct {
-	MinorBlockHeaderList []Data                `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
-	CoinbaseAmounts      [][UInt256Length]byte `ssz-max:"4294967295"`
-}
-
-type AddMinorBlockHeaderListResponse struct {
-	ErrorCode uint32
-}
-
 // AddXshardTxListRequest delivers one source block's deposits to a destination
 // shard, including empty lists for the inbox cursor. Each item is RLP(DepositTx),
 // without the 0x7e transaction prefix, in source log order.
@@ -164,11 +153,29 @@ type AddXshardTxListResponse struct {
 	ErrorCode uint32
 }
 
-// BatchAddXshardTxListRequest groups lists for one destination shard.
-type BatchAddXshardTxListRequest struct {
-	AddXshardTxListRequestList []AddXshardTxListRequest `ssz-max:"4294967295"`
+// AddRootBlockRequest sends a root block from Master to every chain. RootBlock
+// carries an SSZ-encoded QKC RootBlock.
+type AddRootBlockRequest struct {
+	RootBlock    Data `ssz-max:"4294967295"`
+	ExpectSwitch bool
 }
 
-type BatchAddXshardTxListResponse struct {
+type AddRootBlockResponse struct {
 	ErrorCode uint32
+	Switched  bool
+}
+
+// GetRootChainStakesRequest asks a chain for the stakes recorded for Address
+// at MinorBlockHash.
+type GetRootChainStakesRequest struct {
+	Address        common.Address
+	MinorBlockHash common.Hash
+}
+
+// GetRootChainStakesResponse reports staking information. Stakes is a
+// little-endian uint256; Signer is a 20-byte address.
+type GetRootChainStakesResponse struct {
+	ErrorCode uint32
+	Stakes    [UInt256Length]byte
+	Signer    common.Address
 }

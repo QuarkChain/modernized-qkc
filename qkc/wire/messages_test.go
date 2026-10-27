@@ -41,14 +41,14 @@ func TestNewClusterMessageRegistry(t *testing.T) {
 		{ClusterOpPong, &PongResponse{}},
 		{ClusterOpConnectToChainsRequest, &ConnectToChainsRequest{}},
 		{ClusterOpConnectToChainsResponse, &ConnectToChainsResponse{}},
+		{ClusterOpAddRootBlockRequest, &AddRootBlockRequest{}},
+		{ClusterOpAddRootBlockResponse, &AddRootBlockResponse{}},
 		{ClusterOpAddMinorBlockHeaderRequest, &AddMinorBlockHeaderRequest{}},
 		{ClusterOpAddMinorBlockHeaderResponse, &AddMinorBlockHeaderResponse{}},
 		{ClusterOpAddXshardTxListRequest, &AddXshardTxListRequest{}},
 		{ClusterOpAddXshardTxListResponse, &AddXshardTxListResponse{}},
-		{ClusterOpBatchAddXshardTxListRequest, &BatchAddXshardTxListRequest{}},
-		{ClusterOpBatchAddXshardTxListResponse, &BatchAddXshardTxListResponse{}},
-		{ClusterOpAddMinorBlockHeaderListRequest, &AddMinorBlockHeaderListRequest{}},
-		{ClusterOpAddMinorBlockHeaderListResponse, &AddMinorBlockHeaderListResponse{}},
+		{ClusterOpGetRootChainStakesRequest, &GetRootChainStakesRequest{}},
+		{ClusterOpGetRootChainStakesResponse, &GetRootChainStakesResponse{}},
 	}
 	for _, c := range cases {
 		got, err := NewClusterMessage(c.op)
@@ -172,51 +172,6 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 		t.Fatalf("header hash tree root: %v", err)
 	}
 
-	secondHeader := &types.Header{
-		Difficulty: big.NewInt(0),
-		Number:     big.NewInt(43),
-		Extra:      (&types.QKCExtra{ShardID: 1}).Encode(),
-	}
-	secondHeaderData, err := rlp.EncodeToBytes(secondHeader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	list := &AddMinorBlockHeaderListRequest{
-		MinorBlockHeaderList: []Data{Data(headerData), Data(secondHeaderData)},
-		CoinbaseAmounts:      [][32]byte{msg.CoinbaseAmount, {0x04, 0x03}},
-	}
-	listEncoded, err := list.MarshalSSZ()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(listEncoded) != list.SizeSSZ() {
-		t.Fatalf("header list size: got %d, want %d", len(listEncoded), list.SizeSSZ())
-	}
-	var decodedList AddMinorBlockHeaderListRequest
-	if err := decodedList.UnmarshalSSZ(listEncoded); err != nil {
-		t.Fatal(err)
-	}
-	if len(decodedList.MinorBlockHeaderList) != len(list.MinorBlockHeaderList) {
-		t.Fatalf("header list length changed: got %d, want %d", len(decodedList.MinorBlockHeaderList), len(list.MinorBlockHeaderList))
-	}
-	if !reflect.DeepEqual(decodedList.CoinbaseAmounts, list.CoinbaseAmounts) {
-		t.Fatal("SSZ changed the ordered reward list")
-	}
-	for i, data := range list.MinorBlockHeaderList {
-		if !bytes.Equal(decodedList.MinorBlockHeaderList[i], data) {
-			t.Fatalf("header %d bytes changed in SSZ round trip", i)
-		}
-		var got types.Header
-		if err := rlp.DecodeBytes(decodedList.MinorBlockHeaderList[i], &got); err != nil {
-			t.Fatal(err)
-		}
-		if got.Hash() != []*types.Header{header, secondHeader}[i].Hash() {
-			t.Fatalf("header %d changed in SSZ round trip", i)
-		}
-	}
-	if _, err := list.HashTreeRoot(); err != nil {
-		t.Fatalf("header list hash tree root: %v", err)
-	}
 }
 
 func TestCrossChainDepositsSSZ(t *testing.T) {
@@ -282,13 +237,26 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 	if decodedEmpty.DepositTxList == nil || len(decodedEmpty.DepositTxList) != 0 {
 		t.Fatal("empty deposit list must decode as a present empty list")
 	}
-	batch := &BatchAddXshardTxListRequest{
-		AddXshardTxListRequestList: []AddXshardTxListRequest{*msg, {
-			ChainID:        msg.ChainID,
-			MinorBlockHash: common.HexToHash("0x57"),
-		}},
+}
+
+func TestMasterMessagesSSZ(t *testing.T) {
+	root := &AddRootBlockRequest{RootBlock: Data{0x01, 0x02}, ExpectSwitch: true}
+	roundTripSSZ(t, root)
+
+	request := &GetRootChainStakesRequest{
+		Address:        common.HexToAddress("0x1234"),
+		MinorBlockHash: common.HexToHash("0x5678"),
 	}
-	roundTripSSZ(t, batch)
+	roundTripSSZ(t, request)
+
+	response := &GetRootChainStakesResponse{
+		ErrorCode: 1,
+		Signer:    common.HexToAddress("0x9abc"),
+	}
+	if _, err := uint256.NewInt(0x0102).MarshalSSZAppend(response.Stakes[:0]); err != nil {
+		t.Fatal(err)
+	}
+	roundTripSSZ(t, response)
 }
 
 func TestRootBlockPayloadsSSZ(t *testing.T) {
@@ -424,17 +392,17 @@ func TestGeneratedCodecsRejectMalformedPayloads(t *testing.T) {
 		{"ChainInfo", 0, func() SSZMessage { return new(ChainInfo) }},
 		{"ConnectToChainsRequest", 0, func() SSZMessage { return new(ConnectToChainsRequest) }},
 		{"ConnectToChainsResponse", 0, func() SSZMessage { return new(ConnectToChainsResponse) }},
+		{"AddRootBlockRequest", 0, func() SSZMessage { return new(AddRootBlockRequest) }},
+		{"AddRootBlockResponse", -1, func() SSZMessage { return new(AddRootBlockResponse) }},
 		{"HelloCommand", 58, func() SSZMessage { return new(HelloCommand) }},
 		{"ArtificialTxConfig", -1, func() SSZMessage { return new(ArtificialTxConfig) }},
 		{"ShardStats", -1, func() SSZMessage { return new(ShardStats) }},
 		{"AddMinorBlockHeaderRequest", 0, func() SSZMessage { return new(AddMinorBlockHeaderRequest) }},
 		{"AddMinorBlockHeaderResponse", -1, func() SSZMessage { return new(AddMinorBlockHeaderResponse) }},
-		{"AddMinorBlockHeaderListRequest", 0, func() SSZMessage { return new(AddMinorBlockHeaderListRequest) }},
-		{"AddMinorBlockHeaderListResponse", -1, func() SSZMessage { return new(AddMinorBlockHeaderListResponse) }},
 		{"AddXshardTxListRequest", 36, func() SSZMessage { return new(AddXshardTxListRequest) }},
 		{"AddXshardTxListResponse", -1, func() SSZMessage { return new(AddXshardTxListResponse) }},
-		{"BatchAddXshardTxListRequest", 0, func() SSZMessage { return new(BatchAddXshardTxListRequest) }},
-		{"BatchAddXshardTxListResponse", -1, func() SSZMessage { return new(BatchAddXshardTxListResponse) }},
+		{"GetRootChainStakesRequest", -1, func() SSZMessage { return new(GetRootChainStakesRequest) }},
+		{"GetRootChainStakesResponse", -1, func() SSZMessage { return new(GetRootChainStakesResponse) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
