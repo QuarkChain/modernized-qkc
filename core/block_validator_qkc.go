@@ -67,7 +67,6 @@ func (bc *BlockChain) SetXShardInbox(inbox XShardInbox) {
 }
 
 // XShardDeposits opens the inbox used by block validation for block construction.
-// The caller must validate the root ancestry before opening the inbox.
 func (bc *BlockChain) XShardDeposits(parent *types.Header, prevRootBlock common.Hash) (XShardDeposits, error) {
 	if bc.xshardInbox == nil {
 		return nil, errors.New("cross-shard inbox not configured")

@@ -740,6 +740,15 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 	qkcrawdb.WriteLastConfirmedBlockHash(env.db, r3.Hash(), common.Hash{0xff})
 
 	unknown := newRoot(r1, 2)
+	// Build on the valid root first, then corrupt the reference for rejection tests.
+	valid := env.makeBlocks(a1, 1, r1, 1)[0]
+	withRoot := func(root *qkctypes.RootBlock) *types.Block {
+		header := valid.Header()
+		extra, _ := header.QKCExtra()
+		extra.PrevRootBlock = root.Hash()
+		header.Extra = extra.Encode()
+		return valid.WithSeal(header)
+	}
 	tests := []struct {
 		name              string
 		block             *types.Block
@@ -755,12 +764,12 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 		// g <-- a1[r1] <-- x[r0]
 		//
 		// r0 is older than r1.
-		{"older root", env.makeBlocks(a1, 1, r0, 1)[0], ErrRootNotDescendant, false, false},
+		{"older root", withRoot(r0), ErrRootNotDescendant, false, false},
 
 		// g <-- a1[r1] <-- x[r1b]
 		//
 		// r1b is on another root chain than r1.
-		{"forked root", env.makeBlocks(a1, 1, r1b, 1)[0], ErrRootNotDescendant, false, false},
+		{"forked root", withRoot(r1b), ErrRootNotDescendant, false, false},
 
 		// g <-- a1[r1]
 		// ^
@@ -784,6 +793,12 @@ func TestInsertShardBlockRootReference(t *testing.T) {
 		}
 		if have := errors.Is(err, ErrShardStateInconsistency); have != test.shardInconsistent {
 			t.Errorf("%s: shard inconsistency mismatch: have %v, want %v", test.name, have, test.shardInconsistent)
+		}
+		if test.err == ErrRootNotDescendant {
+			// Bypassing ShardChain must still reject invalid inbox ancestry.
+			if _, err := env.chain.InsertChain(types.Blocks{test.block}); !errors.Is(err, ErrRootNotDescendant) {
+				t.Errorf("%s: direct InsertChain error %v, want %v", test.name, err, ErrRootNotDescendant)
+			}
 		}
 		if env.chain.HasBlock(test.block.Hash(), test.block.NumberU64()) {
 			t.Errorf("%s: invalid block inserted", test.name)
@@ -1286,6 +1301,12 @@ func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 	env.addRoot(root, env.genesis)
 	parent := env.makeBlocks(env.genesis, 1, root, 1)[0]
 	env.insert(parent)
+	block := env.makeBlocks(parent, 1, root, 1)[0]
+	header := block.Header()
+	extra, _ := header.QKCExtra()
+	extra.PrevRootBlock = env.rootGenesis.Hash()
+	header.Extra = extra.Encode()
+	block = block.WithSeal(header)
 
 	// Simulate loss of root data while keeping the shard blockchain intact.
 	rootDB := rawdb.NewMemoryDatabase()
@@ -1293,7 +1314,6 @@ func TestInsertShardBlockStoredReferenceError(t *testing.T) {
 	qkcrawdb.WriteRootBlock(rootDB, env.rootGenesis)
 	qkcrawdb.WriteLastConfirmedBlockHash(rootDB, env.rootGenesis.Hash(), env.genesis.Hash())
 	env.sc.db = rootDB
-	block := env.makeBlocks(parent, 1, env.rootGenesis, 1)[0]
 	if err := env.sc.InsertShardBlock(block); !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, ErrUnknownRootBlock) || errors.Is(err, ErrClusterStateInconsistency) {
 		t.Fatalf("missing stored parent reference error mismatch: %v", err)
 	}

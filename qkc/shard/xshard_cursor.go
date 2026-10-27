@@ -118,14 +118,15 @@ func newXShardCursor(config *params.QuarkChainConfig, chain XShardChain, pos typ
 	if c.maxRoot == nil {
 		return nil, fmt.Errorf("%w: %x", ErrUnknownCursorRoot, maxRoot)
 	}
-	// Only heights past the tip are EOF.
+	// EOF is exactly one root past the tip, with no source or deposit index.
 	if pos.RootBlockHeight > c.maxRoot.NumberU64() {
+		if pos.RootBlockHeight != c.maxRoot.NumberU64()+1 || c.minorIndex != 0 || c.depositIndex != 0 {
+			return nil, fmt.Errorf("%w: invalid EOF cursor %+v after root #%d", ErrInconsistentClusterState, pos, c.maxRoot.NumberU64())
+		}
 		return c, nil
 	}
-	// ShardChain.validateRootReference checks root headers from maxRoot back
-	// to the parent's root reference before execution. The cursor may lag
-	// behind that reference, outside the checked range. This additional
-	// consistency check rejects missing local root data instead of reporting EOF.
+	// The cursor may lag behind the parent's root reference. Missing root data
+	// below the tip is an inconsistency, not EOF.
 	if c.root = chain.RootBlockByNumber(maxRoot, pos.RootBlockHeight); c.root == nil {
 		return nil, fmt.Errorf("%w: missing root block #%d below %x", ErrInconsistentClusterState, pos.RootBlockHeight, maxRoot)
 	}
@@ -246,11 +247,31 @@ func NewXShardInbox(config *params.QuarkChainConfig, chain XShardChain) *XShardI
 
 // Deposits returns the deposits a shard block may apply, in order: from the
 // cursor of its parent up to its previous root block.
-// Root ancestry must already be validated, as in ShardChain.validateRootReference.
+// The root reference must equal or extend the parent's, except at shard genesis.
 func (in *XShardInbox) Deposits(parent *types.Header, prevRootBlock common.Hash) (core.XShardDeposits, error) {
 	extra, err := parent.QKCExtra()
 	if err != nil {
 		return nil, fmt.Errorf("parent: %w", err)
+	}
+	if parent.Number.Sign() != 0 {
+		root := in.chain.RootBlock(prevRootBlock)
+		if root == nil {
+			return nil, fmt.Errorf("%w: %x", ErrUnknownCursorRoot, prevRootBlock)
+		}
+		parentRoot := in.chain.RootBlock(extra.PrevRootBlock)
+		if parentRoot == nil {
+			return nil, fmt.Errorf("%w: missing parent root %x", ErrInconsistentClusterState, extra.PrevRootBlock)
+		}
+		if root.NumberU64() < parentRoot.NumberU64() {
+			return nil, ErrRootNotDescendant
+		}
+		ancestor := in.chain.RootBlockByNumber(prevRootBlock, parentRoot.NumberU64())
+		if ancestor == nil {
+			return nil, fmt.Errorf("%w: missing root block #%d below %x", ErrInconsistentClusterState, parentRoot.NumberU64(), prevRootBlock)
+		}
+		if ancestor.Hash() != parentRoot.Hash() {
+			return nil, ErrRootNotDescendant
+		}
 	}
 	cursor, err := newXShardCursor(in.config, in.chain, extra.Cursor, prevRootBlock)
 	if err != nil {
