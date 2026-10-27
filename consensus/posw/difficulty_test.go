@@ -91,8 +91,8 @@ func TestShardStakingDecay(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			config := &params.PoSWConfig{
 				StakingEnabled: true, WindowSize: 3, StakePerBlock: big.NewInt(100), DiffDivider: 100,
-				StakePerBlockDecayEnabled: true,
-				EpochInterval:             10, DecayFactor: "0.88",
+				PoSWStakingDecayEnabled: true,
+				EpochInterval:           10, DecayFactor: "0.88",
 				OriginalBlockNumber: test.offset,
 			}
 			number, base := new(big.Int).SetUint64(test.number), big.NewInt(100)
@@ -102,7 +102,7 @@ func TestShardStakingDecay(t *testing.T) {
 			}
 			// The root path uses the configured, fixed requirement at every epoch.
 			rootConfig := *config
-			rootConfig.StakePerBlockDecayEnabled = false
+			rootConfig.PoSWStakingDecayEnabled = false
 			if got := GetAdjustedDifficulty(&rootConfig, number, base, uint256.NewInt(99), 0); got.Int64() != 100 {
 				t.Fatalf("root stake requirement decayed: difficulty %s", got)
 			}
