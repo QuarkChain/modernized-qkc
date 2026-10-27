@@ -683,12 +683,7 @@ func totalFees(block *types.Block, receipts []*types.Receipt) *big.Int {
 	feesWei := new(big.Int)
 	var gasUsed, product big.Int
 	for i, tx := range block.Transactions() {
-		var minerFee *big.Int
-		if tx.Type() == types.DepositTxType {
-			minerFee = tx.GasPrice()
-		} else {
-			minerFee, _ = tx.EffectiveGasTip(baseFee)
-		}
+		minerFee, _ := tx.EffectiveGasTip(baseFee)
 		gasUsed.SetUint64(receipts[i].GasUsed)
 		product.Mul(&gasUsed, minerFee)
 		feesWei.Add(feesWei, &product)

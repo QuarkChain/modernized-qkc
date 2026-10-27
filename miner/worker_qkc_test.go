@@ -86,6 +86,25 @@ func (d *miningDeposits) Cursor() types.XShardCursor {
 	return types.XShardCursor{RootBlockHeight: 1, XShardDepositIndex: uint64(d.consumed)}
 }
 
+func TestTotalFeesWithDeposits(t *testing.T) {
+	txs := []*types.Transaction{
+		types.NewTx(&types.DepositTx{GasPrice: uint256.NewInt(10), Gas: 9000}),
+		types.NewTx(&types.DepositTx{GasPrice: uint256.NewInt(2), Gas: 9000}),
+		types.NewTx(&types.DepositTx{GasPrice: new(uint256.Int), Gas: 9000}),
+		types.NewTx(&types.LegacyTx{GasPrice: big.NewInt(15), Gas: 21000}),
+		types.NewTx(&types.DynamicFeeTx{GasFeeCap: big.NewInt(10), GasTipCap: big.NewInt(5), Gas: 21000}),
+	}
+	block := types.NewBlockWithHeader(&types.Header{BaseFee: big.NewInt(7)}).WithBody(types.Body{Transactions: txs})
+	receipts := types.Receipts{
+		{GasUsed: 9000}, {GasUsed: 9000}, {GasUsed: 9000}, {GasUsed: 21000}, {GasUsed: 21000},
+	}
+	// Deposits pay 10, 2 and 0 per gas; ordinary transactions pay tips of 8 and 3.
+	want := big.NewInt(9000*(10+2) + 21000*(8+3))
+	if fees := totalFees(block, receipts); fees.Cmp(want) != 0 {
+		t.Fatalf("total fees %v, want %v", fees, want)
+	}
+}
+
 func TestBuildXShardDeposits(t *testing.T) {
 	missing := errors.New("missing deposit list")
 	for _, amsterdam := range []bool{false, true} {
