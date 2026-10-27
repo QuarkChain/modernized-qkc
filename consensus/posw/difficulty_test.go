@@ -92,7 +92,7 @@ func TestShardStakingDecay(t *testing.T) {
 			config := &params.PoSWConfig{
 				StakingEnabled: true, WindowSize: 3, StakePerBlock: big.NewInt(100), DiffDivider: 100,
 				PoSWStakingDecayEnabled: true,
-				EpochInterval:           10, DecayFactor: "0.88",
+				EpochInterval:           10, DecayFactor: big.NewRat(22, 25),
 				OriginalBlockNumber: test.offset,
 			}
 			number, base := new(big.Int).SetUint64(test.number), big.NewInt(100)
@@ -106,7 +106,7 @@ func TestShardStakingDecay(t *testing.T) {
 			if got := GetAdjustedDifficulty(&rootConfig, number, base, uint256.NewInt(99), 0); got.Int64() != 100 {
 				t.Fatalf("root stake requirement decayed: difficulty %s", got)
 			}
-			if config.StakePerBlock.Uint64() != 100 || config.DecayFactor != "0.88" ||
+			if config.StakePerBlock.Uint64() != 100 || config.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 ||
 				number.Uint64() != test.number || base.Int64() != 100 || stakes.Uint64() != test.stakes {
 				t.Fatal("staking decay modified its inputs")
 			}

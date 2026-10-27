@@ -17,7 +17,6 @@
 package params
 
 import (
-	"encoding/json"
 	"errors"
 	"math/big"
 
@@ -47,9 +46,11 @@ var PoSWStakingRuntimeCodeHash = common.HexToHash("0xee90e568da573f251d63256e843
 
 // PoSWConfig defines the difficulty, staking and subsidy rules for a QKC chain.
 // Amounts are in the smallest native currency unit. JSON uses lowerCamelCase
-// field names and unquoted integer amounts. Ratios accept numbers (0.88) or
-// numeric strings ("0.88") and are serialized as numbers. All values are parsed
-// exactly without using float64.
+// field names. Integers accept decimal numbers, decimal strings and hex strings,
+// and serialize as decimal numbers. Ratios accept numbers
+// (0.88) or numeric strings ("0.88") and serialize as numbers. All values are
+// parsed exactly without using float64.
+// Ratios are stored as rationals; JSON output requires a finite decimal value.
 // Call Check before using the configuration for consensus calculations.
 type PoSWConfig struct {
 	// AdjustmentCutoff divides the child-parent timestamp delta, in seconds,
@@ -65,12 +66,12 @@ type PoSWConfig struct {
 	CoinbaseAmount *big.Int `json:"coinbaseAmount"`
 	// RewardTaxRate is the fraction of the shard subsidy assigned to root miners.
 	// BlockRewardAt returns the remaining shard share.
-	RewardTaxRate json.Number `json:"rewardTaxRate"`
+	RewardTaxRate *big.Rat `json:"rewardTaxRate"`
 	// EpochInterval is the number of blocks per reward and staking decay epoch.
 	EpochInterval uint64 `json:"epochInterval"`
 	// DecayFactor is the fraction retained each epoch, e.g. 0.88 retains 88%.
 	// Check requires a value in [0, 1] with a reduced denominator no greater than 100.
-	DecayFactor json.Number `json:"decayFactor"`
+	DecayFactor *big.Rat `json:"decayFactor"`
 	// OriginalBlockNumber is the old chain's stop height represented by genesis.
 	// It continues reward and staking epochs while new block numbers start at zero.
 	OriginalBlockNumber uint64 `json:"originalBlockNumber,omitempty"`
@@ -100,17 +101,15 @@ func (c *PoSWConfig) Check() error {
 	if c.CoinbaseAmount == nil || c.CoinbaseAmount.Sign() < 0 || c.CoinbaseAmount.BitLen() > 256 || c.EpochInterval == 0 {
 		return errors.New("posw: a uint256 block subsidy and positive epoch interval are required")
 	}
-	decay, ok := new(big.Rat).SetString(string(c.DecayFactor))
-	if !ok || !json.Valid([]byte(c.DecayFactor)) || decay.Sign() < 0 || decay.Cmp(big.NewRat(1, 1)) > 0 {
-		return errors.New("posw: decay factor must be a JSON number between zero and one")
+	if c.DecayFactor == nil || c.DecayFactor.Sign() < 0 || c.DecayFactor.Cmp(big.NewRat(1, 1)) > 0 {
+		return errors.New("posw: decay factor must be between zero and one")
 	}
 	// Match pyquarkchain's block_reward_decay_factor denominator limit.
-	if decay.Denom().Cmp(big.NewInt(100)) > 0 {
+	if c.DecayFactor.Denom().Cmp(big.NewInt(100)) > 0 {
 		return errors.New("posw: reward decay factor denominator must not exceed 100")
 	}
-	tax, ok := new(big.Rat).SetString(string(c.RewardTaxRate))
-	if !ok || !json.Valid([]byte(c.RewardTaxRate)) || tax.Sign() < 0 || tax.Cmp(big.NewRat(1, 1)) > 0 {
-		return errors.New("posw: reward tax rate must be a JSON number between zero and one")
+	if c.RewardTaxRate == nil || c.RewardTaxRate.Sign() < 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) > 0 {
+		return errors.New("posw: reward tax rate must be between zero and one")
 	}
 	if c.StakePerBlock != nil && (c.StakePerBlock.Sign() < 0 || c.StakePerBlock.BitLen() > 256) {
 		return errors.New("posw: stakePerBlock must fit uint256")
@@ -130,8 +129,7 @@ func (c *PoSWConfig) BlockRewardAt(number *big.Int) *big.Int {
 		return new(big.Int)
 	}
 	reward := c.decayByEpoch(c.CoinbaseAmount, number)
-	tax, _ := new(big.Rat).SetString(string(c.RewardTaxRate))
-	localRate := new(big.Rat).Sub(big.NewRat(1, 1), tax)
+	localRate := new(big.Rat).Sub(big.NewRat(1, 1), c.RewardTaxRate)
 	reward.Mul(reward, localRate.Num())
 	return reward.Div(reward, localRate.Denom())
 }
@@ -161,9 +159,8 @@ func (c *PoSWConfig) StakePerBlockAt(number *big.Int) *big.Int {
 func (c *PoSWConfig) decayByEpoch(value, number *big.Int) *big.Int {
 	height := new(big.Int).Add(number, new(big.Int).SetUint64(c.OriginalBlockNumber))
 	epoch := height.Div(height, new(big.Int).SetUint64(c.EpochInterval))
-	factor, _ := new(big.Rat).SetString(string(c.DecayFactor))
-	numerator := new(big.Int).Exp(factor.Num(), epoch, nil)
-	denominator := new(big.Int).Exp(factor.Denom(), epoch, nil)
+	numerator := new(big.Int).Exp(c.DecayFactor.Num(), epoch, nil)
+	denominator := new(big.Int).Exp(c.DecayFactor.Denom(), epoch, nil)
 	result := new(big.Int).Mul(value, numerator)
 	return result.Div(result, denominator)
 }
