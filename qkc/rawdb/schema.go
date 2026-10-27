@@ -1,4 +1,4 @@
-// Copyright 2026 The quarkchain Authors
+// Copyright 2026-2027 The quarkchain Authors
 // This file is part of the quarkchain library.
 //
 // The quarkchain library is free software: you can redistribute it and/or modify
@@ -23,9 +23,6 @@ import "github.com/ethereum/go-ethereum/common"
 // The fields below define the QuarkChain specific database schema. All keys
 // start with qkc_, keeping them apart from the geth ones.
 var (
-	// rootHeadKey tracks the latest known root block, the root tip.
-	rootHeadKey = []byte("qkc_LastRoot")
-
 	rootBlockPrefix      = []byte("qkc_rb")     // rootBlockPrefix + hash -> root block
 	lastConfirmedPrefix  = []byte("qkc_rLM")    // lastConfirmedPrefix + root hash -> last confirmed shard block hash
 	xShardDepositsPrefix = []byte("qkc_xShard") // xShardDepositsPrefix + source block hash -> deposits sent to this shard by the block

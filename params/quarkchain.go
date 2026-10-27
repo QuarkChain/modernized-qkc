@@ -36,6 +36,13 @@ const (
 	// MaxCrossShardTxGas caps a message's destination gas budget, including
 	// XShardSendGas. It matches half of QuarkChain's default 12,000,000 block gas limit.
 	MaxCrossShardTxGas uint64 = 6_000_000
+
+	// XShardGasLimitDivisor sets the cross-shard gas limit of a shard block, the
+	// gas reserved for its deposits, to its gas limit over this divisor.
+	XShardGasLimitDivisor uint64 = 2
+
+	// RootCoinbaseShardID is the shard the root chain pays its coinbase to.
+	RootCoinbaseShardID uint32 = 0
 )
 
 // QuarkChainConfig is the configuration of a QuarkChain shard chain. Its
@@ -43,6 +50,11 @@ const (
 type QuarkChainConfig struct {
 	ShardID  uint32   `json:"shardId"`  // ID of this shard
 	ShardIDs []uint32 `json:"shardIds"` // IDs of all shards in the network, this one included
+
+	// MaxBlocksPerRootBlock caps the number of blocks of this shard a root
+	// block can confirm, as max_blocks_per_shard_in_one_root_block in
+	// pyquarkchain. Zero means no cap.
+	MaxBlocksPerRootBlock uint64 `json:"maxBlocksPerRootBlock,omitempty"`
 
 	PoSW *PoSWConfig `json:"posw,omitempty"` // PoSW configuration for this shard
 }

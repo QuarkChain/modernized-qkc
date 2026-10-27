@@ -37,7 +37,7 @@ type RootBlockHeader struct {
 	Version         uint32         `json:"version"          gencodec:"required"`
 	Number          uint32         `json:"number"           gencodec:"required"`
 	ParentHash      common.Hash    `json:"parentHash"       gencodec:"required"`
-	MinorHeaderHash common.Hash    `json:"minorHeaderHash"  gencodec:"required"`
+	ShardHeaderHash common.Hash    `json:"shardHeaderHash"  gencodec:"required"`
 	Coinbase        common.Address `json:"miner"            gencodec:"required"`
 	CoinbaseAmount  uint256.Int    `json:"coinbaseAmount"   gencodec:"required"`
 	Time            uint64         `json:"timestamp"        gencodec:"required"`
@@ -80,7 +80,7 @@ func (h *RootBlockHeader) SealHash() common.Hash {
 //	Version         uint32      0
 //	Number          uint32      4
 //	ParentHash      Bytes32     8
-//	MinorHeaderHash Bytes32     40
+//	ShardHeaderHash Bytes32     40
 //	Coinbase        Bytes20     72
 //	CoinbaseAmount  uint256     92
 //	Time            uint64      124
@@ -99,7 +99,7 @@ func (h *RootBlockHeader) appendSSZ(enc []byte, withSeal bool) []byte {
 	enc = ssz.MarshalUint32(enc, h.Version)
 	enc = ssz.MarshalUint32(enc, h.Number)
 	enc = append(enc, h.ParentHash[:]...)
-	enc = append(enc, h.MinorHeaderHash[:]...)
+	enc = append(enc, h.ShardHeaderHash[:]...)
 	enc = append(enc, h.Coinbase[:]...)
 	enc, _ = h.CoinbaseAmount.MarshalSSZAppend(enc)
 	enc = ssz.MarshalUint64(enc, h.Time)
@@ -144,7 +144,7 @@ func (h *RootBlockHeader) UnmarshalSSZ(buf []byte) error {
 	decoded.Version = ssz.UnmarshallUint32(buf[0:4])
 	decoded.Number = ssz.UnmarshallUint32(buf[4:8])
 	copy(decoded.ParentHash[:], buf[8:40])
-	copy(decoded.MinorHeaderHash[:], buf[40:72])
+	copy(decoded.ShardHeaderHash[:], buf[40:72])
 	copy(decoded.Coinbase[:], buf[72:92])
 	if err := decoded.CoinbaseAmount.UnmarshalSSZ(buf[92:124]); err != nil {
 		return err
@@ -226,7 +226,7 @@ func (h *RootBlockHeader) CreateBlockToAppend(createTime *uint64, difficulty *ui
 	header.TotalDifficulty.Add(&h.TotalDifficulty, difficulty)
 	return &RootBlock{
 		header:            header,
-		minorBlockHeaders: MinorBlockHeaders{},
+		shardBlockHeaders: ShardBlockHeaders{},
 		trackingData:      []byte{},
 	}
 }
@@ -240,16 +240,16 @@ func CopyRootBlockHeader(h *RootBlockHeader) *RootBlockHeader {
 	return &cpy
 }
 
-// MinorBlockHeaders is a list of shard block headers confirmed by a root block.
-type MinorBlockHeaders []*ctypes.Header
+// ShardBlockHeaders is a list of shard block headers confirmed by a root block.
+type ShardBlockHeaders []*ctypes.Header
 
-// CalcMinorHeaderHash returns the merkle root of the given shard block headers.
+// CalcShardHeaderHash returns the merkle root of the given shard block headers.
 // The leaves are the keccak256 hashes of the headers' RLP encodings (i.e. their
 // block hashes); a list of odd length is padded with a zero hash that doubles at
 // every level, and the final root is hashed together with the list length
 // appended as an 8-byte big-endian integer, matching pyquarkchain's
 // calculate_merkle_root. It panics if the list contains a nil header.
-func CalcMinorHeaderHash(headers MinorBlockHeaders) common.Hash {
+func CalcShardHeaderHash(headers ShardBlockHeaders) common.Hash {
 	leaves := make([]common.Hash, len(headers))
 	for i, header := range headers {
 		if header == nil {
@@ -296,15 +296,15 @@ func sszMerkleRoot(leaves []common.Hash) common.Hash {
 // later changes to the arguments never affect the block. The block header and
 // the shard block headers must be non-nil; a nil header is a programming error
 // and fails fast.
-// MinorBlockHeaders and TrackingData expose aliases to internal storage; callers
+// ShardBlockHeaders and TrackingData expose aliases to internal storage; callers
 // must treat the returned data and pointed-to headers as read-only. Mutators
 // may only be called while the block is exclusively owned. Once published to
 // other goroutines, the block must be treated as immutable. A block returned by
-// WithBody has not had MinorHeaderHash recomputed; call Finalize before treating
+// WithBody has not had ShardHeaderHash recomputed; call Finalize before treating
 // it as a complete block.
 type RootBlock struct {
 	header            *RootBlockHeader
-	minorBlockHeaders MinorBlockHeaders
+	shardBlockHeaders ShardBlockHeaders
 	trackingData      []byte
 
 	// caches
@@ -333,14 +333,14 @@ func rootBlockSSZOffsets(buf []byte) (headerOffset, headersOffset, trackingOffse
 // and tracking data are copied, so later changes to them do not affect the
 // block.
 //
-// The MinorHeaderHash in header is ignored and set to the value derived from
+// The ShardHeaderHash in header is ignored and set to the value derived from
 // the given shard block headers.
-func NewRootBlock(header *RootBlockHeader, minorBlockHeaders MinorBlockHeaders, trackingData []byte) *RootBlock {
+func NewRootBlock(header *RootBlockHeader, shardBlockHeaders ShardBlockHeaders, trackingData []byte) *RootBlock {
 	b := NewRootBlockWithHeader(header)
-	b.header.MinorHeaderHash = CalcMinorHeaderHash(minorBlockHeaders)
-	b.minorBlockHeaders = make(MinorBlockHeaders, len(minorBlockHeaders))
-	for i := range minorBlockHeaders {
-		b.minorBlockHeaders[i] = ctypes.CopyHeader(minorBlockHeaders[i])
+	b.header.ShardHeaderHash = CalcShardHeaderHash(shardBlockHeaders)
+	b.shardBlockHeaders = make(ShardBlockHeaders, len(shardBlockHeaders))
+	for i := range shardBlockHeaders {
+		b.shardBlockHeaders[i] = ctypes.CopyHeader(shardBlockHeaders[i])
 	}
 	b.trackingData = common.CopyBytes(trackingData)
 	return b
@@ -358,12 +358,12 @@ func NewRootBlockWithHeader(header *RootBlockHeader) *RootBlock {
 // over.
 //
 //	Header            RootBlockHeader
-//	MinorBlockHeaders List[List[byte]]
+//	ShardBlockHeaders List[List[byte]]
 //	TrackingData      List[byte]
 func (b *RootBlock) MarshalSSZ() ([]byte, error) {
-	headers := make([][]byte, len(b.minorBlockHeaders))
+	headers := make([][]byte, len(b.shardBlockHeaders))
 	headersSize := 0
-	for i, header := range b.minorBlockHeaders {
+	for i, header := range b.shardBlockHeaders {
 		if header == nil {
 			return nil, fmt.Errorf("nil shard block header at index %d", i)
 		}
@@ -422,7 +422,7 @@ func (b *RootBlock) UnmarshalSSZ(buf []byte) error {
 	if n == 0 && len(headersBuf) != 0 {
 		return ssz.ErrOffset
 	}
-	headers := make(MinorBlockHeaders, n)
+	headers := make(ShardBlockHeaders, n)
 	err = ssz.UnmarshalDynamic(headersBuf, n, func(i int, enc []byte) error {
 		headers[i] = new(ctypes.Header)
 		return rlp.DecodeBytes(enc, headers[i])
@@ -430,7 +430,7 @@ func (b *RootBlock) UnmarshalSSZ(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	b.header, b.minorBlockHeaders, b.trackingData = header, headers, common.CopyBytes(buf[trackingOffset:])
+	b.header, b.shardBlockHeaders, b.trackingData = header, headers, common.CopyBytes(buf[trackingOffset:])
 	b.hash.Store(nil)
 	// Accepted input is canonical, so its length is the canonical SSZ size.
 	b.size.Store(uint64(len(buf)))
@@ -451,16 +451,16 @@ func DecodeRootBlockHeaderFromBlockSSZ(buf []byte) (*RootBlockHeader, error) {
 	return header, nil
 }
 
-// MinorBlockHeaders returns the shard block headers confirmed by the block.
+// ShardBlockHeaders returns the shard block headers confirmed by the block.
 // The returned slice and its header pointers alias internal data and must be
 // treated as read-only; modifying them can invalidate block invariants.
-func (b *RootBlock) MinorBlockHeaders() MinorBlockHeaders { return b.minorBlockHeaders }
+func (b *RootBlock) ShardBlockHeaders() ShardBlockHeaders { return b.shardBlockHeaders }
 
-// MinorBlockHeader returns the shard block header with the given hash, or nil
+// ShardBlockHeader returns the shard block header with the given hash, or nil
 // if the block does not confirm it. The returned header aliases internal data
 // and must be treated as read-only.
-func (b *RootBlock) MinorBlockHeader(hash common.Hash) *ctypes.Header {
-	for _, header := range b.minorBlockHeaders {
+func (b *RootBlock) ShardBlockHeader(hash common.Hash) *ctypes.Header {
+	for _, header := range b.shardBlockHeaders {
 		if header.Hash() == hash {
 			return header
 		}
@@ -476,7 +476,7 @@ func (b *RootBlock) Version() uint32               { return b.header.Version }
 func (b *RootBlock) Number() uint32                { return b.header.Number }
 func (b *RootBlock) NumberU64() uint64             { return uint64(b.header.Number) }
 func (b *RootBlock) ParentHash() common.Hash       { return b.header.ParentHash }
-func (b *RootBlock) MinorHeaderHash() common.Hash  { return b.header.MinorHeaderHash }
+func (b *RootBlock) ShardHeaderHash() common.Hash  { return b.header.ShardHeaderHash }
 func (b *RootBlock) Coinbase() common.Address      { return b.header.Coinbase }
 func (b *RootBlock) CoinbaseAmount() *uint256.Int  { return b.header.CoinbaseAmount.Clone() }
 func (b *RootBlock) Time() uint64                  { return b.header.Time }
@@ -533,30 +533,30 @@ func (b *RootBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signat
 func (b *RootBlock) WithSeal(header *RootBlockHeader) *RootBlock {
 	block := &RootBlock{
 		header:            CopyRootBlockHeader(header),
-		minorBlockHeaders: make(MinorBlockHeaders, len(b.minorBlockHeaders)),
+		shardBlockHeaders: make(ShardBlockHeaders, len(b.shardBlockHeaders)),
 		trackingData:      common.CopyBytes(b.trackingData),
 	}
-	for i := range b.minorBlockHeaders {
-		block.minorBlockHeaders[i] = ctypes.CopyHeader(b.minorBlockHeaders[i])
+	for i := range b.shardBlockHeaders {
+		block.shardBlockHeaders[i] = ctypes.CopyHeader(b.shardBlockHeaders[i])
 	}
 	return block
 }
 
 // WithBody returns a new block with the original header and a deep copy of the
 // given shard block headers and tracking data.
-func (b *RootBlock) WithBody(minorBlockHeaders MinorBlockHeaders, trackingData []byte) *RootBlock {
+func (b *RootBlock) WithBody(shardBlockHeaders ShardBlockHeaders, trackingData []byte) *RootBlock {
 	block := &RootBlock{
 		header:            CopyRootBlockHeader(b.header),
-		minorBlockHeaders: make(MinorBlockHeaders, len(minorBlockHeaders)),
+		shardBlockHeaders: make(ShardBlockHeaders, len(shardBlockHeaders)),
 		trackingData:      common.CopyBytes(trackingData),
 	}
-	for i := range minorBlockHeaders {
-		block.minorBlockHeaders[i] = ctypes.CopyHeader(minorBlockHeaders[i])
+	for i := range shardBlockHeaders {
+		block.shardBlockHeaders[i] = ctypes.CopyHeader(shardBlockHeaders[i])
 	}
 	return block
 }
 
-// Finalize sets the minor header hash, the coinbase address and the coinbase
+// Finalize sets the shard header hash, the coinbase address and the coinbase
 // amount of the block in place, and refreshes the cached hash; the cached size
 // is invalidated as well. Nil arguments take default values: zero amount and the
 // zero address.
@@ -567,7 +567,7 @@ func (b *RootBlock) Finalize(coinbaseAmount *uint256.Int, coinbaseAddress *commo
 	if coinbaseAddress == nil {
 		coinbaseAddress = new(common.Address)
 	}
-	b.header.MinorHeaderHash = CalcMinorHeaderHash(b.minorBlockHeaders)
+	b.header.ShardHeaderHash = CalcShardHeaderHash(b.shardBlockHeaders)
 	b.header.CoinbaseAmount = *coinbaseAmount
 	b.header.Coinbase = *coinbaseAddress
 	h := b.header.Hash()
@@ -576,20 +576,20 @@ func (b *RootBlock) Finalize(coinbaseAmount *uint256.Int, coinbaseAddress *commo
 	return b
 }
 
-// AddMinorBlockHeader appends a shard block header to the block in place. The
-// header is copied, and the minor header hash is updated by Finalize.
-func (b *RootBlock) AddMinorBlockHeader(header *ctypes.Header) {
-	b.minorBlockHeaders = append(b.minorBlockHeaders, ctypes.CopyHeader(header))
+// AddShardBlockHeader appends a shard block header to the block in place. The
+// header is copied, and the shard header hash is updated by Finalize.
+func (b *RootBlock) AddShardBlockHeader(header *ctypes.Header) {
+	b.shardBlockHeaders = append(b.shardBlockHeaders, ctypes.CopyHeader(header))
 	b.size.Store(0)
 }
 
-// ExtendMinorBlockHeaderList appends the shard block headers created no later
+// ExtendShardBlockHeaderList appends the shard block headers created no later
 // than createTime to the block in place. The matching headers are copied, and
-// the minor header hash is updated by Finalize.
-func (b *RootBlock) ExtendMinorBlockHeaderList(headers []*ctypes.Header, createTime uint64) {
+// the shard header hash is updated by Finalize.
+func (b *RootBlock) ExtendShardBlockHeaderList(headers []*ctypes.Header, createTime uint64) {
 	for _, header := range headers {
 		if header.Time <= createTime {
-			b.minorBlockHeaders = append(b.minorBlockHeaders, ctypes.CopyHeader(header))
+			b.shardBlockHeaders = append(b.shardBlockHeaders, ctypes.CopyHeader(header))
 		}
 	}
 	b.size.Store(0)
