@@ -91,7 +91,7 @@ type XShardCursor struct {
 type QKCExtra struct {
 	Version        uint32
 	ShardID        uint32
-	PrevRootBlock  common.Hash // hash of the latest root block seen by the shard block
+	PrevRootBlock  common.Hash // latest root block seen; EmptyHash for shard genesis
 	Cursor         XShardCursor
 	XShardGasUsed  uint64      // gas used by the cross-shard messages applied in the block
 	XShardGasLimit uint64      // gas budget for the cross-shard messages applied in the block
