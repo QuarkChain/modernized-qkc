@@ -58,19 +58,21 @@ type PoSWConfig struct {
 	AdjustmentCutoff uint64 `json:"adjustmentCutoff"`
 	// AdjustmentFactor divides the parent difficulty to obtain one adjustment step.
 	AdjustmentFactor uint64 `json:"adjustmentFactor"`
-	// MinimumDifficulty is the floor for base PoW difficulty, before staking discounts.
+	// MinimumDifficulty is the positive uint256 floor for base PoW difficulty,
+	// before staking discounts.
 	MinimumDifficulty *big.Int `json:"minimumDifficulty"`
 
 	// CoinbaseAmount is the original block subsidy, before epoch decay and reward
 	// tax. Zero disables the subsidy; transaction fees are accounted for separately.
 	CoinbaseAmount *big.Int `json:"coinbaseAmount"`
 	// RewardTaxRate is the fraction of the shard subsidy assigned to root miners.
-	// BlockRewardAt returns the remaining shard share.
+	// BlockRewardAt returns the remaining shard share. Check requires a finite
+	// decimal in [0, 1] with a reduced denominator no greater than 100.
 	RewardTaxRate *big.Rat `json:"rewardTaxRate"`
 	// EpochInterval is the number of blocks per reward and staking decay epoch.
 	EpochInterval uint64 `json:"epochInterval"`
 	// DecayFactor is the fraction retained each epoch, e.g. 0.88 retains 88%.
-	// Check requires a value in [0, 1] with a reduced denominator no greater than 100.
+	// Check requires a finite decimal in [0, 1] with a reduced denominator no greater than 100.
 	DecayFactor *big.Rat `json:"decayFactor"`
 	// OriginalBlockNumber is the old chain's stop height represented by genesis.
 	// It continues reward and staking epochs while new block numbers start at zero.
@@ -98,6 +100,9 @@ func (c *PoSWConfig) Check() error {
 	if c == nil || c.AdjustmentCutoff == 0 || c.AdjustmentFactor == 0 || c.MinimumDifficulty == nil || c.MinimumDifficulty.Sign() <= 0 {
 		return errors.New("posw: positive cutoff, factor and minimum difficulty are required")
 	}
+	if c.MinimumDifficulty.BitLen() > 256 {
+		return errors.New("posw: minimum difficulty must fit uint256")
+	}
 	if c.CoinbaseAmount == nil || c.CoinbaseAmount.Sign() < 0 || c.CoinbaseAmount.BitLen() > 256 || c.EpochInterval == 0 {
 		return errors.New("posw: a uint256 block subsidy and positive epoch interval are required")
 	}
@@ -108,8 +113,18 @@ func (c *PoSWConfig) Check() error {
 	if c.DecayFactor.Denom().Cmp(big.NewInt(100)) > 0 {
 		return errors.New("posw: reward decay factor denominator must not exceed 100")
 	}
+	if _, exact := c.DecayFactor.FloatPrec(); !exact {
+		return errors.New("posw: decay factor must have a finite decimal representation")
+	}
 	if c.RewardTaxRate == nil || c.RewardTaxRate.Sign() < 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) > 0 {
 		return errors.New("posw: reward tax rate must be between zero and one")
+	}
+	// Match pyquarkchain's reward_tax_rate denominator limit.
+	if c.RewardTaxRate.Denom().Cmp(big.NewInt(100)) > 0 {
+		return errors.New("posw: reward tax rate denominator must not exceed 100")
+	}
+	if _, exact := c.RewardTaxRate.FloatPrec(); !exact {
+		return errors.New("posw: reward tax rate must have a finite decimal representation")
 	}
 	if c.StakePerBlock != nil && (c.StakePerBlock.Sign() < 0 || c.StakePerBlock.BitLen() > 256) {
 		return errors.New("posw: stakePerBlock must fit uint256")

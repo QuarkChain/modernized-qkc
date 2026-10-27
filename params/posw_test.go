@@ -238,6 +238,7 @@ func TestPoSWConfigRatiosJSON(t *testing.T) {
 		}{
 			{`0.88`, true}, {`"0.88"`, true}, {`"22/25"`, false},
 			{`8.8e-1`, true}, {`"8.8e-1"`, true}, {`"bad"`, false},
+			{`0.001`, false}, {`"0.001"`, false},
 			// Values above one must not round down through float64.
 			{`1.000000000000000000000000000000000001`, false},
 			{`"1.000000000000000000000000000000000001"`, false},
@@ -315,11 +316,8 @@ func TestPoSWConfigTaxPrecision(t *testing.T) {
 		if err := json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), config); err != nil {
 			t.Fatal(err)
 		}
-		if err := config.Check(); err != nil {
-			t.Fatal(err)
-		}
-		if got := config.BlockRewardAt(big.NewInt(1)); got.Int64() != 49 {
-			t.Fatalf("reward %s, want 49 for a tax just above one half", got)
+		if err := config.Check(); err == nil {
+			t.Fatal("high-precision tax must fail the denominator limit instead of rounding to one half")
 		}
 		encoded, err := json.Marshal(config)
 		if err != nil {
@@ -345,6 +343,7 @@ func TestPoSWConfigValidation(t *testing.T) {
 		{"missing minimum", func(c *PoSWConfig) { c.MinimumDifficulty = nil }},
 		{"zero minimum", func(c *PoSWConfig) { c.MinimumDifficulty = new(big.Int) }},
 		{"negative minimum", func(c *PoSWConfig) { c.MinimumDifficulty.SetInt64(-1) }},
+		{"minimum overflow", func(c *PoSWConfig) { c.MinimumDifficulty.Lsh(big.NewInt(1), 256) }},
 		{"missing subsidy", func(c *PoSWConfig) { c.CoinbaseAmount = nil }},
 		{"negative subsidy", func(c *PoSWConfig) { c.CoinbaseAmount.SetInt64(-1) }},
 		{"subsidy overflow", func(c *PoSWConfig) { c.CoinbaseAmount.Lsh(big.NewInt(1), 256) }},
@@ -353,9 +352,12 @@ func TestPoSWConfigValidation(t *testing.T) {
 		{"negative decay", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(-1, 2) }},
 		{"decay above one", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(3, 2) }},
 		{"decay denominator", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(1, 1000) }},
+		{"repeating decay", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(1, 3) }},
 		{"missing tax", func(c *PoSWConfig) { c.RewardTaxRate = nil }},
 		{"negative tax", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(-1, 2) }},
 		{"tax above one", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(3, 2) }},
+		{"tax denominator", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(1, 1000) }},
+		{"repeating tax", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(1, 3) }},
 		{"zero window", func(c *PoSWConfig) { c.WindowSize = 0 }},
 		{"zero divider", func(c *PoSWConfig) { c.DiffDivider = 0 }},
 		{"missing stake", func(c *PoSWConfig) { c.StakePerBlock = nil }},
@@ -381,14 +383,34 @@ func TestPoSWConfigValidation(t *testing.T) {
 			t.Fatal("missing consensus parameters accepted")
 		}
 	}
-	for _, factor := range []*big.Rat{big.NewRat(0, 1), big.NewRat(1, 2), big.NewRat(22, 25), big.NewRat(99, 100), big.NewRat(1, 1)} {
+	for _, factor := range []*big.Rat{big.NewRat(0, 1), big.NewRat(1, 8), big.NewRat(1, 2), big.NewRat(22, 25), big.NewRat(99, 100), big.NewRat(1, 1)} {
 		config := validPoSWConfig()
 		config.DecayFactor = factor
+		config.RewardTaxRate = new(big.Rat).Set(factor)
+		config.MinimumDifficulty.Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 		config.CoinbaseAmount.SetUint64(0)
 		config.StakingEnabled = false
 		config.StakePerBlock, config.WindowSize, config.DiffDivider = nil, 0, 0
 		if err := config.Check(); err != nil {
 			t.Fatalf("zero subsidy, staking disabled, decay %s: %v", factor, err)
+		}
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var roundtrip PoSWConfig
+		if err := json.Unmarshal(encoded, &roundtrip); err != nil {
+			t.Fatal(err)
+		}
+		if err := roundtrip.Check(); err != nil {
+			t.Fatal(err)
+		}
+		reencoded, err := json.Marshal(&roundtrip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != string(reencoded) {
+			t.Fatalf("validated config changed during JSON round trip: %s, have %s", encoded, reencoded)
 		}
 	}
 }
