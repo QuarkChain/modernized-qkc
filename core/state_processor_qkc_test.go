@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"math/big"
 	"testing"
 
@@ -89,6 +90,7 @@ func TestDepositAfterTransaction(t *testing.T) {
 		Config: &config,
 		Alloc:  withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),
 	}
+	maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 	signer := types.LatestSigner(gspec.Config)
 	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *BlockGen) {
 		b.AddTx(types.MustSignNewTx(key, signer, &types.DynamicFeeTx{

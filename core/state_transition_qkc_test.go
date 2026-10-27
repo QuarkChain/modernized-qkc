@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"math/big"
 	"testing"
 
@@ -82,6 +83,7 @@ func testDepositExecution(t *testing.T, amsterdam bool) {
 			reverter: {Code: program.New().Push(0).Push(0).Op(vm.REVERT).Bytes()},
 		}),
 	}
+	maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 	deposits := []*types.DepositTx{
 		// A move to an EOA.
 		xShardTestMove(0, common.HexToAddress("0xa1"), eoa, 1000, 7*params.GWei),
