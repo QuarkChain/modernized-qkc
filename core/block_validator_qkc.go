@@ -17,6 +17,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -57,6 +58,39 @@ type XShardDeposits interface {
 	// Cursor returns the cross-shard cursor on the deposit Next last returned,
 	// or at the end once Next returned nil.
 	Cursor() types.XShardCursor
+}
+
+// ProcessXShardDeposits walks the mandatory deposit prefix within gasLimit.
+// Admission uses declared gas; apply executes or validates each admitted deposit
+// and returns its actual gas usage. The returned cursor advances to EOF only when
+// the inbox ends, otherwise it remains on the last admitted deposit.
+func ProcessXShardDeposits(ctx context.Context, deposits XShardDeposits, gasLimit uint64, apply func(*types.DepositTx) (uint64, error)) (gasUsed uint64, cursor types.XShardCursor, err error) {
+	cursor = deposits.Cursor()
+	for {
+		if err := ctx.Err(); err != nil {
+			return gasUsed, cursor, err
+		}
+		// Probe even at exact exhaustion to distinguish EOF from pending deposits.
+		deposit, err := deposits.Next()
+		if err != nil {
+			return gasUsed, cursor, err
+		}
+		if deposit == nil {
+			return gasUsed, deposits.Cursor(), nil
+		}
+		if deposit.Gas > gasLimit-gasUsed {
+			return gasUsed, cursor, nil
+		}
+		used, err := apply(deposit)
+		if err != nil {
+			return gasUsed, cursor, err
+		}
+		if used > gasLimit-gasUsed {
+			return gasUsed, cursor, fmt.Errorf("%w: deposit used %d with %d left", ErrXShardGas, used, gasLimit-gasUsed)
+		}
+		gasUsed += used
+		cursor = deposits.Cursor()
+	}
 }
 
 // SetXShardInbox sets the inbox the blocks of a QuarkChain shard are checked
@@ -108,36 +142,31 @@ func (v *BlockValidator) validateXShardDeposits(block *types.Block, receipts typ
 		return err
 	}
 	var (
-		txs     = block.Transactions()
-		gasUsed uint64
+		txs = block.Transactions()
+		i   int
 	)
-	for i := 0; i < len(txs) && txs[i].Type() == types.DepositTxType; i++ {
-		deposit, err := deposits.Next()
-		if err != nil {
-			return err
-		}
-		if deposit == nil {
-			return fmt.Errorf("%w: unexpected deposit tx %d", ErrXShardDepositMismatch, i)
+	if extra.XShardGasUsed > extra.XShardGasLimit {
+		return fmt.Errorf("%w: used %d, limit %d", ErrXShardGas, extra.XShardGasUsed, extra.XShardGasLimit)
+	}
+	gasUsed, cursor, err := ProcessXShardDeposits(context.Background(), deposits, extra.XShardGasLimit, func(deposit *types.DepositTx) (uint64, error) {
+		if i == len(txs) || txs[i].Type() != types.DepositTxType {
+			return 0, fmt.Errorf("%w: missing mandatory deposit of block %x log %d", ErrXShardGas, deposit.SourceBlockHash, deposit.SourceLogIndex)
 		}
 		if txs[i].Hash() != types.NewTx(deposit).Hash() {
-			return fmt.Errorf("%w: tx %d is not the deposit of block %x log %d", ErrXShardDepositMismatch, i, deposit.SourceBlockHash, deposit.SourceLogIndex)
+			return 0, fmt.Errorf("%w: tx %d is not the deposit of block %x log %d", ErrXShardDepositMismatch, i, deposit.SourceBlockHash, deposit.SourceLogIndex)
 		}
-		gasUsed += receipts[i].GasUsed
-	}
-	if gasUsed != extra.XShardGasUsed || gasUsed > extra.XShardGasLimit {
-		return fmt.Errorf("%w: used %d, want %d, limit %d", ErrXShardGas, extra.XShardGasUsed, gasUsed, extra.XShardGasLimit)
-	}
-	cursor := deposits.Cursor()
-	next, err := deposits.Next()
+		used := receipts[i].GasUsed
+		i++
+		return used, nil
+	})
 	if err != nil {
 		return err
 	}
-	if next == nil {
-		cursor = deposits.Cursor()
-	} else if next.Gas <= extra.XShardGasLimit-gasUsed {
-		// Require inclusion while the next deposit fits so block producers cannot
-		// arbitrarily defer pending cross-shard deposits.
-		return fmt.Errorf("%w: the deposit of block %x log %d fits in the %d gas left", ErrXShardGas, next.SourceBlockHash, next.SourceLogIndex, extra.XShardGasLimit-gasUsed)
+	if i < len(txs) && txs[i].Type() == types.DepositTxType {
+		return fmt.Errorf("%w: unexpected deposit tx %d", ErrXShardDepositMismatch, i)
+	}
+	if gasUsed != extra.XShardGasUsed {
+		return fmt.Errorf("%w: used %d, want %d, limit %d", ErrXShardGas, extra.XShardGasUsed, gasUsed, extra.XShardGasLimit)
 	}
 	if cursor != extra.Cursor {
 		return fmt.Errorf("%w: have %+v, want %+v", ErrXShardCursorMismatch, extra.Cursor, cursor)

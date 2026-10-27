@@ -93,6 +93,56 @@ func testCursor(walked int, ended bool) types.XShardCursor {
 	return types.XShardCursor{RootBlockHeight: 5, MinorBlockIndex: 1, XShardDepositIndex: uint64(walked)}
 }
 
+// Move execution currently requires fixed gas. Synthetic receipts exercise the
+// inbox rules independently when declared and used gas differ.
+func TestValidateXShardDepositsGasAccounting(t *testing.T) {
+	config := *params.MergedTestChainConfig
+	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1, ShardIDs: []uint32{0, 1}}
+	alloc := SystemContractAllocs()
+	maps.Copy(alloc, PoSWStakingContractAllocs(1))
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), &Genesis{Config: &config, Alloc: alloc}, qkcTestEngine{beacon.New(ethash.NewFaker())}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	for _, tt := range []struct {
+		name     string
+		declared []uint64
+		included int
+		eof      bool
+		want     error
+	}{
+		{"account used gas", []uint64{40000, 40000, 30000}, 3, true, nil},
+		{"stop on declared gas", []uint64{9000, 41001}, 1, false, nil},
+		{"included declared gas exceeds budget", []uint64{9000, 41001}, 2, true, ErrXShardDepositMismatch},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			inbox := &testXShardInbox{}
+			for i, gas := range tt.declared {
+				inbox.deposits = append(inbox.deposits, &types.DepositTx{
+					Gas: gas, SourceLogIndex: uint64(i), Value: new(uint256.Int), GasPrice: new(uint256.Int), IsMove: true,
+				})
+			}
+			chain.SetXShardInbox(inbox)
+			var txs []*types.Transaction
+			var receipts types.Receipts
+			for _, deposit := range inbox.deposits[:tt.included] {
+				txs = append(txs, types.NewTx(deposit))
+				receipts = append(receipts, &types.Receipt{GasUsed: 9000})
+			}
+			extra := &types.QKCExtra{
+				Cursor: testCursor(tt.included, tt.eof), XShardGasLimit: 50000, XShardGasUsed: uint64(tt.included) * 9000,
+			}
+			block := types.NewBlockWithHeader(&types.Header{
+				ParentHash: chain.Genesis().Hash(), Number: big.NewInt(1), GasLimit: 100000, Extra: extra.Encode(),
+			}).WithBody(types.Body{Transactions: txs})
+			if err := NewBlockValidator(&config, chain).validateXShardDeposits(block, receipts); !errors.Is(err, tt.want) {
+				t.Fatalf("validation error %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
 // TestValidateXShardDeposits imports blocks of a shard, with a gas limit of
 // 100000 leaving 50000 gas to deposits, that is five of them, each block
 // following or breaking a rule of the cross-shard deposits.
