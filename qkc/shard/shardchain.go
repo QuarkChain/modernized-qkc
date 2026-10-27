@@ -127,22 +127,22 @@ func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
 	return &ShardChain{db: db, chain: chain}
 }
 
-// Init bootstraps the shard from the genesis root block sent by the master.
-// R0 carries the genesis headers of the shards; this shard checks exactly one
-// local header, G0, against its existing blockchain genesis. G0.PrevRootBlock
-// must be empty, avoiding a circular dependency between the hashes of R0 and G0.
-// The root and R0 -> G0 confirmation are stored in one batch, then the canonical
-// head and root tip are set. No stored root is required on this bootstrap path.
+// Init sets the shard head and root tip from a root checkpoint.
 //
-// A non-genesis target retains the recovery path: its root header and
-// confirmation must already be available locally. Recovery resets the head
-// to the stored confirmation. Master connection handling, missing-data
-// synchronization, genesis creation, and starting mining after success belong
-// to the shard service layer and are not implemented here.
+// For root genesis, R0 is sent by the master and carries the shards' genesis
+// headers. Check that it contains exactly one header for this shard, matching
+// the existing shard genesis G0. G0.PrevRootBlock must be empty to avoid a
+// circular hash dependency between G0 and R0. Store R0 and its confirmation
+// of G0 in one batch; no stored root is required.
 //
-// Until initialization succeeds, errors keep the shard uninitialized and retryable.
-// A successful root batch may remain stored if the later head switch fails; rootTip is
-// published only after that switch succeeds. Init never permanently stops the blockchain.
+// For a non-genesis root, its header and shard confirmation must already be
+// stored locally. Restore the shard head to the stored confirmation.
+//
+// Set the canonical shard head before publishing rootTip. Until initialization
+// succeeds, errors leave rootTip nil and allow retry. Init does not stop the blockchain.
+//
+// The shard service handles master connections, missing-data synchronization
+// and genesis creation. It can start mining after Init succeeds.
 func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -310,11 +310,8 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 // A fork after R1 passes this rule, as it still extends R1. Whether the block
 // then becomes the head is up to the fork choice, see shouldUpdateHead.
 //
-// Rule 2: the block must extend the latest shard block confirmed by the root
-// chain up to its previous root block ("prev root block's minor block is not in
-// the same chain as the minor block"). Once a root block confirms a shard
-// block, the shard blocks that have seen that root block cannot fork away from
-// it.
+// Rule 2: let C be the latest shard block confirmed up to the referenced root.
+// The candidate must extend C, so its parent must be C or a descendant of C.
 //
 //	root chain    R0 <-- R1
 //	                     :  confirms up to C
@@ -359,12 +356,8 @@ func (c *ShardChain) validateRootReference(header, parent *types.Header) (*qkcty
 	return prevRoot, nil
 }
 
-// shouldUpdateHead reports whether a new shard block, referencing
-// the root block prevRoot, should become the canonical head. It mirrors the tip
-// update of ShardState.add_block in pyquarkchain: "Update tip if a block is
-// appended or a fork is longer (with the same ancestor confirmed by root block
-// tip) or they are equal length but the root height confirmed by the block is
-// longer". The rules apply in order:
+// shouldUpdateHead reports whether a new shard block should become the head.
+// It follows ShardState.add_block in pyquarkchain. Apply the rules below in order.
 //
 //  1. The block must reference the root tip or one of its ancestors. A block
 //     referencing another root chain, like R1' below, is never selected.
@@ -424,9 +417,7 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 		return header.Number.Uint64() > current.Number.Uint64(), nil
 	}
 
-	// If both shard headers has the same block number,
-	// compare the view of the root block and switch to the minor
-	// block with longer root block for more cross shard tx fee.
+	// At equal shard height, prefer the block with the higher root reference.
 	currentRoot, err := c.prevRootBlock(current)
 	if err != nil {
 		return false, fmt.Errorf("%w: current head: %w", ErrShardStateInconsistency, err)
@@ -613,13 +604,11 @@ func (c *ShardChain) validateRootBlock(root *qkctypes.RootBlock) (*types.Header,
 	return confirmed, nil
 }
 
-// validateXShardDeposits checks that the cross-shard deposits sent to this shard
-// by a block of another shard, carried by a root block, are stored as required
-// by ShardState.add_root_block in pyquarkchain. Here all shards start at R0 and
-// send deposit lists to every other shard in the configured network, including
-// for ordinary blocks referencing R0. An empty list records that the block sent
-// this shard nothing. Blocks from shards outside the network must have no list
-// ("shouldn't have been broadcasted").
+// validateXShardDeposits checks a remote block's root reference and deposit list.
+// The referenced root must be stored locally.
+// Sources in this shard's network must have a deposit list, even if empty.
+// Sources outside the network must have no list.
+// These rules also apply to ordinary blocks referencing R0.
 func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QKCExtra, config *params.QuarkChainConfig) error {
 	// All shards start at R0, so an unknown root cannot be explained by this
 	// shard having been created after the referenced root, as in pyquarkchain.
