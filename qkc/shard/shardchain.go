@@ -73,9 +73,9 @@ var (
 	// block that is not in the local chain.
 	ErrUnknownConfirmedBlock = errors.New("unknown confirmed block")
 
-	// ErrRootNotAfterGenesis is returned when the root block's number is not
-	// greater than the number of the root block referenced by the shard genesis.
-	ErrRootNotAfterGenesis = errors.New("root block number must be greater than the root block referenced by the shard genesis")
+	// ErrRootNotAfterGenesis is returned when a normal root import has block
+	// number zero. Root genesis must be handled by Init.
+	ErrRootNotAfterGenesis = errors.New("root block number must be greater than zero")
 
 	// ErrRootBlockVersion is returned when a root block has an unsupported
 	// version.
@@ -248,7 +248,7 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Genesis is handled by Init.
+	// Shard genesis is already committed before Init; it is not imported here.
 	if block.NumberU64() == 0 {
 		return consensus.ErrInvalidNumber
 	}
@@ -292,12 +292,10 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 // mirrors the root checks of ShardState.validate_block in pyquarkchain, whose
 // error messages are quoted below. Two rules apply.
 //
-// Rule 1: the previous root block of the block must be the one of its parent,
-// or a descendant of it ("prev root block height must be non-decreasing",
-// "prev root blocks are not on the same chain"). The view a shard chain has of
-// the root chain only moves forward, along a single root chain. The
-// cross-shard cursor relies on it: a block applies the deposits confirmed by
-// the root blocks from the previous root block of its parent up to its own.
+// Rule 1: a shard block must reference the same root block as its parent,
+// or a descendant of that root block. The shard chain's view of the root chain
+// can only stay unchanged or move forward. Skip this comparison when the parent
+// is shard genesis, because genesis has an empty PrevRootBlock.
 //
 //	              +----- R1'
 //	              v
@@ -327,13 +325,13 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 //
 //	B and B' both reference R1.
 func (c *ShardChain) validateRootReference(header, parent *types.Header) (*qkctypes.RootBlockHeader, error) {
-	// Both root blocks must be known ("cannot find root block for the minor
-	// block"). The one of the parent was already checked on its import.
+	// The block's referenced root must be known ("cannot find root block for
+	// the minor block"). A non-genesis parent's reference was checked on import.
 	prevRoot, err := c.prevRootBlock(header)
 	if err != nil {
 		return nil, err
 	}
-	// Ignore if the parent is G0 (genesis). Only later parents need the ancestry check.
+	// G0 has no previous-root reference to compare.
 	if parent.Number.Sign() != 0 {
 		parentPrevRoot, err := c.prevRootBlock(parent)
 		if err != nil {
@@ -481,8 +479,8 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 		// TODO: Handle the edge case where the shard head switches successfully but
 		// the root batch fails. For now, log and return the error. Subsequent root
 		// imports, including re-importing the failed root, may restore consistency.
-		// If normal imports cannot resume, restart the node. Startup calls Init with
-		// the master's recovery root to restore the shard head and root tip.
+		// If normal imports cannot resume, restart the service and recover through
+		// Init using a valid root checkpoint already stored locally.
 		log.Error("Failed to store root block", "root", root.Hash(), "rootTip", rootTip.Hash(), "confirmed", confirmed.Hash(), "previousHead", previousHead, "head", c.chain.CurrentBlock().Hash(), "err", err)
 		return false, fmt.Errorf("store root block %x: %w", root.Hash(), err)
 	}
@@ -505,10 +503,8 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 // Ordinary input validation errors keep their specific error classification.
 //
 // Rule 1: the master must validate root consensus, including proof of work
-// and total difficulty. Locally, the referenced parent must be available, and
-// this block must be higher than the root block referenced by the shard genesis
-// ("cannot find previous root block in pool"). The shard knows no root block
-// below that one, so the genesis root is an ancestor of all later roots.
+// and total difficulty. Root genesis is handled by Init. Normal root imports
+// must have a non-zero block number and a parent already stored locally.
 //
 // Rule 2: the master must validate the commitment to the carried shard headers
 // and their complete ordering/continuity. Locally, blocks for this shard must
@@ -522,9 +518,10 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 //
 // Rule 3: locally, the first carried block of this shard must extend C', the
 // latest one confirmed by the parent, and C, the last carried block (or C' if
-// there are none), must reference an ancestor of the root block. Only the first
-// carried block is checked against C' here; intermediate ordering/continuity is
-// the master's responsibility ("Master should assure this check
+// there are none), must reference an ancestor of the root block. G0 is exempt
+// from the root-reference check because its previous-root hash is empty. Only
+// the first carried block is checked against C' here; the master validates
+// intermediate ordering and continuity ("Master should assure this check
 // will not fail").
 //
 //	root chain    R0 <-- R1 <------------ R
@@ -646,14 +643,14 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 // it. C must be a non-nil, validated checkpoint compatible with rootTip. The caller
 // publishes rootTip after all required writes succeed. It mirrors the tip reset
 // of ShardState.add_root_block in pyquarkchain. The head must keep the two
-// properties shouldUpdateHead relies on: it extends C, and it references the
-// root tip or one of its ancestors.
+// properties shouldUpdateHead relies on: it is C or extends C, and, unless it
+// is G0, it references the root tip or one of its ancestors.
 //
 // Init starts directly at its genesis or recovered checkpoint C. Once initialized, root
 // imports apply the two cases below; an empty root body still inherits C.
 //
-// Case 1: C is not on the canonical chain, as the root tip confirms another
-// fork. The head moves to C, which has both properties, see rule 3 of
+// Case 1: C is not on the canonical chain, for example on another fork.
+// The head moves to C, which has both properties, see rule 3 of
 // validateRootBlock. A descendant such as D can also be the shard tip if it
 // references the new root tip or one of its ancestors; D need not itself be
 // root-confirmed. As a simplification, switch to C instead of searching for
@@ -734,6 +731,7 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 }
 
 // prevRootBlock returns the header of the root block referenced by a shard block.
+// Callers must handle genesis separately because G0's previous-root hash is empty.
 func (c *ShardChain) prevRootBlock(header *types.Header) (*qkctypes.RootBlockHeader, error) {
 	extra, err := header.QKCExtra()
 	if err != nil {

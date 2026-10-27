@@ -962,7 +962,7 @@ func TestInsertRootBlockTotalDifficulty(t *testing.T) {
 //	r1 confirms a1. The diagram shows only local shard 0. Separately, the
 //	test passes remote headers to validateRootBlock to check cross-shard deposits.
 //	The target is shard 0, shard 1 is in its network config, and r0 is the root
-//	referenced by the shard genesis. Under these conditions:
+//	genesis containing the local shard genesis. Under these conditions:
 //	  1. b1[r0] has deposits, so validation accepts it.
 //	  2. b2[r0] has no deposits, so validation fails: deposits are required at r0.
 //	  3. b3[r1] has deposits, so validation accepts it; b4[r1] has none, so
@@ -1165,8 +1165,8 @@ func TestInsertRootBlockConfirmsFork(t *testing.T) {
 	env.checkHead(b[0])
 }
 
-// Missing stored confirmations are shard inconsistencies, not cluster check
-// failures. Fork choice must preserve the category and the specific cause.
+// Missing local blocks for recorded confirmations are shard inconsistencies,
+// not cluster check failures. Fork choice must preserve the category and cause.
 func TestInsertShardBlockForkChoiceError(t *testing.T) {
 	env := newTestEnv(t)
 	blocks := env.makeBlocks(env.genesis, 2, env.rootGenesis, 1)
