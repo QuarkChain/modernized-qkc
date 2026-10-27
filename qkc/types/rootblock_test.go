@@ -58,7 +58,7 @@ func newTestRootBlock() *RootBlock {
 		Extra:           []byte("extra"),
 		MixDigest:       common.HexToHash("0x03"),
 	}
-	headers := MinorBlockHeaders{newTestMinorHeader(0, 1), newTestMinorHeader(1, 1)}
+	headers := ShardBlockHeaders{newTestMinorHeader(0, 1), newTestMinorHeader(1, 1)}
 	return NewRootBlock(header, headers, []byte("tracking"))
 }
 
@@ -78,11 +78,11 @@ func TestRootBlockEncoding(t *testing.T) {
 	if !reflect.DeepEqual(dec.Header(), block.Header()) {
 		t.Errorf("header mismatch:\nhave %+v\nwant %+v", dec.Header(), block.Header())
 	}
-	if len(dec.MinorBlockHeaders()) != 2 {
-		t.Fatalf("minor block header count mismatch: have %d, want 2", len(dec.MinorBlockHeaders()))
+	if len(dec.ShardBlockHeaders()) != 2 {
+		t.Fatalf("minor block header count mismatch: have %d, want 2", len(dec.ShardBlockHeaders()))
 	}
-	for i, header := range dec.MinorBlockHeaders() {
-		if header.Hash() != block.MinorBlockHeaders()[i].Hash() {
+	for i, header := range dec.ShardBlockHeaders() {
+		if header.Hash() != block.ShardBlockHeaders()[i].Hash() {
 			t.Errorf("minor block header %d mismatch", i)
 		}
 	}
@@ -184,14 +184,14 @@ func TestSszMerkleRootZeroPadding(t *testing.T) {
 
 func TestRootBlockMinorHeaderHash(t *testing.T) {
 	block := newTestRootBlock()
-	if have, want := block.MinorHeaderHash(), CalcMinorHeaderHash(block.MinorBlockHeaders()); have != want {
+	if have, want := block.ShardHeaderHash(), CalcShardHeaderHash(block.ShardBlockHeaders()); have != want {
 		t.Errorf("minor header hash mismatch: have %x, want %x", have, want)
 	}
-	if block.MinorBlockHeader(block.MinorBlockHeaders()[1].Hash()) == nil {
+	if block.ShardBlockHeader(block.ShardBlockHeaders()[1].Hash()) == nil {
 		t.Error("minor block header not found")
 	}
 	empty := NewRootBlock(block.Header(), nil, nil)
-	if have := empty.MinorHeaderHash(); have != emptyMinorHeaderHash {
+	if have := empty.ShardHeaderHash(); have != emptyMinorHeaderHash {
 		t.Errorf("empty minor header hash mismatch: have %x, want %x", have, emptyMinorHeaderHash)
 	}
 }
@@ -225,7 +225,7 @@ func TestRootBlockSeal(t *testing.T) {
 
 func TestRootBlockHashSSZ(t *testing.T) {
 	header := newTestRootBlock().Header()
-	header.MinorHeaderHash = common.HexToHash("0x06")
+	header.ShardHeaderHash = common.HexToHash("0x06")
 	unsealed := "01000000" + // version
 		"0a000000" + // number
 		strings.Repeat("00", 31) + "01" + // parentHash
@@ -268,14 +268,14 @@ func TestRootBlockCreateBlockToAppend(t *testing.T) {
 		t.Errorf("total difficulty mismatch: have %v, want %v", block.TotalDifficulty(), want)
 	}
 
-	block.AddMinorBlockHeader(newTestMinorHeader(0, 2))
-	block.ExtendMinorBlockHeaderList([]*ctypes.Header{newTestMinorHeader(1, 2), newTestMinorHeader(1, 5000)}, block.Time())
+	block.AddShardBlockHeader(newTestMinorHeader(0, 2))
+	block.ExtendShardBlockHeaderList([]*ctypes.Header{newTestMinorHeader(1, 2), newTestMinorHeader(1, 5000)}, block.Time())
 	coinbase := common.HexToAddress("0x05")
 	block.Finalize(uint256.NewInt(42), &coinbase)
-	if len(block.MinorBlockHeaders()) != 2 {
-		t.Fatalf("minor block header count mismatch: have %d, want 2", len(block.MinorBlockHeaders()))
+	if len(block.ShardBlockHeaders()) != 2 {
+		t.Fatalf("minor block header count mismatch: have %d, want 2", len(block.ShardBlockHeaders()))
 	}
-	if have, want := block.MinorHeaderHash(), CalcMinorHeaderHash(block.MinorBlockHeaders()); have != want {
+	if have, want := block.ShardHeaderHash(), CalcShardHeaderHash(block.ShardBlockHeaders()); have != want {
 		t.Errorf("minor header hash mismatch: have %x, want %x", have, want)
 	}
 	if block.Coinbase() != coinbase || block.CoinbaseAmount().Uint64() != 42 {
@@ -330,7 +330,7 @@ func TestRootBlockDecodeKeepsStateOnError(t *testing.T) {
 	}
 	dec.Hash() // populate the hash cache
 	wantHash, wantSize := dec.Hash(), dec.Size()
-	wantHeaders, wantTracking := len(dec.MinorBlockHeaders()), string(dec.TrackingData())
+	wantHeaders, wantTracking := len(dec.ShardBlockHeaders()), string(dec.TrackingData())
 
 	bad := common.CopyBytes(mustMarshalSSZ(t, block))
 	bad[rootBlockFixedSize+196]++ // corrupt the header's extra data offset
@@ -338,9 +338,9 @@ func TestRootBlockDecodeKeepsStateOnError(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if dec.Hash() != wantHash || dec.Size() != wantSize ||
-		len(dec.MinorBlockHeaders()) != wantHeaders || string(dec.TrackingData()) != wantTracking {
+		len(dec.ShardBlockHeaders()) != wantHeaders || string(dec.TrackingData()) != wantTracking {
 		t.Errorf("decode failure mutated state: hash %x size %d headers %d tracking %q",
-			dec.Hash(), dec.Size(), len(dec.MinorBlockHeaders()), string(dec.TrackingData()))
+			dec.Hash(), dec.Size(), len(dec.ShardBlockHeaders()), string(dec.TrackingData()))
 	}
 	if dec.Hash() != block.Hash() {
 		t.Error("decode failure corrupted the cached hash")
@@ -501,11 +501,11 @@ func TestRootBlockRoundTripBoundaries(t *testing.T) {
 	header.Extra = nil
 	empty := NewRootBlock(header, nil, nil)
 	roundtrip(t, empty)
-	if len(empty.Extra()) != 0 || len(empty.MinorBlockHeaders()) != 0 || len(empty.TrackingData()) != 0 {
+	if len(empty.Extra()) != 0 || len(empty.ShardBlockHeaders()) != 0 || len(empty.TrackingData()) != 0 {
 		t.Error("expected empty dynamic fields")
 	}
-	if empty.MinorHeaderHash() != emptyMinorHeaderHash {
-		t.Errorf("empty minor header hash mismatch: have %x, want %x", empty.MinorHeaderHash(), emptyMinorHeaderHash)
+	if empty.ShardHeaderHash() != emptyMinorHeaderHash {
+		t.Errorf("empty minor header hash mismatch: have %x, want %x", empty.ShardHeaderHash(), emptyMinorHeaderHash)
 	}
 
 	// Maximum width integers.
@@ -574,18 +574,18 @@ func TestRootBlockNilInputs(t *testing.T) {
 	assertPanics("Size", func() { zero.Size() })
 
 	header := newTestRootBlock().Header()
-	assertPanics("NewRootBlock", func() { NewRootBlock(header, MinorBlockHeaders{nil}, nil) })
-	assertPanics("WithBody", func() { header.CreateBlockToAppend(nil, nil, nil, nil, nil).WithBody(MinorBlockHeaders{nil}, nil) })
-	assertPanics("AddMinorBlockHeader", func() { header.CreateBlockToAppend(nil, nil, nil, nil, nil).AddMinorBlockHeader(nil) })
+	assertPanics("NewRootBlock", func() { NewRootBlock(header, ShardBlockHeaders{nil}, nil) })
+	assertPanics("WithBody", func() { header.CreateBlockToAppend(nil, nil, nil, nil, nil).WithBody(ShardBlockHeaders{nil}, nil) })
+	assertPanics("AddMinorBlockHeader", func() { header.CreateBlockToAppend(nil, nil, nil, nil, nil).AddShardBlockHeader(nil) })
 	assertPanics("ExtendMinorBlockHeaderList", func() {
-		header.CreateBlockToAppend(nil, nil, nil, nil, nil).ExtendMinorBlockHeaderList([]*ctypes.Header{nil}, 0)
+		header.CreateBlockToAppend(nil, nil, nil, nil, nil).ExtendShardBlockHeaderList([]*ctypes.Header{nil}, 0)
 	})
-	assertPanics("CalcMinorHeaderHash", func() { CalcMinorHeaderHash(MinorBlockHeaders{newTestMinorHeader(0, 1), nil}) })
+	assertPanics("CalcMinorHeaderHash", func() { CalcShardHeaderHash(ShardBlockHeaders{newTestMinorHeader(0, 1), nil}) })
 
 	// The encoder rejects a nil element even if one is injected into the
 	// private body slice, bypassing the constructors.
 	block := NewRootBlockWithHeader(header)
-	block.minorBlockHeaders = MinorBlockHeaders{newTestMinorHeader(0, 1), nil}
+	block.shardBlockHeaders = ShardBlockHeaders{newTestMinorHeader(0, 1), nil}
 	if _, err := block.MarshalSSZ(); err == nil {
 		t.Error("MarshalSSZ accepted a nil shard block header")
 	}
@@ -597,15 +597,15 @@ func TestRootBlockNilInputs(t *testing.T) {
 func TestRootBlockOwnership(t *testing.T) {
 	minor := newTestMinorHeader(0, 1)
 	block := newTestRootBlock()
-	block.AddMinorBlockHeader(minor)
+	block.AddShardBlockHeader(minor)
 	block.Finalize(nil, nil)
-	want := block.MinorHeaderHash()
+	want := block.ShardHeaderHash()
 
 	// Mutating the caller's header after it was added must not change the
 	// block's body or its commitment.
 	minor.Number.SetInt64(999)
 	minor.Extra[0] ^= 0xff
-	if have := CalcMinorHeaderHash(block.MinorBlockHeaders()); have != want {
+	if have := CalcShardHeaderHash(block.ShardBlockHeaders()); have != want {
 		t.Errorf("block commitment changed with the caller's header: have %x, want %x", have, want)
 	}
 
@@ -625,9 +625,9 @@ func TestRootBlockOwnership(t *testing.T) {
 	// WithSeal copies the body, so the two blocks diverge independently.
 	// block holds three shard headers at this point.
 	sealed := block.WithSeal(block.Header())
-	block.AddMinorBlockHeader(newTestMinorHeader(2, 3))
-	if len(sealed.MinorBlockHeaders()) != 3 {
-		t.Errorf("WithSeal shares the body: have %d headers, want 3", len(sealed.MinorBlockHeaders()))
+	block.AddShardBlockHeader(newTestMinorHeader(2, 3))
+	if len(sealed.ShardBlockHeaders()) != 3 {
+		t.Errorf("WithSeal shares the body: have %d headers, want 3", len(sealed.ShardBlockHeaders()))
 	}
 }
 
@@ -637,7 +637,7 @@ func TestRootBlockSizeUnencodable(t *testing.T) {
 	block := newTestRootBlock()
 	bad := newTestMinorHeader(0, 1)
 	bad.Difficulty = big.NewInt(-1) // geth rlp refuses negative big.Int
-	block.AddMinorBlockHeader(bad)
+	block.AddShardBlockHeader(bad)
 	defer func() {
 		if recover() == nil {
 			t.Error("expected panic")
@@ -651,7 +651,7 @@ func TestRootBlockSizeUnencodable(t *testing.T) {
 func TestRootBlockSizeCacheInvalidation(t *testing.T) {
 	block := newTestRootBlock()
 	sizeBefore := block.Size()
-	block.AddMinorBlockHeader(newTestMinorHeader(2, 3))
+	block.AddShardBlockHeader(newTestMinorHeader(2, 3))
 	if block.Size() <= sizeBefore {
 		t.Errorf("size cache not invalidated by AddMinorBlockHeader: %d -> %d", sizeBefore, block.Size())
 	}
@@ -661,7 +661,7 @@ func TestRootBlockSizeCacheInvalidation(t *testing.T) {
 
 	block.Finalize(nil, nil)
 	sizeBefore = block.Size()
-	block.ExtendMinorBlockHeaderList([]*ctypes.Header{newTestMinorHeader(3, 4)}, block.Time())
+	block.ExtendShardBlockHeaderList([]*ctypes.Header{newTestMinorHeader(3, 4)}, block.Time())
 	if block.Size() <= sizeBefore {
 		t.Errorf("size cache not invalidated by ExtendMinorBlockHeaderList: %d -> %d", sizeBefore, block.Size())
 	}
@@ -675,19 +675,19 @@ func TestRootBlockSizeCacheInvalidation(t *testing.T) {
 // once Finalize has recomputed MinorHeaderHash from the new body.
 func TestRootBlockWithBodyContract(t *testing.T) {
 	block := newTestRootBlock()
-	commitment := block.MinorHeaderHash()
+	commitment := block.ShardHeaderHash()
 
-	body := MinorBlockHeaders{newTestMinorHeader(2, 2)}
-	if CalcMinorHeaderHash(body) == commitment {
+	body := ShardBlockHeaders{newTestMinorHeader(2, 2)}
+	if CalcShardHeaderHash(body) == commitment {
 		t.Fatal("test body has the same commitment as the original body")
 	}
 	replaced := block.WithBody(body, []byte("new tracking"))
-	if have := replaced.MinorHeaderHash(); have != commitment {
+	if have := replaced.ShardHeaderHash(); have != commitment {
 		t.Errorf("WithBody recomputed the commitment: have %x, want %x", have, commitment)
 	}
 
 	replaced.Finalize(nil, nil)
-	if have, want := replaced.MinorHeaderHash(), CalcMinorHeaderHash(replaced.MinorBlockHeaders()); have != want {
+	if have, want := replaced.ShardHeaderHash(), CalcShardHeaderHash(replaced.ShardBlockHeaders()); have != want {
 		t.Errorf("Finalize did not recompute the commitment: have %x, want %x", have, want)
 	}
 	if replaced.Hash() != replaced.Header().Hash() {
@@ -695,7 +695,7 @@ func TestRootBlockWithBodyContract(t *testing.T) {
 	}
 
 	// The original block still commits to its own body.
-	if have, want := block.MinorHeaderHash(), commitment; have != want {
+	if have, want := block.ShardHeaderHash(), commitment; have != want {
 		t.Errorf("WithBody changed the original block: have %x, want %x", have, want)
 	}
 }
