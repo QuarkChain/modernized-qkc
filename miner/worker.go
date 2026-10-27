@@ -181,6 +181,9 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 
 	if genParam.qkc != nil {
 		parent := miner.chain.GetHeader(work.header.ParentHash, work.header.Number.Uint64()-1)
+		if parent == nil {
+			return &newPayloadResult{err: errors.New("missing parent")}
+		}
 		deposits, err := miner.chain.XShardDeposits(parent, genParam.qkc.PrevRootBlock)
 		if err != nil {
 			return &newPayloadResult{err: err}
