@@ -139,6 +139,8 @@ func (v *BlockValidator) validateXShardDeposits(block *types.Block, receipts typ
 
 // validateQKCBeaconFields enforces the reserved values in imported shard blocks.
 // The fields retain geth's fork-dependent presence and RLP encoding.
+// TODO: Move this validation into the QKC engine's VerifyHeader when implemented
+// so header-only and snap sync also enforce these fields.
 func (v *BlockValidator) validateQKCBeaconFields(header *types.Header) error {
 	if v.config.IsCancun(header.Number, header.Time) {
 		if header.ParentBeaconRoot == nil || *header.ParentBeaconRoot != (common.Hash{}) {
