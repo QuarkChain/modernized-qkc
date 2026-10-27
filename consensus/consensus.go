@@ -55,10 +55,10 @@ type ChainReader interface {
 	GetBlock(hash common.Hash, number uint64) *types.Block
 }
 
-// StakingReader provides read-only staking data at a specific parent state.
+// StakingReader provides read-only shard staking data at a specified block's state.
 // It is separate from ChainHeaderReader because a header-only chain has no state.
 type StakingReader interface {
-	GetLockedStakes(parent *types.Header, staker common.Address) (*uint256.Int, error)
+	GetShardLockedStakes(header *types.Header, staker common.Address) (*uint256.Int, error)
 }
 
 // Engine is an algorithm agnostic consensus engine.

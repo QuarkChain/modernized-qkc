@@ -32,36 +32,54 @@ const getLockedStakesSelector = "0xfd8c4646"
 
 var _ consensus.StakingReader = (*BlockChain)(nil)
 
-// GetLockedStakes executes the shard staking getter at the requested parent
-// state, never the current canonical state or the candidate's post-state. Legacy
+// GetShardLockedStakes executes the shard staking getter at header's state.
+// Shard consensus supplies the candidate's parent header. Legacy
 // shard PoSW used spendable account balances; explicit contract locking replaces
 // that rule here. getLockedStakes returns zero as soon as an account is unlocked.
-func (bc *BlockChain) GetLockedStakes(parent *types.Header, staker common.Address) (*uint256.Int, error) {
-	statedb, err := bc.StateAt(parent.Root, parent.Number, parent.Time)
+func (bc *BlockChain) GetShardLockedStakes(header *types.Header, staker common.Address) (*uint256.Int, error) {
+	stakes, _, err := bc.getLockedStakes(header, params.ShardStakingContractAddress, staker)
+	return stakes, err
+}
+
+// GetRootChainStakes reads root-chain stakes and the mining signer from shard 0.
+// The caller selects the shard block confirmed by the candidate root's parent;
+// header is that shard block's header, not a root-block header.
+func (bc *BlockChain) GetRootChainStakes(header *types.Header, staker common.Address) (*uint256.Int, common.Address, error) {
+	if bc.chainConfig.QuarkChain == nil || bc.chainConfig.QuarkChain.ShardID != 0 {
+		return nil, common.Address{}, errors.New("root-chain stakes are only available on shard 0")
+	}
+	return bc.getLockedStakes(header, params.RootStakingContractAddress, staker)
+}
+
+// getLockedStakes calls the selected staking contract at the specified shard state.
+func (bc *BlockChain) getLockedStakes(header *types.Header, address, staker common.Address) (*uint256.Int, common.Address, error) {
+	if !bc.HasState(header.Root) {
+		return nil, common.Address{}, consensus.ErrPrunedAncestor
+	}
+	statedb, err := bc.StateAt(header.Root, header.Number, header.Time)
 	if err != nil {
-		return nil, err
+		return nil, common.Address{}, err
 	}
-	address := params.ShardStakingContractAddress
 	if statedb.GetCodeHash(address) != params.PoSWStakingRuntimeCodeHash {
-		return nil, errors.New("invalid shard staking contract runtime")
+		return nil, common.Address{}, errors.New("invalid staking contract runtime")
 	}
-	rules := bc.chainConfig.Rules(parent.Number, true, parent.Time)
+	evm := vm.NewEVM(NewEVMBlockContext(header, bc, nil), statedb, bc.chainConfig, vm.Config{})
+	defer evm.Release()
+	evm.SetTxContext(vm.TxContext{})
+	rules := evm.GetRules()
 	statedb.Prepare(rules, common.Address{}, common.Address{}, &address, vm.ActivePrecompiles(rules), nil)
 	input := make([]byte, 36)
-	// getLockedStakes(address); the second return value (signer) is used by
-	// root-chain consensus and is unused here on the shard.
 	copy(input, common.FromHex(getLockedStakesSelector))
 	copy(input[16:], staker[:])
-	evm := vm.NewEVM(NewEVMBlockContext(parent, bc, nil), statedb, bc.chainConfig, vm.Config{})
 	output, _, err := evm.StaticCall(common.Address{}, address, input, vm.NewGasBudget(100_000, 100_000))
 	if err != nil {
-		return nil, fmt.Errorf("getLockedStakes: %w", err)
+		return nil, common.Address{}, fmt.Errorf("getLockedStakes: %w", err)
 	}
 	if err := statedb.Error(); err != nil {
-		return nil, err
+		return nil, common.Address{}, err
 	}
 	if len(output) != 64 {
-		return nil, fmt.Errorf("invalid getLockedStakes response length %d", len(output))
+		return nil, common.Address{}, fmt.Errorf("invalid getLockedStakes response length %d", len(output))
 	}
-	return new(uint256.Int).SetBytes(output[:32]), nil
+	return new(uint256.Int).SetBytes(output[:32]), common.BytesToAddress(output[44:]), nil
 }
