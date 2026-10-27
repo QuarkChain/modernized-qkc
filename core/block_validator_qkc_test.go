@@ -20,7 +20,6 @@ import (
 	"errors"
 	"maps"
 	"math/big"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -66,6 +65,7 @@ func TestQKCBeaconFields(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			edit func(*types.Header)
+			want error
 		}{
 			{"beacon root", func(h *types.Header) {
 				if h.ParentBeaconRoot == nil {
@@ -73,21 +73,21 @@ func TestQKCBeaconFields(t *testing.T) {
 				} else {
 					h.ParentBeaconRoot = nil
 				}
-			}},
-			{"beacon root", func(h *types.Header) { h.ParentBeaconRoot = &common.Hash{1} }},
+			}, ErrQKCBeaconRoot},
+			{"beacon root", func(h *types.Header) { h.ParentBeaconRoot = &common.Hash{1} }, ErrQKCBeaconRoot},
 			{"slot number", func(h *types.Header) {
 				if h.SlotNumber == nil {
 					h.SlotNumber = new(uint64)
 				} else {
 					h.SlotNumber = nil
 				}
-			}},
-			{"slot number", func(h *types.Header) { h.SlotNumber = u64(1) }},
+			}, ErrQKCSlotNumber},
+			{"slot number", func(h *types.Header) { h.SlotNumber = u64(1) }, ErrQKCSlotNumber},
 		} {
 			invalid := block.Header()
 			tc.edit(invalid)
-			if _, err := chain.InsertChain([]*types.Block{block.WithSeal(invalid)}); err == nil || !strings.Contains(err.Error(), "qkc "+tc.name) {
-				t.Fatalf("block %d %s: unexpected import error %v", block.NumberU64(), tc.name, err)
+			if _, err := chain.InsertChain([]*types.Block{block.WithSeal(invalid)}); !errors.Is(err, tc.want) {
+				t.Fatalf("block %d %s: import error %v, want %v", block.NumberU64(), tc.name, err, tc.want)
 			}
 		}
 		if _, err := chain.InsertChain([]*types.Block{block}); err != nil {
