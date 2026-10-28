@@ -126,14 +126,8 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	}
 	msg := &AddMinorBlockHeaderRequest{
 		MinorBlockHeader: Data(headerData),
-		TxCount:          3,
-		XShardTxCount:    2,
-		ShardStats:       ShardStats{ChainID: 1},
 	}
 	if _, err := uint256.NewInt(0x0102).MarshalSSZAppend(msg.CoinbaseAmount[:0]); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := uint256.MustFromBig(header.QKCDifficulty()).MarshalSSZAppend(msg.ShardStats.Difficulty[:0]); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := msg.MarshalSSZ()
@@ -143,13 +137,10 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	if len(encoded) != msg.SizeSSZ() {
 		t.Fatalf("header message size: got %d, want %d", len(encoded), msg.SizeSSZ())
 	}
-	// Pin the numeric byte order on the wire: reward 0x0102 and difficulty
-	// 0x0304 must be little-endian, unlike the header's MixDigest bytes.
-	if want := append([]byte{0x02, 0x01}, make([]byte, 30)...); !bytes.Equal(encoded[12:44], want) {
-		t.Fatalf("reward is not little-endian uint256: %x", encoded[12:44])
-	}
-	if want := append([]byte{0x04, 0x03}, make([]byte, 30)...); !bytes.Equal(encoded[56:88], want) {
-		t.Fatalf("difficulty is not little-endian uint256: %x", encoded[56:88])
+	// Pin the numeric byte order on the wire: reward 0x0102 must be
+	// little-endian, unlike the header's MixDigest bytes.
+	if want := append([]byte{0x02, 0x01}, make([]byte, 30)...); !bytes.Equal(encoded[4:36], want) {
+		t.Fatalf("reward is not little-endian uint256: %x", encoded[4:36])
 	}
 	var decoded AddMinorBlockHeaderRequest
 	if err := decoded.UnmarshalSSZ(encoded); err != nil {
@@ -158,8 +149,8 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	if !bytes.Equal(decoded.MinorBlockHeader, headerData) {
 		t.Fatal("SSZ changed the encoded header")
 	}
-	if decoded.CoinbaseAmount != msg.CoinbaseAmount || decoded.ShardStats != msg.ShardStats {
-		t.Fatal("SSZ changed the reward or shard stats")
+	if decoded.CoinbaseAmount != msg.CoinbaseAmount {
+		t.Fatal("SSZ changed the reward")
 	}
 	var decodedHeader types.Header
 	if err := rlp.DecodeBytes(decoded.MinorBlockHeader, &decodedHeader); err != nil {
@@ -171,7 +162,6 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	if _, err := msg.HashTreeRoot(); err != nil {
 		t.Fatalf("header hash tree root: %v", err)
 	}
-
 }
 
 func TestCrossChainDepositsSSZ(t *testing.T) {
@@ -240,7 +230,7 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 }
 
 func TestMasterMessagesSSZ(t *testing.T) {
-	root := &AddRootBlockRequest{RootBlock: Data{0x01, 0x02}, ExpectSwitch: true}
+	root := &AddRootBlockRequest{RootBlock: Data{0x01, 0x02}}
 	roundTripSSZ(t, root)
 
 	request := &GetRootChainStakesRequest{
@@ -395,7 +385,6 @@ func TestGeneratedCodecsRejectMalformedPayloads(t *testing.T) {
 		{"AddRootBlockRequest", 0, func() SSZMessage { return new(AddRootBlockRequest) }},
 		{"AddRootBlockResponse", -1, func() SSZMessage { return new(AddRootBlockResponse) }},
 		{"HelloCommand", 58, func() SSZMessage { return new(HelloCommand) }},
-		{"ShardStats", -1, func() SSZMessage { return new(ShardStats) }},
 		{"AddMinorBlockHeaderRequest", 0, func() SSZMessage { return new(AddMinorBlockHeaderRequest) }},
 		{"AddMinorBlockHeaderResponse", -1, func() SSZMessage { return new(AddMinorBlockHeaderResponse) }},
 		{"AddXshardTxListRequest", 36, func() SSZMessage { return new(AddXshardTxListRequest) }},

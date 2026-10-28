@@ -103,30 +103,11 @@ type HelloCommand struct {
 	GenesisRootBlockHash common.Hash
 }
 
-// ShardStats is the SSZ wire representation of shard status. Difficulty is
-// QKCDifficulty encoded as a little-endian uint256.
-type ShardStats struct {
-	ChainID            uint32 // QuarkChainConfig.ShardID, not the Ethereum signing chain ID.
-	Height             uint64
-	Difficulty         [UInt256Length]byte
-	CoinbaseAddress    common.Address
-	Timestamp          uint64
-	TxCount60s         uint32
-	PendingTxCount     uint32
-	TotalTxCount       uint32
-	BlockCount60s      uint32
-	StaleBlockCount60s uint32
-	LastBlockTime      uint32
-}
-
 // AddMinorBlockHeaderRequest reports an accepted minor block to Master.
 // MinorBlockHeader carries an RLP-encoded geth header.
 type AddMinorBlockHeaderRequest struct {
-	MinorBlockHeader Data `ssz-max:"4294967295"`
-	TxCount          uint32
-	XShardTxCount    uint32
-	CoinbaseAmount   [UInt256Length]byte // Shard miner's base reward in QKC base units, excluding fees.
-	ShardStats       ShardStats
+	MinorBlockHeader Data                `ssz-max:"4294967295"`
+	CoinbaseAmount   [UInt256Length]byte // Shard miner's total reward in QKC base units, including fees.
 }
 
 type AddMinorBlockHeaderResponse struct {
@@ -149,13 +130,11 @@ type AddXshardTxListResponse struct {
 // AddRootBlockRequest sends a root block from Master to every chain. RootBlock
 // carries an SSZ-encoded QKC RootBlock.
 type AddRootBlockRequest struct {
-	RootBlock    Data `ssz-max:"4294967295"`
-	ExpectSwitch bool
+	RootBlock Data `ssz-max:"4294967295"`
 }
 
 type AddRootBlockResponse struct {
 	ErrorCode uint32
-	Switched  bool
 }
 
 // GetRootChainStakesRequest asks a chain for the stakes recorded for Address

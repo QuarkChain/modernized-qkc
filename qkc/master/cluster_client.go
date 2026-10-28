@@ -29,25 +29,26 @@ import (
 // chains. Master business logic holds this interface instead of those
 // connections and does not construct wire messages.
 type ClusterClient interface {
-	// BroadcastRootBlock sends block to every connected ShardNode and waits for
-	// all acknowledgements. A send failure or a nonzero remote ErrorCode is
-	// returned as an error. If only some hosts acknowledge the block, the caller
-	// must retain it as uncommitted and retry the complete broadcast.
-	BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock, expectSwitch bool) error
+	// BroadcastRootBlock sends block to every ShardNode in the cluster and waits
+	// for all acknowledgements. A send failure, a nonzero remote ErrorCode
+	// (returned as *wire.RemoteError), or a ShardNode without a connection is
+	// returned as an error, so a disconnected chain never silently misses the
+	// root block. If only some hosts acknowledge the block, the caller must
+	// retain it as uncommitted and retry the complete broadcast.
+	BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock) error
 
 	// GetRootChainStakes asks chainID for the stakes recorded for address at
-	// minorBlockHash. Its result is the decoded business response after a
-	// completed RPC. A nonzero result ErrorCode reports a remote business
-	// failure; err reports a transport or RPC failure.
+	// minorBlockHash. The result is the decoded business response after a
+	// completed RPC. err reports a transport or RPC failure, or a nonzero remote
+	// ErrorCode as *wire.RemoteError.
 	GetRootChainStakes(ctx context.Context, chainID uint32, address common.Address, minorBlockHash common.Hash) (*RootChainStakesResult, error)
 }
 
 // RootChainStakesResult is the business representation of a chain's staking
 // response, separate from wire.GetRootChainStakesResponse. Stakes is decoded
-// from the wire uint256 representation. ErrorCode reports the remote business
-// result and does not indicate a transport failure.
+// from the wire uint256 representation. A nonzero remote ErrorCode is returned
+// as an error instead of being stored here.
 type RootChainStakesResult struct {
-	ErrorCode uint32
-	Stakes    *uint256.Int
-	Signer    common.Address
+	Stakes *uint256.Int
+	Signer common.Address
 }

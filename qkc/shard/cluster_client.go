@@ -31,30 +31,15 @@ import (
 type ClusterClient interface {
 	// BroadcastXShardTxList delivers depositTxList from minorBlockHash to the
 	// hosts serving chainID. An empty transaction list still advances that
-	// chain's inbox cursor. A send failure, a nonzero remote ErrorCode, or no
-	// connection for chainID is returned as an error. If only some hosts
-	// acknowledge the request, the caller must not report the block header to
-	// Master and must retry delivery to chainID.
+	// chain's inbox cursor. A send failure, a nonzero remote ErrorCode
+	// (returned as *wire.RemoteError), or no connection for chainID is returned
+	// as an error. If only some hosts acknowledge the request, the caller must
+	// not report the block header to Master and must retry delivery to chainID.
 	BroadcastXShardTxList(ctx context.Context, chainID uint32, minorBlockHash common.Hash, depositTxList []*types.DepositTx) error
 
-	// SendMinorBlockHeaderToMaster reports an accepted shard block to Master. It
-	// returns the Master's ErrorCode after a completed RPC. err reports a
-	// transport or RPC failure and is independent of the returned ErrorCode.
-	SendMinorBlockHeaderToMaster(ctx context.Context, blockHeader *types.Header, txCount, xShardTxCount uint32, coinbaseAmount *uint256.Int, stats ShardStats) (errorCode uint32, err error)
-}
-
-// ShardStats is the business representation of shard status reported to
-// Master. Difficulty is QKCDifficulty in its natural uint256 form.
-type ShardStats struct {
-	ChainID            uint32
-	Height             uint64
-	Difficulty         *uint256.Int
-	CoinbaseAddress    common.Address
-	Timestamp          uint64
-	TxCount60s         uint32
-	PendingTxCount     uint32
-	TotalTxCount       uint32
-	BlockCount60s      uint32
-	StaleBlockCount60s uint32
-	LastBlockTime      uint32
+	// SendMinorBlockHeaderToMaster reports an accepted shard block to Master.
+	// It returns nil after a completed RPC whose remote ErrorCode is zero. A
+	// nonzero Master ErrorCode is returned as *wire.RemoteError; a transport or
+	// RPC failure is returned as is.
+	SendMinorBlockHeaderToMaster(ctx context.Context, blockHeader *types.Header, coinbaseAmount *uint256.Int) error
 }
