@@ -30,14 +30,14 @@ import (
 // select the current shard head and root tip, respectively. These references are
 // fixed before execution, so a concurrent head update cannot change the candidate.
 // Pool transactions follow mandatory deposits; NoTxs skips only pool transactions.
-// Construction reuses the node's bound miner and its runtime settings. The caller
+// Construction reuses the node's bound builder and its runtime settings. The caller
 // seals and imports the result.
 func (c *ShardChain) BuildBlock(ctx context.Context, args miner.QKCBlockArgs) (*types.Block, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if c.builder == nil {
-		return nil, errors.New("miner not configured")
+		return nil, errors.New("block builder not configured")
 	}
 	// Select both tips under the lock shared with head updates.
 	c.mu.Lock()

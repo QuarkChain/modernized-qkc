@@ -118,14 +118,14 @@ var (
 type ShardChain struct {
 	db      ethdb.KeyValueStore // Database of the root blocks seen by the shard
 	chain   *core.BlockChain
-	builder *miner.Miner // The node's shared miner; nil for an import-only shard
+	builder *miner.Miner // The node's shared builder; nil for an import-only shard
 
 	rootTip     *qkctypes.RootBlockHeader // Nil until Init succeeds; updated by root imports
 	mu          sync.Mutex                // Serializes block imports and shard/root tip selection and updates
 	rootTipFeed event.Feed                // Notifies miners even when the shard head does not change
 }
 
-// NewShardChain binds the node's existing blockchain and miner, reading root
+// NewShardChain binds the node's existing blockchain and builder, reading root
 // blocks and incoming deposits from db. The builder must use this blockchain
 // and its engine; nil supports import-only shards. Call Init before use.
 func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain, builder *miner.Miner) *ShardChain {

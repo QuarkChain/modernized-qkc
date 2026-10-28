@@ -202,7 +202,7 @@ func TestBuildShardBlockRootReferences(t *testing.T) {
 	env.checkHead(next)
 }
 
-func TestBuildShardBlockMinerSettings(t *testing.T) {
+func TestBuildShardBlockBuilderSettings(t *testing.T) {
 	env, pool, builder := newMiningEnv(t, 1)
 	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 	userTx := types.MustSignNewTx(key, types.LatestSigner(env.config), &types.DynamicFeeTx{
@@ -212,7 +212,7 @@ func TestBuildShardBlockMinerSettings(t *testing.T) {
 	if err := pool.Add([]*types.Transaction{userTx}, true)[0]; err != nil {
 		t.Fatal(err)
 	}
-	// Rebuild on the same parent so only the live miner settings change.
+	// Rebuild on the same parent so only the live builder settings change.
 	for _, tt := range []struct {
 		name    string
 		gasCeil uint64
@@ -241,7 +241,7 @@ func TestBuildShardBlockMinerSettings(t *testing.T) {
 			}
 			for _, tx := range txs[:3] {
 				if tx.Type() != types.DepositTxType {
-					t.Fatal("miner tip filter excluded mandatory deposits")
+					t.Fatal("builder tip filter excluded mandatory deposits")
 				}
 			}
 			if tt.wantTxs == 4 && txs[3].Hash() != userTx.Hash() {
@@ -284,15 +284,15 @@ func TestBuildShardBlockInputs(t *testing.T) {
 	if _, err := env.sc.BuildBlock(ctx, args); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
-	withoutMiner := NewShardChain(env.db, env.chain, nil)
-	if _, err := withoutMiner.BuildBlock(context.Background(), args); err == nil {
-		t.Fatal("accepted missing miner")
+	withoutBuilder := NewShardChain(env.db, env.chain, nil)
+	if _, err := withoutBuilder.BuildBlock(context.Background(), args); err == nil {
+		t.Fatal("accepted missing builder")
 	}
-	if _, err := NewShardMiner(withoutMiner, common.Address{}, time.Second); err == nil {
+	if _, err := NewPoWMiner(withoutBuilder, common.Address{}, time.Second); err == nil {
 		t.Fatal("started scheduler for an import-only shard")
 	}
 	for _, interval := range []time.Duration{0, -time.Second} {
-		if m, err := NewShardMiner(env.sc, common.Address{}, interval); err == nil {
+		if m, err := NewPoWMiner(env.sc, common.Address{}, interval); err == nil {
 			m.Stop()
 			t.Fatalf("accepted non-positive work refresh interval %s", interval)
 		}

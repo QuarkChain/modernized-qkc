@@ -123,7 +123,7 @@ func (e *controlledMiningEngine) VerifyHeaders(_ consensus.ChainHeaderReader, he
 	return abort, results
 }
 
-func newShardMiningEnv(t *testing.T, engine *controlledMiningEngine) (*testEnv, *ShardMiner, *txpool.TxPool) {
+func newShardMiningEnv(t *testing.T, engine *controlledMiningEngine) (*testEnv, *PoWMiner, *txpool.TxPool) {
 	t.Helper()
 	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 	alloc := types.GenesisAlloc{crypto.PubkeyToAddress(key.PublicKey): {Balance: big.NewInt(params.Ether)}}
@@ -143,7 +143,7 @@ func newShardMiningEnv(t *testing.T, engine *controlledMiningEngine) (*testEnv, 
 	if err := env.sc.Init(env.rootGenesis); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewShardMiner(env.sc, common.Address{0x42}, testWorkRefreshInterval)
+	m, err := NewPoWMiner(env.sc, common.Address{0x42}, testWorkRefreshInterval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func checkNoMiningWork(t *testing.T, engine *controlledMiningEngine) {
 	}
 }
 
-func testShardMiner(t *testing.T, test func(*testing.T)) {
+func testPoWMiner(t *testing.T, test func(*testing.T)) {
 	t.Helper()
 	// Geth's process-wide sender workers outlive individual tests and must not
 	// belong to a synctest bubble, which requires its goroutines to terminate.
@@ -189,8 +189,8 @@ func testShardMiner(t *testing.T, test func(*testing.T)) {
 	synctest.Test(t, test)
 }
 
-func TestShardMinerLifecycle(t *testing.T) {
-	testShardMiner(t, func(t *testing.T) {
+func TestPoWMinerLifecycle(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		env, m, _ := newShardMiningEnv(t, engine)
 		checkNoMiningWork(t, engine)
@@ -241,7 +241,7 @@ func TestShardMinerLifecycle(t *testing.T) {
 		third.results <- third.sealed(3)
 		checkNoMiningWork(t, engine)
 		env.checkHead(sealed)
-		if err := m.Resume(); !errors.Is(err, ErrShardMinerStopped) {
+		if err := m.Resume(); !errors.Is(err, ErrPoWMinerStopped) {
 			t.Fatalf("resume after stop: %v", err)
 		}
 		if err := m.Stop(); err != nil {
@@ -250,8 +250,8 @@ func TestShardMinerLifecycle(t *testing.T) {
 	})
 }
 
-func TestShardMinerWorkRefresh(t *testing.T) {
-	testShardMiner(t, func(t *testing.T) {
+func TestPoWMinerWorkRefresh(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		env, m, pool := newShardMiningEnv(t, engine)
 		m.Start()
@@ -278,7 +278,7 @@ func TestShardMinerWorkRefresh(t *testing.T) {
 			t.Fatal("work was not rebuilt at the configured refresh interval")
 		}
 		if second.block.GasLimit() != core.CalcGasLimit(env.genesis.GasLimit(), gasCeil) || len(second.block.Transactions()) != 1 {
-			t.Fatal("work refresh did not use the bound miner's updated gas ceiling and tip filter")
+			t.Fatal("work refresh did not use the bound builder's updated gas ceiling and tip filter")
 		}
 		checkMiningCancelled(t, first)
 		if err := env.sc.builder.SetGasTip(big.NewInt(params.GWei)); err != nil {
@@ -287,7 +287,7 @@ func TestShardMinerWorkRefresh(t *testing.T) {
 		time.Sleep(testWorkRefreshInterval)
 		third := nextMiningWork(t, engine)
 		if txs := third.block.Transactions(); len(txs) != 2 || txs[1].Hash() != tx.Hash() {
-			t.Fatal("work refresh did not incorporate the pool transaction after restoring the miner tip")
+			t.Fatal("work refresh did not incorporate the pool transaction after restoring the builder tip")
 		}
 		checkMiningCancelled(t, second)
 		late := first.sealed(1)
@@ -306,14 +306,14 @@ func TestShardMinerWorkRefresh(t *testing.T) {
 	})
 }
 
-func TestShardMinerTipChanges(t *testing.T) {
+func TestPoWMinerTipChanges(t *testing.T) {
 	for _, rootChange := range []bool{false, true} {
 		name := "shard"
 		if rootChange {
 			name = "root"
 		}
 		t.Run(name, func(t *testing.T) {
-			testShardMiner(t, func(t *testing.T) {
+			testPoWMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
 				env, m, _ := newShardMiningEnv(t, engine)
 				m.Start()
@@ -359,8 +359,8 @@ func TestShardMinerTipChanges(t *testing.T) {
 	}
 }
 
-func TestShardMinerCancelBuild(t *testing.T) {
-	testShardMiner(t, func(t *testing.T) {
+func TestPoWMinerCancelBuild(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		entered, release := make(chan struct{}), make(chan struct{})
 		var calls atomic.Int32
@@ -391,8 +391,8 @@ func TestShardMinerCancelBuild(t *testing.T) {
 	})
 }
 
-func TestShardMinerSlowBuild(t *testing.T) {
-	testShardMiner(t, func(t *testing.T) {
+func TestPoWMinerSlowBuild(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		entered, release := make(chan struct{}), make(chan struct{})
 		var calls atomic.Int32
@@ -418,10 +418,10 @@ func TestShardMinerSlowBuild(t *testing.T) {
 	})
 }
 
-func TestShardMinerFailureRecovery(t *testing.T) {
+func TestPoWMinerFailureRecovery(t *testing.T) {
 	for _, failure := range []string{"build", "seal", "import", "unrelated", "nil"} {
 		t.Run(failure, func(t *testing.T) {
-			testShardMiner(t, func(t *testing.T) {
+			testPoWMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
 				failed := make(chan struct{})
 				var calls atomic.Int32
@@ -482,14 +482,14 @@ func TestShardMinerFailureRecovery(t *testing.T) {
 	}
 }
 
-func TestShardMinerWaitForImport(t *testing.T) {
+func TestPoWMinerWaitForImport(t *testing.T) {
 	for _, stop := range []bool{false, true} {
 		name := "pause"
 		if stop {
 			name = "stop"
 		}
 		t.Run(name, func(t *testing.T) {
-			testShardMiner(t, func(t *testing.T) {
+			testPoWMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
 				entered, release := make(chan struct{}), make(chan struct{})
 				engine.verify = func(*types.Header) error {
@@ -529,8 +529,8 @@ func TestShardMinerWaitForImport(t *testing.T) {
 	}
 }
 
-func TestShardMinerStopWaitsForBuild(t *testing.T) {
-	testShardMiner(t, func(t *testing.T) {
+func TestPoWMinerStopWaitsForBuild(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		entered, release := make(chan struct{}), make(chan struct{})
 		engine.prepare = func(*types.Header) error {
@@ -557,8 +557,8 @@ func TestShardMinerStopWaitsForBuild(t *testing.T) {
 	})
 }
 
-func TestShardMinerInitialization(t *testing.T) {
-	testShardMiner(t, func(t *testing.T) {
+func TestPoWMinerInitialization(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		env, m, _ := newShardMiningEnv(t, engine)
 		env.sc.mu.Lock()

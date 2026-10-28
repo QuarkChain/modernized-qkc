@@ -40,12 +40,12 @@ const (
 	miningTimerInitialDelay = time.Hour
 )
 
-// ErrShardMinerStopped is returned when controlling a miner after Stop.
-var ErrShardMinerStopped = errors.New("shard miner stopped")
+// ErrPoWMinerStopped is returned when controlling a miner after Stop.
+var ErrPoWMinerStopped = errors.New("pow miner stopped")
 
-// ShardMiner schedules candidates, sealing and imports using the miner and engine
+// PoWMiner schedules candidates, sealing and imports using the builder and engine
 // bound to ShardChain. The caller owns those dependencies and stops them after Stop.
-type ShardMiner struct {
+type PoWMiner struct {
 	chain               *ShardChain
 	coinbase            common.Address
 	workRefreshInterval time.Duration
@@ -77,10 +77,10 @@ type miningBuildResult struct {
 	err   error
 }
 
-// NewShardMiner creates a paused miner with an explicit coinbase and work refresh
+// NewPoWMiner creates a paused miner with an explicit coinbase and work refresh
 // interval, independent of the builder's transaction-filling budget.
 // Call Start after shard initialization.
-func NewShardMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval time.Duration) (*ShardMiner, error) {
+func NewPoWMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval time.Duration) (*PoWMiner, error) {
 	if chain == nil || chain.builder == nil {
 		return nil, errors.New("shard chain and builder must be configured")
 	}
@@ -91,7 +91,7 @@ func NewShardMiner(chain *ShardChain, coinbase common.Address, workRefreshInterv
 		return nil, errors.New("mining work refresh interval must be positive")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &ShardMiner{
+	m := &PoWMiner{
 		chain: chain, coinbase: coinbase, workRefreshInterval: workRefreshInterval,
 		ctx: ctx, cancel: cancel, commands: make(chan miningCommand),
 		tips: make(chan struct{}, 1), done: make(chan struct{}),
@@ -107,41 +107,41 @@ func NewShardMiner(chain *ShardChain, coinbase common.Address, workRefreshInterv
 }
 
 // Start begins mining. Calling Start on a running miner is harmless.
-func (m *ShardMiner) Start() error { return m.setRunning(true) }
+func (m *PoWMiner) Start() error { return m.setRunning(true) }
 
 // Resume starts a fresh task after a pause.
-func (m *ShardMiner) Resume() error { return m.Start() }
+func (m *PoWMiner) Resume() error { return m.Start() }
 
 // Pause cancels construction and sealing, and waits for any started import.
 // Synchronization callers pause before syncing and resume after completion.
-func (m *ShardMiner) Pause() error { return m.setRunning(false) }
+func (m *PoWMiner) Pause() error { return m.setRunning(false) }
 
 // Stop permanently stops mining and waits for imports and construction to end.
 // It is safe to call concurrently or more than once.
-func (m *ShardMiner) Stop() error {
+func (m *PoWMiner) Stop() error {
 	m.cancel()
 	<-m.done
 	return nil
 }
 
-func (m *ShardMiner) setRunning(running bool) error {
+func (m *PoWMiner) setRunning(running bool) error {
 	cmd := miningCommand{running: running, done: make(chan struct{})}
 	select {
 	case m.commands <- cmd:
 	case <-m.ctx.Done():
-		return ErrShardMinerStopped
+		return ErrPoWMinerStopped
 	}
 	select {
 	case <-cmd.done:
 		return nil
 	case <-m.ctx.Done():
-		return ErrShardMinerStopped
+		return ErrPoWMinerStopped
 	}
 }
 
 // Drain chain events independently of imports: SetCanonical sends head events
 // synchronously, including while the mining loop is importing its own result.
-func (m *ShardMiner) watchTips(heads <-chan core.ChainHeadEvent, roots <-chan struct{}, headSub, rootSub event.Subscription) {
+func (m *PoWMiner) watchTips(heads <-chan core.ChainHeadEvent, roots <-chan struct{}, headSub, rootSub event.Subscription) {
 	defer m.wg.Done()
 	defer headSub.Unsubscribe()
 	defer rootSub.Unsubscribe()
@@ -163,7 +163,7 @@ func (m *ShardMiner) watchTips(heads <-chan core.ChainHeadEvent, roots <-chan st
 	}
 }
 
-func (m *ShardMiner) loop() {
+func (m *PoWMiner) loop() {
 	var (
 		running  bool
 		building bool
@@ -291,18 +291,18 @@ func (m *ShardMiner) loop() {
 	}
 }
 
-func (m *ShardMiner) matchesTips(args miner.QKCBlockArgs) bool {
+func (m *PoWMiner) matchesTips(args miner.QKCBlockArgs) bool {
 	m.chain.mu.Lock()
 	defer m.chain.mu.Unlock()
 	return m.matchesTipsLocked(args)
 }
 
-func (m *ShardMiner) matchesTipsLocked(args miner.QKCBlockArgs) bool {
+func (m *PoWMiner) matchesTipsLocked(args miner.QKCBlockArgs) bool {
 	return m.chain.rootTip != nil && m.chain.rootTip.Hash() == args.PrevRootBlock &&
 		m.chain.chain.CurrentBlock().Hash() == args.Parent
 }
 
-func (m *ShardMiner) importResult(args miner.QKCBlockArgs, block *types.Block) error {
+func (m *PoWMiner) importResult(args miner.QKCBlockArgs, block *types.Block) error {
 	m.chain.mu.Lock()
 	defer m.chain.mu.Unlock()
 	// Check freshness under the import lock so a concurrent tip update cannot
