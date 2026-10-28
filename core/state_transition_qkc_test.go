@@ -74,7 +74,7 @@ func testDepositExecution(t *testing.T, amsterdam bool) {
 		config.AmsterdamTime = new(uint64)
 	}
 	ethConfig := config
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1, ShardIDs: []uint32{0, 1}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(1, 0, 1)
 	gspec := &Genesis{
 		Config: &config,
 		Alloc: withSystemContracts(types.GenesisAlloc{

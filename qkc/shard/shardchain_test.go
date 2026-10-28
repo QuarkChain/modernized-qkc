@@ -77,7 +77,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 func newTestEnvWithEngine(t *testing.T, engine consensus.Engine, alloc types.GenesisAlloc) *testEnv {
 	config := *params.MergedTestChainConfig
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 0, ShardIDs: []uint32{0, 1}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(0, 0, 1)
 	env := &testEnv{
 		t:      t,
 		engine: engine,

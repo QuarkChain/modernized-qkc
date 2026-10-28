@@ -120,6 +120,33 @@ func TestCheckCompatible(t *testing.T) {
 	}
 }
 
+func TestQuarkChainConfigEqual(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*QuarkChainConfig)
+		want   bool
+	}{
+		{"unchanged", func(c *QuarkChainConfig) {}, true},
+		{"shardId", func(c *QuarkChainConfig) { c.ShardID = 1 }, false},
+		{"shardIds", func(c *QuarkChainConfig) { c.ShardIDs[1] = 2 }, false},
+		{"posw", func(c *QuarkChainConfig) { c.PoSW.CoinbaseAmount.SetInt64(100) }, false},
+		{"missing posw", func(c *QuarkChainConfig) { c.PoSW = nil }, false},
+		{"maxBlocksPerRootBlock", func(c *QuarkChainConfig) { c.MaxBlocksPerRootBlock = 12 }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stored, next := NewTestQuarkChainConfig(0, 0, 1), NewTestQuarkChainConfig(0, 0, 1)
+			test.change(next)
+			if stored.Equal(next) != test.want || next.Equal(stored) != test.want {
+				t.Fatalf("Equal returned the wrong result, want %v", test.want)
+			}
+		})
+	}
+	var missing *QuarkChainConfig
+	if !missing.Equal(nil) || missing.Equal(&QuarkChainConfig{}) || (&QuarkChainConfig{}).Equal(missing) {
+		t.Fatal("Equal did not distinguish nil and non-nil configurations")
+	}
+}
+
 func TestConfigRules(t *testing.T) {
 	c := &ChainConfig{
 		LondonBlock:  new(big.Int),

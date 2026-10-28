@@ -50,7 +50,7 @@ func (b miningBackend) TxPool() *txpool.TxPool       { return b.pool }
 func newMiningEnv(t *testing.T, shardID uint32) (*testEnv, *txpool.TxPool, *miner.Miner) {
 	roots, _, _, _, _, shard0, shard1 := testRootChain()
 	config := *params.MergedTestChainConfig
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: shardID, ShardIDs: []uint32{0, 1, 2}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(shardID, 0, 1, 2)
 	env := &testEnv{
 		t: t, db: rawdb.NewMemoryDatabase(), config: &config,
 		engine: noVerifyEngine{beacon.New(ethash.NewFaker())}, rootGenesis: roots[0],

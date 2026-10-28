@@ -18,93 +18,362 @@ package params
 
 import (
 	"encoding/json"
+	"math/big"
 	"reflect"
 	"testing"
-
-	"github.com/holiman/uint256"
 )
 
-func TestPoSWConfig(t *testing.T) {
-	var config *PoSWConfig
-	if err := config.Check(); err != nil {
-		t.Fatal(err)
-	}
-	config = &PoSWConfig{}
-	if err := config.Check(); err != nil {
-		t.Fatalf("disabled PoSW: %v", err)
-	}
-	config = &PoSWConfig{
-		Enabled: true, WindowSize: 256, StakePerBlock: uint256.MustFromDecimal("1000000000000000000000000000000"),
-		DiffDivider: 20,
-	}
-	if err := config.Check(); err != nil {
-		t.Fatalf("valid PoSW: %v", err)
-	}
-	chainConfig := &ChainConfig{QuarkChain: &QuarkChainConfig{PoSW: config}}
-	encoded, err := json.Marshal(chainConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded ChainConfig
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(chainConfig, &decoded) {
-		t.Fatalf("configuration changed on JSON round trip: %s", encoded)
+func validPoSWConfig() *PoSWConfig {
+	return &PoSWConfig{
+		AdjustmentCutoff: 7, AdjustmentFactor: 512, MinimumDifficulty: big.NewInt(1),
+		CoinbaseAmount: big.NewInt(100), EpochInterval: 10, DecayFactor: big.NewRat(22, 25), RewardTaxRate: big.NewRat(1, 2),
+		StakingEnabled: true, WindowSize: 256, StakePerBlock: big.NewInt(100), DiffDivider: 20,
 	}
 }
 
-func TestPoSWConfigValidation(t *testing.T) {
-	valid := func() *PoSWConfig {
-		return &PoSWConfig{Enabled: true, WindowSize: 256, StakePerBlock: uint256.NewInt(100), DiffDivider: 20}
-	}
+func TestPoSWConfigEqual(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		change func(*PoSWConfig)
+		name string
+		a, b *PoSWConfig
+		want bool
 	}{
-		{"zero window", func(c *PoSWConfig) { c.WindowSize = 0 }},
-		{"zero divider", func(c *PoSWConfig) { c.DiffDivider = 0 }},
-		{"missing stake", func(c *PoSWConfig) { c.StakePerBlock = nil }},
-		{"zero stake", func(c *PoSWConfig) { c.StakePerBlock = new(uint256.Int) }},
+		{"nil", nil, nil, true},
+		{"nil versus empty", nil, &PoSWConfig{}, false},
+		{"empty", &PoSWConfig{}, &PoSWConfig{}, true},
+		{"independent configs", validPoSWConfig(), validPoSWConfig(), true},
+		{"missing fields", &PoSWConfig{}, validPoSWConfig(), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			config := valid()
-			test.change(config)
-			if err := config.Check(); err == nil {
-				t.Fatal("invalid PoSW config accepted")
-			}
-			if err := (&ChainConfig{QuarkChain: &QuarkChainConfig{PoSW: config}}).CheckConfigForkOrder(); err == nil {
-				t.Fatal("invalid shard PoSW config accepted")
+			if test.a.Equal(test.b) != test.want || test.b.Equal(test.a) != test.want {
+				t.Fatalf("Equal returned the wrong result, want %v", test.want)
 			}
 		})
 	}
 }
 
-func TestPoSWStakeJSON(t *testing.T) {
-	const maxStake = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+func TestPoSWConfigEqualFields(t *testing.T) {
 	for _, test := range []struct {
-		input   string
-		want    string
-		wantErr bool
+		name   string
+		change func(*PoSWConfig)
 	}{
-		{"100", "100", false},
-		{`"100"`, "100", false},
-		{`"0x64"`, "100", false},
-		{maxStake, maxStake, false},
-		{"-1", "", true},
-		{`"-1"`, "", true},
-		{"115792089237316195423570985008687907853269984665640564039457584007913129639936", "", true},
+		{"adjustmentCutoff", func(c *PoSWConfig) { c.AdjustmentCutoff++ }},
+		{"adjustmentFactor", func(c *PoSWConfig) { c.AdjustmentFactor++ }},
+		{"minimumDifficulty", func(c *PoSWConfig) { c.MinimumDifficulty.SetInt64(2) }},
+		{"coinbaseAmount", func(c *PoSWConfig) { c.CoinbaseAmount.SetInt64(200) }},
+		{"rewardTaxRate", func(c *PoSWConfig) { c.RewardTaxRate.SetFrac64(1, 4) }},
+		{"epochInterval", func(c *PoSWConfig) { c.EpochInterval++ }},
+		{"decayFactor", func(c *PoSWConfig) { c.DecayFactor.SetFrac64(1, 2) }},
+		{"originalBlockNumber", func(c *PoSWConfig) { c.OriginalBlockNumber++ }},
+		{"stakingEnabled", func(c *PoSWConfig) { c.StakingEnabled = false }},
+		{"windowSize", func(c *PoSWConfig) { c.WindowSize++ }},
+		{"diffDivider", func(c *PoSWConfig) { c.DiffDivider++ }},
+		{"stakePerBlock", func(c *PoSWConfig) { c.StakePerBlock.SetInt64(200) }},
+		{"poswStakingDecayEnabled", func(c *PoSWConfig) { c.PoSWStakingDecayEnabled = true }},
 	} {
-		var config PoSWConfig
-		err := json.Unmarshal([]byte(`{"stakePerBlock":`+test.input+`}`), &config)
-		if (err != nil) != test.wantErr {
-			t.Fatalf("decode %s: have %v, want error %v", test.input, err, test.wantErr)
+		t.Run(test.name, func(t *testing.T) {
+			stored, next := validPoSWConfig(), validPoSWConfig()
+			test.change(next)
+			if stored.Equal(next) || next.Equal(stored) {
+				t.Fatal("Equal ignored the changed field")
+			}
+		})
+	}
+	// Values, rather than pointer identity or rational representation, determine equality.
+	stored, next := validPoSWConfig(), validPoSWConfig()
+	stored.RewardTaxRate = new(big.Rat)
+	next.RewardTaxRate, _ = new(big.Rat).SetString("0.00")
+	if !stored.Equal(next) {
+		t.Fatal("equal consensus values compared unequal")
+	}
+}
+
+func TestNewTestQuarkChainConfigIsolation(t *testing.T) {
+	shardIDs := []uint32{0, 1}
+	first := NewTestQuarkChainConfig(1, shardIDs...)
+	second := NewTestQuarkChainConfig(1, shardIDs...)
+	if err := second.PoSW.Check(); err != nil {
+		t.Fatal(err)
+	}
+	first.PoSW.MinimumDifficulty.SetInt64(9)
+	first.PoSW.CoinbaseAmount.SetInt64(9)
+	first.PoSW.DecayFactor.SetInt64(0)
+	first.PoSW.RewardTaxRate.SetInt64(0)
+	first.ShardIDs[0] = 9
+	shardIDs[1] = 9
+	if second.PoSW.MinimumDifficulty.Int64() != 1 || second.PoSW.CoinbaseAmount.Sign() != 0 ||
+		second.PoSW.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 || second.PoSW.RewardTaxRate.Cmp(big.NewRat(1, 2)) != 0 ||
+		!reflect.DeepEqual(second.ShardIDs, []uint32{0, 1}) || first.ShardIDs[1] != 1 {
+		t.Fatal("test configurations share mutable defaults or the caller's shard IDs")
+	}
+}
+
+func TestPoSWConfigJSON(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"numbers",
+			`{"posw": {
+				"adjustmentCutoff": 7,
+				"adjustmentFactor": 512,
+				"minimumDifficulty": 100,
+				"coinbaseAmount": 6500000000000000000,
+				"epochInterval": 3153600,
+				"decayFactor": 0.88,
+				"rewardTaxRate": 0.5,
+				"originalBlockNumber": 12345678,
+				"stakingEnabled": true,
+				"windowSize": 512,
+				"stakePerBlock": 1000000000000000000000000,
+				"poswStakingDecayEnabled": true,
+				"diffDivider": 10000
+			}}`,
+			true,
+		},
+		{
+			"quoted ratios",
+			`{"posw": {
+				"adjustmentCutoff": 7,
+				"adjustmentFactor": 512,
+				"minimumDifficulty": 100,
+				"coinbaseAmount": 6500000000000000000,
+				"epochInterval": 3153600,
+				"decayFactor": "0.88",
+				"rewardTaxRate": "0.5",
+				"originalBlockNumber": 12345678,
+				"stakingEnabled": true,
+				"windowSize": 512,
+				"stakePerBlock": 1000000000000000000000000,
+				"poswStakingDecayEnabled": true,
+				"diffDivider": 10000
+			}}`,
+			true,
+		},
+		{
+			"quoted",
+			`{"posw": {
+				"adjustmentCutoff": "7",
+				"adjustmentFactor": "512",
+				"minimumDifficulty": "100",
+				"coinbaseAmount": "6500000000000000000",
+				"epochInterval": "3153600",
+				"decayFactor": "0.88",
+				"rewardTaxRate": "0.5",
+				"originalBlockNumber": "12345678",
+				"stakingEnabled": true,
+				"windowSize": "512",
+				"stakePerBlock": "1000000000000000000000000",
+				"poswStakingDecayEnabled": true,
+				"diffDivider": "10000"
+			}}`,
+			true,
+		},
+		{
+			"hex strings",
+			`{"posw": {
+				"adjustmentCutoff": "0x07",
+				"adjustmentFactor": "0x200",
+				"minimumDifficulty": "0x64",
+				"coinbaseAmount": "0x5a34a38fc00a0000",
+				"epochInterval": "0x301ec0",
+				"decayFactor": 0.88,
+				"rewardTaxRate": 0.5,
+				"originalBlockNumber": "0xbc614e",
+				"stakingEnabled": true,
+				"windowSize": "0x200",
+				"stakePerBlock": "0xd3c21bcecceda1000000",
+				"poswStakingDecayEnabled": true,
+				"diffDivider": "0x2710"
+			}}`,
+			true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var config QuarkChainConfig
+			err := json.Unmarshal([]byte(test.input), &config)
+			if err == nil {
+				err = config.PoSW.Check()
+			}
+			if (err == nil) != test.valid {
+				t.Fatalf("config validation %v, want valid %v", err, test.valid)
+			}
+			if err != nil {
+				return
+			}
+			if config.PoSW.CoinbaseAmount.String() != "6500000000000000000" || config.PoSW.StakePerBlock.String() != "1000000000000000000000000" {
+				t.Fatal("mainnet integer fields changed value")
+			}
+			encoded, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields struct {
+				PoSW map[string]json.RawMessage `json:"posw"`
+			}
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			wantFields := map[string]string{
+				"adjustmentCutoff": "7", "adjustmentFactor": "512",
+				"minimumDifficulty": "100", "coinbaseAmount": "6500000000000000000",
+				"epochInterval": "3153600", "decayFactor": "0.88", "rewardTaxRate": "0.5",
+				"originalBlockNumber": "12345678", "stakingEnabled": "true", "windowSize": "512",
+				"stakePerBlock": "1000000000000000000000000", "poswStakingDecayEnabled": "true", "diffDivider": "10000",
+			}
+			if len(fields.PoSW) != len(wantFields) {
+				t.Fatalf("unexpected JSON fields: %s", encoded)
+			}
+			for field, want := range wantFields {
+				if string(fields.PoSW[field]) != want {
+					t.Fatalf("%s: have %s, want JSON value %s", field, fields.PoSW[field], want)
+				}
+			}
+			var roundtrip QuarkChainConfig
+			if err := json.Unmarshal(encoded, &roundtrip); err != nil || !reflect.DeepEqual(config, roundtrip) {
+				t.Fatalf("config JSON round trip: %s, %v", encoded, err)
+			}
+		})
+	}
+}
+
+func TestPoSWConfigUint64JSON(t *testing.T) {
+	for _, field := range []string{"adjustmentCutoff", "adjustmentFactor", "epochInterval", "originalBlockNumber", "windowSize", "diffDivider"} {
+		for _, test := range []struct {
+			input string
+			valid bool
+		}{
+			{`7`, true}, {`"7"`, true}, {`"0x07"`, true},
+			{`18446744073709551615`, true}, {`"0xffffffffffffffff"`, true},
+			{`18446744073709551616`, false}, {`"0x10000000000000000"`, false},
+			{`-1`, false}, {`"-1"`, false}, {`7.5`, false}, {`"7.5"`, false},
+		} {
+			config := validPoSWConfig()
+			err := json.Unmarshal([]byte(`{"`+field+`":`+test.input+`}`), config)
+			if (err == nil) != test.valid {
+				t.Fatalf("%s=%s: decode %v, want valid %v", field, test.input, err, test.valid)
+			}
 		}
-		if test.wantErr {
-			continue
+	}
+}
+
+func TestPoSWConfigJSONUpdates(t *testing.T) {
+	config := validPoSWConfig()
+	config.OriginalBlockNumber = 19
+	config.PoSWStakingDecayEnabled = true
+	if err := json.Unmarshal([]byte(`{"originalBlockNumber":0,"stakingEnabled":false,"poswStakingDecayEnabled":false}`), config); err != nil {
+		t.Fatal(err)
+	}
+	if config.OriginalBlockNumber != 0 || config.StakingEnabled || config.PoSWStakingDecayEnabled || config.AdjustmentCutoff != 7 || config.CoinbaseAmount.Int64() != 100 {
+		t.Fatal("partial decode must apply zero and false values and preserve omitted fields")
+	}
+	for _, field := range []string{"stakingEnabled", "poswStakingDecayEnabled"} {
+		if err := json.Unmarshal([]byte(`{"`+field+`":"true"}`), config); err == nil {
+			t.Fatalf("%s must reject quoted booleans", field)
 		}
-		if config.StakePerBlock == nil || config.StakePerBlock.Dec() != test.want {
-			t.Fatalf("decoded stake: have %v, want %s", config.StakePerBlock, test.want)
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fields["originalBlockNumber"]; exists {
+		t.Fatal("zero originalBlockNumber must be omitted")
+	}
+}
+
+func TestPoSWConfigRatiosJSON(t *testing.T) {
+	for _, field := range []string{"decayFactor", "rewardTaxRate"} {
+		for _, test := range []struct {
+			input string
+			valid bool
+		}{
+			{`0.88`, true}, {`"0.88"`, true}, {`"22/25"`, false},
+			{`8.8e-1`, true}, {`"8.8e-1"`, true}, {`"bad"`, false},
+			{`0.001`, false}, {`"0.001"`, false},
+			// Values above one must not round down through float64.
+			{`1.000000000000000000000000000000000001`, false},
+			{`"1.000000000000000000000000000000000001"`, false},
+		} {
+			config := validPoSWConfig()
+			err := json.Unmarshal([]byte(`{"`+field+`":`+test.input+`}`), config)
+			if err == nil {
+				err = config.Check()
+			}
+			if (err == nil) != test.valid {
+				t.Fatalf("%s=%s: validation %v, want valid %v", field, test.input, err, test.valid)
+			}
+			if err != nil {
+				continue
+			}
+			encoded, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields[field]) != "0.88" {
+				t.Fatalf("%s=%s: have %s, want unquoted 0.88", field, test.input, fields[field])
+			}
+		}
+	}
+}
+
+func TestPoSWConfigRatioMarshal(t *testing.T) {
+	for _, field := range []string{"decayFactor", "rewardTaxRate"} {
+		for _, test := range []struct {
+			ratio *big.Rat
+			want  string
+		}{
+			{big.NewRat(22, 25), "0.88"},
+			{big.NewRat(1, 8), "0.125"},
+			{big.NewRat(0, 1), "0"},
+			{big.NewRat(1, 1), "1"},
+			{nil, "null"},
+			{big.NewRat(1, 3), ""}, // Never silently round a repeating decimal.
+		} {
+			config := validPoSWConfig()
+			if field == "decayFactor" {
+				config.DecayFactor = test.ratio
+			} else {
+				config.RewardTaxRate = test.ratio
+			}
+			encoded, err := json.Marshal(config)
+			if test.want == "" {
+				if err == nil {
+					t.Fatalf("%s: repeating decimal must fail marshaling", field)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields[field]) != test.want {
+				t.Fatalf("%s: have %s, want %s", field, fields[field], test.want)
+			}
+		}
+	}
+}
+
+func TestPoSWConfigTaxPrecision(t *testing.T) {
+	const tax = "0.500000000000000000000000000000000001"
+	for _, input := range []string{tax, `"` + tax + `"`} {
+		config := validPoSWConfig()
+		if err := json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), config); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.Check(); err == nil {
+			t.Fatal("high-precision tax must fail the denominator limit instead of rounding to one half")
 		}
 		encoded, err := json.Marshal(config)
 		if err != nil {
@@ -114,8 +383,230 @@ func TestPoSWStakeJSON(t *testing.T) {
 		if err := json.Unmarshal(encoded, &fields); err != nil {
 			t.Fatal(err)
 		}
-		if string(fields["stakePerBlock"]) != `"`+test.want+`"` {
-			t.Fatalf("stake was not encoded as a decimal string: %s", encoded)
+		if string(fields["rewardTaxRate"]) != tax {
+			t.Fatalf("tax lost precision: %s, want %s", fields["rewardTaxRate"], tax)
 		}
+	}
+}
+
+func TestPoSWConfigValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*PoSWConfig)
+	}{
+		{"zero cutoff", func(c *PoSWConfig) { c.AdjustmentCutoff = 0 }},
+		{"zero factor", func(c *PoSWConfig) { c.AdjustmentFactor = 0 }},
+		{"missing minimum", func(c *PoSWConfig) { c.MinimumDifficulty = nil }},
+		{"zero minimum", func(c *PoSWConfig) { c.MinimumDifficulty = new(big.Int) }},
+		{"negative minimum", func(c *PoSWConfig) { c.MinimumDifficulty.SetInt64(-1) }},
+		{"minimum overflow", func(c *PoSWConfig) { c.MinimumDifficulty.Lsh(big.NewInt(1), 256) }},
+		{"missing subsidy", func(c *PoSWConfig) { c.CoinbaseAmount = nil }},
+		{"negative subsidy", func(c *PoSWConfig) { c.CoinbaseAmount.SetInt64(-1) }},
+		{"subsidy overflow", func(c *PoSWConfig) { c.CoinbaseAmount.Lsh(big.NewInt(1), 256) }},
+		{"zero epoch", func(c *PoSWConfig) { c.EpochInterval = 0 }},
+		{"missing decay", func(c *PoSWConfig) { c.DecayFactor = nil }},
+		{"negative decay", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(-1, 2) }},
+		{"decay above one", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(3, 2) }},
+		{"decay denominator", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(1, 1000) }},
+		{"repeating decay", func(c *PoSWConfig) { c.DecayFactor = big.NewRat(1, 3) }},
+		{"missing tax", func(c *PoSWConfig) { c.RewardTaxRate = nil }},
+		{"negative tax", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(-1, 2) }},
+		{"tax above one", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(3, 2) }},
+		{"tax denominator", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(1, 1000) }},
+		{"repeating tax", func(c *PoSWConfig) { c.RewardTaxRate = big.NewRat(1, 3) }},
+		{"zero window", func(c *PoSWConfig) { c.WindowSize = 0 }},
+		{"zero divider", func(c *PoSWConfig) { c.DiffDivider = 0 }},
+		{"missing stake", func(c *PoSWConfig) { c.StakePerBlock = nil }},
+		{"zero stake", func(c *PoSWConfig) { c.StakePerBlock.SetUint64(0) }},
+		{"negative stake", func(c *PoSWConfig) { c.StakePerBlock.SetInt64(-1) }},
+		{"stake overflow", func(c *PoSWConfig) { c.StakePerBlock.Lsh(big.NewInt(1), 256) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := validPoSWConfig()
+			test.change(config)
+			if err := config.Check(); err == nil {
+				t.Fatal("invalid consensus config accepted")
+			}
+			if err := (&ChainConfig{QuarkChain: &QuarkChainConfig{PoSW: config}}).CheckConfigForkOrder(); err == nil {
+				t.Fatal("invalid shard consensus config accepted")
+			}
+		})
+	}
+	for _, config := range []*PoSWConfig{nil, {}} {
+		chainConfig := *MergedTestChainConfig
+		chainConfig.QuarkChain = &QuarkChainConfig{PoSW: config}
+		if config.Check() == nil || chainConfig.CheckConfigForkOrder() == nil {
+			t.Fatal("missing consensus parameters accepted")
+		}
+	}
+	for _, factor := range []*big.Rat{big.NewRat(0, 1), big.NewRat(1, 8), big.NewRat(1, 2), big.NewRat(22, 25), big.NewRat(99, 100), big.NewRat(1, 1)} {
+		config := validPoSWConfig()
+		config.DecayFactor = factor
+		config.RewardTaxRate = new(big.Rat).Set(factor)
+		config.MinimumDifficulty.Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+		config.CoinbaseAmount.SetUint64(0)
+		config.StakingEnabled = false
+		config.StakePerBlock, config.WindowSize, config.DiffDivider = nil, 0, 0
+		if err := config.Check(); err != nil {
+			t.Fatalf("zero subsidy, staking disabled, decay %s: %v", factor, err)
+		}
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var roundtrip PoSWConfig
+		if err := json.Unmarshal(encoded, &roundtrip); err != nil {
+			t.Fatal(err)
+		}
+		if err := roundtrip.Check(); err != nil {
+			t.Fatal(err)
+		}
+		reencoded, err := json.Marshal(&roundtrip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != string(reencoded) {
+			t.Fatalf("validated config changed during JSON round trip: %s, have %s", encoded, reencoded)
+		}
+	}
+}
+
+func TestPoSWConfigAmountsJSON(t *testing.T) {
+	const maxAmount = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+	for _, field := range []string{"minimumDifficulty", "coinbaseAmount", "stakePerBlock"} {
+		for _, test := range []struct {
+			input string
+			valid bool
+		}{
+			{"100", true}, {maxAmount, true}, {`"100"`, true}, {`"0x64"`, true},
+			{`"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"`, true},
+			{"0.88", false}, {`"0.88"`, false}, {"-1", false}, {`"-1"`, false},
+			{"115792089237316195423570985008687907853269984665640564039457584007913129639936", false},
+		} {
+			config := validPoSWConfig()
+			err := json.Unmarshal([]byte(`{"`+field+`":`+test.input+`}`), config)
+			if err == nil {
+				err = config.Check()
+			}
+			if (err == nil) != test.valid {
+				t.Fatalf("%s=%s: validation %v, want valid %v", field, test.input, err, test.valid)
+			}
+		}
+	}
+}
+
+func TestPoSWConfigHeightQueries(t *testing.T) {
+	for _, test := range []struct{ number, reward, stake uint64 }{
+		{0, 0, 50}, {1, 12, 25}, {11, 6, 12}, {71, 0, 100},
+	} {
+		config := validPoSWConfig()
+		config.DecayFactor = big.NewRat(1, 2)
+		config.OriginalBlockNumber = 19
+		config.PoSWStakingDecayEnabled = true
+		before, _ := json.Marshal(config)
+		number := new(big.Int).SetUint64(test.number)
+		reward, stake := config.BlockRewardAt(number), config.StakePerBlockAt(number)
+		if reward.Uint64() != test.reward || stake.Uint64() != test.stake {
+			t.Fatalf("height %d: reward %s stake %s, want %d/%d", test.number, reward, stake, test.reward, test.stake)
+		}
+		reward.SetInt64(-1)
+		stake.SetInt64(-1)
+		after, _ := json.Marshal(config)
+		if string(before) != string(after) || number.Uint64() != test.number {
+			t.Fatal("height queries or their returned integers modified inputs")
+		}
+		config.PoSWStakingDecayEnabled = false
+		fixed := config.StakePerBlockAt(number)
+		fixed.SetInt64(0)
+		if config.StakePerBlock.Uint64() != 100 || config.StakePerBlockAt(number).Uint64() != 100 {
+			t.Fatal("fixed stake query modified or decayed the configured value")
+		}
+	}
+	config := validPoSWConfig()
+	config.DecayFactor = big.NewRat(1, 2)
+	config.EpochInterval, config.OriginalBlockNumber = ^uint64(0), ^uint64(0)
+	if got := config.BlockRewardAt(big.NewInt(1)); got.Uint64() != 25 {
+		t.Fatalf("original height overflow: reward %s, want 25", got)
+	}
+}
+
+func TestRegenesisRewards(t *testing.T) {
+	for _, test := range []struct {
+		number, offset uint64
+		want           uint64
+	}{
+		{0, 19, 0}, {1, 18, 25}, {1, 19, 12}, {10, 19, 12}, {11, 19, 6}, {71, 19, 0},
+	} {
+		config := &PoSWConfig{
+			CoinbaseAmount: big.NewInt(100), EpochInterval: 10, DecayFactor: big.NewRat(1, 2), RewardTaxRate: big.NewRat(1, 2),
+			OriginalBlockNumber: test.offset,
+		}
+		if got := config.BlockRewardAt(new(big.Int).SetUint64(test.number)); got.Cmp(new(big.Int).SetUint64(test.want)) != 0 {
+			t.Fatalf("height %d offset %d: %s want %d", test.number, test.offset, got, test.want)
+		}
+	}
+}
+
+func TestRewardDecay(t *testing.T) {
+	// Expected rewards follow pyquarkchain: floor the epoch decay first,
+	// then multiply by the remaining reward share and floor again.
+	for _, test := range []struct {
+		name   string
+		factor string
+		tax    string
+		amount uint64
+		epoch  uint64
+		want   uint64
+	}{
+		{"root before decay", "0.88", "0", 100, 0, 100},
+		{"root first epoch", "0.88", "0", 100, 1, 88},
+		{"root second epoch", "0.88", "0", 100, 2, 77},
+		{"before decay", "0.88", "0.5", 100, 0, 50},
+		{"first epoch", "0.88", "0.5", 100, 1, 44},
+		{"second epoch", "0.88", "0.5", 100, 2, 38},
+		{"round once after exponentiation", "0.88", "0.5", 100, 3, 34},
+		{"slow decay", "0.88", "0.5", 100, 6, 23},
+		{"decay before tax", "0.88", "0.25", 2, 1, 0},
+		{"denominator limit", "0.99", "0.5", 100, 100, 18},
+		{"fully decayed", "0.88", "0.5", 100, 100, 0},
+		{"no decay", "1", "0.5", 100, 100, 50},
+		{"zero factor before decay", "0", "0.5", 100, 0, 50},
+		{"zero factor after decay", "0", "0.5", 100, 1, 0},
+		{"zero subsidy", "0.88", "0.5", 0, 0, 0},
+		{"full tax before decay", "0.88", "1", 100, 0, 0},
+		{"full tax after decay", "0.88", "1", 100, 1, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			factor, ok := new(big.Rat).SetString(test.factor)
+			if !ok {
+				t.Fatal("invalid test factor", test.factor)
+			}
+			tax, ok := new(big.Rat).SetString(test.tax)
+			if !ok {
+				t.Fatal("invalid test tax rate", test.tax)
+			}
+			config := &PoSWConfig{
+				AdjustmentCutoff: 7, AdjustmentFactor: 512, MinimumDifficulty: big.NewInt(1),
+				CoinbaseAmount: new(big.Int).SetUint64(test.amount), EpochInterval: 1,
+				DecayFactor: new(big.Rat).Set(factor), RewardTaxRate: new(big.Rat).Set(tax),
+				OriginalBlockNumber: test.epoch,
+			}
+			if err := config.Check(); err != nil {
+				t.Fatal(err)
+			}
+			// A positive new block number with epoch zero is needed to exercise
+			// the subsidy before its first decay without crediting genesis.
+			if test.epoch == 0 {
+				config.EpochInterval = 2
+			} else {
+				config.OriginalBlockNumber--
+			}
+			if got := config.BlockRewardAt(big.NewInt(1)); got.Cmp(new(big.Int).SetUint64(test.want)) != 0 {
+				t.Fatalf("reward %s, want %d", got, test.want)
+			}
+			if config.DecayFactor.Cmp(factor) != 0 || config.RewardTaxRate.Cmp(tax) != 0 {
+				t.Fatal("reward calculation modified the configured decay factor or tax rate")
+			}
+		})
 	}
 }
