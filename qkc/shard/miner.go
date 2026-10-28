@@ -30,10 +30,18 @@ import (
 	"github.com/ethereum/go-ethereum/miner"
 )
 
+const (
+	// miningRetryInterval backs off failed attempts and polls shard initialization.
+	// One second avoids a tight retry loop while allowing prompt recovery.
+	miningRetryInterval = time.Second
+
+	// miningTimerInitialDelay is arbitrary: the timer is stopped immediately after
+	// creation. schedule sets the actual delay with Reset before the timer is used.
+	miningTimerInitialDelay = time.Hour
+)
+
 // ErrShardMinerStopped is returned when controlling a miner after Stop.
 var ErrShardMinerStopped = errors.New("shard miner stopped")
-
-const miningRetryInterval = time.Second
 
 // ShardMiner schedules candidates, sealing and imports using the miner and engine
 // bound to ShardChain. The caller owns those dependencies and stops them after Stop.
@@ -163,7 +171,7 @@ func (m *ShardMiner) loop() {
 		results  <-chan *types.Block
 		tick     <-chan time.Time
 		built    = make(chan miningBuildResult, 1)
-		timer    = time.NewTimer(time.Hour)
+		timer    = time.NewTimer(miningTimerInitialDelay)
 	)
 	timer.Stop()
 	cancelTask := func() {
