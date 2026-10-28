@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
@@ -56,6 +57,30 @@ type XShardChain interface {
 	// XShardDeposits returns the deposits sent to the shard by the block of
 	// another shard with the given hash, or nil if they are not received.
 	XShardDeposits(hash common.Hash) []*types.DepositTx
+}
+
+// RootBlock reads a root block received by the shard.
+func (c *ShardChain) RootBlock(hash common.Hash) *qkctypes.RootBlock {
+	return rawdb.ReadRootBlock(c.db, hash)
+}
+
+// RootBlockByNumber reads a root block on the ancestry of tip, including forks.
+func (c *ShardChain) RootBlockByNumber(tip common.Hash, number uint64) *qkctypes.RootBlock {
+	for header := rawdb.ReadRootBlockHeader(c.db, tip); header != nil; header = rawdb.ReadRootBlockHeader(c.db, header.ParentHash) {
+		if uint64(header.Number) == number {
+			return c.RootBlock(header.Hash())
+		}
+		if uint64(header.Number) < number {
+			return nil
+		}
+	}
+	return nil
+}
+
+// XShardDeposits reads the incoming deposits of a confirmed source block.
+// A nil result means the deposit list has not been received, even if empty.
+func (c *ShardChain) XShardDeposits(hash common.Hash) []*types.DepositTx {
+	return rawdb.ReadXShardDeposits(c.db, hash)
 }
 
 // xShardCursor walks the deposits of a shard in the order the shard applies
@@ -93,14 +118,15 @@ func newXShardCursor(config *params.QuarkChainConfig, chain XShardChain, pos typ
 	if c.maxRoot == nil {
 		return nil, fmt.Errorf("%w: %x", ErrUnknownCursorRoot, maxRoot)
 	}
-	// Only heights past the tip are EOF.
+	// EOF is exactly one root past the tip, with no source or deposit index.
 	if pos.RootBlockHeight > c.maxRoot.NumberU64() {
+		if pos.RootBlockHeight != c.maxRoot.NumberU64()+1 || c.minorIndex != 0 || c.depositIndex != 0 {
+			return nil, fmt.Errorf("%w: invalid EOF cursor %+v after root #%d", ErrInconsistentClusterState, pos, c.maxRoot.NumberU64())
+		}
 		return c, nil
 	}
-	// ShardChain.validateRootReference checks root headers from maxRoot back
-	// to the parent's root reference before execution. The cursor may lag
-	// behind that reference, outside the checked range. This additional
-	// consistency check rejects missing local root data instead of reporting EOF.
+	// The cursor may lag behind the parent's root reference. Missing root data
+	// below the tip is an inconsistency, not EOF.
 	if c.root = chain.RootBlockByNumber(maxRoot, pos.RootBlockHeight); c.root == nil {
 		return nil, fmt.Errorf("%w: missing root block #%d below %x", ErrInconsistentClusterState, pos.RootBlockHeight, maxRoot)
 	}
@@ -221,11 +247,31 @@ func NewXShardInbox(config *params.QuarkChainConfig, chain XShardChain) *XShardI
 
 // Deposits returns the deposits a shard block may apply, in order: from the
 // cursor of its parent up to its previous root block.
-// Root ancestry must already be validated, as in ShardChain.validateRootReference.
+// The root reference must equal or extend the parent's, except at shard genesis.
 func (in *XShardInbox) Deposits(parent *types.Header, prevRootBlock common.Hash) (core.XShardDeposits, error) {
 	extra, err := parent.QKCExtra()
 	if err != nil {
 		return nil, fmt.Errorf("parent: %w", err)
+	}
+	if parent.Number.Sign() != 0 {
+		root := in.chain.RootBlock(prevRootBlock)
+		if root == nil {
+			return nil, fmt.Errorf("%w: %x", ErrUnknownCursorRoot, prevRootBlock)
+		}
+		parentRoot := in.chain.RootBlock(extra.PrevRootBlock)
+		if parentRoot == nil {
+			return nil, fmt.Errorf("%w: missing parent root %x", ErrInconsistentClusterState, extra.PrevRootBlock)
+		}
+		if root.NumberU64() < parentRoot.NumberU64() {
+			return nil, ErrRootNotDescendant
+		}
+		ancestor := in.chain.RootBlockByNumber(prevRootBlock, parentRoot.NumberU64())
+		if ancestor == nil {
+			return nil, fmt.Errorf("%w: missing root block #%d below %x", ErrInconsistentClusterState, parentRoot.NumberU64(), prevRootBlock)
+		}
+		if ancestor.Hash() != parentRoot.Hash() {
+			return nil, ErrRootNotDescendant
+		}
 	}
 	cursor, err := newXShardCursor(in.config, in.chain, extra.Cursor, prevRootBlock)
 	if err != nil {

@@ -543,7 +543,9 @@ func (cm *chainMaker) makeHeader(parent *types.Block, engine consensus.Engine) *
 	}
 	if cm.config.IsAmsterdam(header.Number, header.Time) {
 		var slot uint64
-		if parentHeader.SlotNumber != nil {
+		// QKC reserves slot zero; incrementing it would make generated blocks fail
+		// QKC validation and differ from blocks built by the miner.
+		if cm.config.QuarkChain == nil && parentHeader.SlotNumber != nil {
 			slot = *parentHeader.SlotNumber + 1
 		}
 		header.SlotNumber = &slot

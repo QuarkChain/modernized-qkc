@@ -359,9 +359,13 @@ func (tx *Transaction) GasTipCapIntCmp(other *big.Int) int {
 }
 
 // EffectiveGasTip returns the effective miner gasTipCap for the given base fee.
+// Deposits pay their full gas price to the miner, without deducting the base fee.
 // Note: if the effective gasTipCap would be negative, this method
 // returns ErrGasFeeCapTooLow, and value is undefined.
 func (tx *Transaction) EffectiveGasTip(baseFee *big.Int) (*big.Int, error) {
+	if tx.Type() == DepositTxType {
+		return tx.GasPrice(), nil
+	}
 	dst := new(uint256.Int)
 	base := new(uint256.Int)
 	if baseFee != nil {
@@ -376,7 +380,7 @@ func (tx *Transaction) EffectiveGasTip(baseFee *big.Int) (*big.Int, error) {
 // calcEffectiveGasTip calculates the effective gas tip of the transaction and
 // saves the result to dst.
 func (tx *Transaction) calcEffectiveGasTip(dst *uint256.Int, baseFee *uint256.Int) error {
-	if baseFee == nil {
+	if baseFee == nil || tx.Type() == DepositTxType {
 		if dst.SetFromBig(tx.inner.gasTipCap()) {
 			return ErrUint256Overflow
 		}
@@ -407,7 +411,7 @@ func (tx *Transaction) calcEffectiveGasTip(dst *uint256.Int, baseFee *uint256.In
 func (tx *Transaction) EffectiveGasTipValue(baseFee *big.Int) *big.Int {
 	// min(gasTipCap, gasFeeCap - baseFee)
 	dst := new(big.Int)
-	if baseFee == nil {
+	if baseFee == nil || tx.Type() == DepositTxType {
 		dst.Set(tx.inner.gasTipCap())
 		return dst
 	}

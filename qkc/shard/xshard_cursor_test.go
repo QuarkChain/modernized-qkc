@@ -229,6 +229,11 @@ func TestXShardInboxErrors(t *testing.T) {
 	if _, err := shard1.Deposits(&types.Header{Number: new(big.Int), Difficulty: new(big.Int)}, roots[3].Hash()); err == nil {
 		t.Error("walked from a parent without a cursor")
 	}
+	for _, cursor := range []types.XShardCursor{pos(5, 0, 0), pos(4, 1, 0), pos(4, 0, 1)} {
+		if _, err := shard1.Deposits(cursorAt(cursor.RootBlockHeight, cursor.MinorBlockIndex, cursor.XShardDepositIndex), roots[3].Hash()); !errors.Is(err, ErrInconsistentClusterState) {
+			t.Errorf("invalid EOF cursor %+v: error %v, want %v", cursor, err, ErrInconsistentClusterState)
+		}
+	}
 	invalidMinorIndex := uint64(len(roots[1].ShardBlockHeaders())) + 1
 	if _, err := shard1.Deposits(cursorAt(1, invalidMinorIndex, 0), roots[3].Hash()); !errors.Is(err, ErrInconsistentClusterState) {
 		t.Errorf("cursor source index out of range: error %v, want %v", err, ErrInconsistentClusterState)
@@ -243,6 +248,49 @@ func TestXShardInboxErrors(t *testing.T) {
 	}
 	if _, err := shard1.Deposits(cursorAt(1, 1, 0), roots[3].Hash()); !errors.Is(err, ErrInconsistentClusterState) {
 		t.Errorf("deposits missing at the parent cursor: error %v, want %v", err, ErrInconsistentClusterState)
+	}
+}
+
+func TestXShardInboxRootReference(t *testing.T) {
+	roots, _, _, _, _, _, chain := testRootChain()
+	fork := newRoot(roots[0], 99)
+	forkChild := newRoot(fork, 100)
+	chain.roots[fork.Hash()], chain.roots[forkChild.Hash()] = fork, forkChild
+	inbox := NewXShardInbox(&params.QuarkChainConfig{ShardID: 1}, chain)
+	for _, tt := range []struct {
+		name       string
+		parentRoot common.Hash
+		root       common.Hash
+		want       error
+	}{
+		{"same root", roots[1].Hash(), roots[1].Hash(), nil},
+		{"descendant", roots[1].Hash(), roots[3].Hash(), nil},
+		{"fork after parent root", roots[0].Hash(), forkChild.Hash(), nil},
+		{"backward", roots[1].Hash(), roots[0].Hash(), ErrRootNotDescendant},
+		{"same height fork", roots[1].Hash(), fork.Hash(), ErrRootNotDescendant},
+		{"higher fork", roots[1].Hash(), forkChild.Hash(), ErrRootNotDescendant},
+		{"unknown root", roots[1].Hash(), common.Hash{0xff}, ErrUnknownCursorRoot},
+		{"unknown parent root", common.Hash{0xff}, roots[3].Hash(), ErrInconsistentClusterState},
+		{"empty non-genesis root", common.Hash{}, roots[3].Hash(), ErrInconsistentClusterState},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := &types.Header{
+				Number: big.NewInt(1),
+				Extra:  (&types.QKCExtra{PrevRootBlock: tt.parentRoot, Cursor: pos(1, 0, 0)}).Encode(),
+			}
+			if _, err := inbox.Deposits(parent, tt.root); !errors.Is(err, tt.want) {
+				t.Fatalf("deposits error %v, want %v", err, tt.want)
+			}
+		})
+	}
+	// Missing intermediate root data must not be mistaken for a different fork.
+	delete(chain.roots, roots[2].Hash())
+	parent := &types.Header{
+		Number: big.NewInt(1),
+		Extra:  (&types.QKCExtra{PrevRootBlock: roots[1].Hash(), Cursor: pos(4, 0, 0)}).Encode(),
+	}
+	if _, err := inbox.Deposits(parent, roots[3].Hash()); !errors.Is(err, ErrInconsistentClusterState) {
+		t.Fatalf("missing root ancestry: error %v, want %v", err, ErrInconsistentClusterState)
 	}
 }
 

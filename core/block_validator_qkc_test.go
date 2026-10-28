@@ -33,6 +33,69 @@ import (
 	"github.com/holiman/uint256"
 )
 
+func TestQKCBeaconFields(t *testing.T) {
+	config := *params.MergedTestChainConfig
+	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1}
+	config.CancunTime, config.PragueTime, config.OsakaTime = u64(20), u64(20), u64(20)
+	config.AmsterdamTime = u64(30)
+	gspec := &Genesis{
+		Config: &config, GasLimit: 30_000_000,
+		ExtraData: (&types.QKCExtra{}).Encode(),
+		Alloc:     withSystemContracts(PoSWStakingContractAllocs(1)),
+	}
+	engine := qkcTestEngine{beacon.New(ethash.NewFaker())}
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 3, func(_ int, b *BlockGen) {
+		b.SetExtra(gspec.ExtraData)
+	})
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	for _, block := range blocks {
+		header := block.Header()
+		if config.IsCancun(header.Number, header.Time) {
+			if header.ParentBeaconRoot == nil || *header.ParentBeaconRoot != (common.Hash{}) {
+				t.Fatal("chain maker did not reserve a zero beacon root")
+			}
+		}
+		if config.IsAmsterdam(header.Number, header.Time) && (header.SlotNumber == nil || *header.SlotNumber != 0) {
+			t.Fatal("chain maker did not reserve slot zero")
+		}
+		for _, tc := range []struct {
+			name string
+			edit func(*types.Header)
+			want error
+		}{
+			{"beacon root", func(h *types.Header) {
+				if h.ParentBeaconRoot == nil {
+					h.ParentBeaconRoot = new(common.Hash)
+				} else {
+					h.ParentBeaconRoot = nil
+				}
+			}, ErrQKCBeaconRoot},
+			{"beacon root", func(h *types.Header) { h.ParentBeaconRoot = &common.Hash{1} }, ErrQKCBeaconRoot},
+			{"slot number", func(h *types.Header) {
+				if h.SlotNumber == nil {
+					h.SlotNumber = new(uint64)
+				} else {
+					h.SlotNumber = nil
+				}
+			}, ErrQKCSlotNumber},
+			{"slot number", func(h *types.Header) { h.SlotNumber = u64(1) }, ErrQKCSlotNumber},
+		} {
+			invalid := block.Header()
+			tc.edit(invalid)
+			if _, err := chain.InsertChain([]*types.Block{block.WithSeal(invalid)}); !errors.Is(err, tc.want) {
+				t.Fatalf("block %d %s: import error %v, want %v", block.NumberU64(), tc.name, err, tc.want)
+			}
+		}
+		if _, err := chain.InsertChain([]*types.Block{block}); err != nil {
+			t.Fatalf("import generated block %d: %v", block.NumberU64(), err)
+		}
+	}
+}
+
 // qkcTestEngine is the beacon engine without header verification, which
 // rejects the QuarkChain extra data as too long.
 type qkcTestEngine struct {
@@ -91,6 +154,56 @@ func testCursor(walked int, ended bool) types.XShardCursor {
 		return types.XShardCursor{RootBlockHeight: 6}
 	}
 	return types.XShardCursor{RootBlockHeight: 5, MinorBlockIndex: 1, XShardDepositIndex: uint64(walked)}
+}
+
+// Move execution currently requires fixed gas. Synthetic receipts exercise the
+// inbox rules independently when declared and used gas differ.
+func TestValidateXShardDepositsGasAccounting(t *testing.T) {
+	config := *params.MergedTestChainConfig
+	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1, ShardIDs: []uint32{0, 1}}
+	alloc := SystemContractAllocs()
+	maps.Copy(alloc, PoSWStakingContractAllocs(1))
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), &Genesis{Config: &config, Alloc: alloc}, qkcTestEngine{beacon.New(ethash.NewFaker())}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	for _, tt := range []struct {
+		name     string
+		declared []uint64
+		included int
+		eof      bool
+		want     error
+	}{
+		{"account used gas", []uint64{40000, 40000, 30000}, 3, true, nil},
+		{"stop on declared gas", []uint64{9000, 41001}, 1, false, nil},
+		{"included declared gas exceeds budget", []uint64{9000, 41001}, 2, true, ErrXShardDepositMismatch},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			inbox := &testXShardInbox{}
+			for i, gas := range tt.declared {
+				inbox.deposits = append(inbox.deposits, &types.DepositTx{
+					Gas: gas, SourceLogIndex: uint64(i), Value: new(uint256.Int), GasPrice: new(uint256.Int), IsMove: true,
+				})
+			}
+			chain.SetXShardInbox(inbox)
+			var txs []*types.Transaction
+			var receipts types.Receipts
+			for _, deposit := range inbox.deposits[:tt.included] {
+				txs = append(txs, types.NewTx(deposit))
+				receipts = append(receipts, &types.Receipt{GasUsed: 9000})
+			}
+			extra := &types.QKCExtra{
+				Cursor: testCursor(tt.included, tt.eof), XShardGasLimit: 50000, XShardGasUsed: uint64(tt.included) * 9000,
+			}
+			block := types.NewBlockWithHeader(&types.Header{
+				ParentHash: chain.Genesis().Hash(), Number: big.NewInt(1), GasLimit: 100000, Extra: extra.Encode(),
+			}).WithBody(types.Body{Transactions: txs})
+			if err := NewBlockValidator(&config, chain).validateXShardDeposits(block, receipts); !errors.Is(err, tt.want) {
+				t.Fatalf("validation error %v, want %v", err, tt.want)
+			}
+		})
+	}
 }
 
 // TestValidateXShardDeposits imports blocks of a shard, with a gas limit of

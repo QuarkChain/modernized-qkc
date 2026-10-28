@@ -117,14 +117,21 @@ type ShardChain struct {
 	db    ethdb.KeyValueStore // Database of the root blocks seen by the shard
 	chain *core.BlockChain
 
+	// NewShardChain creates a shard chain on top of the given chain, reading the
+	// root blocks and incoming deposits from db. For a QuarkChain configuration,
+	// construction and validation share the inbox backed by this database.
 	rootTip *qkctypes.RootBlockHeader // Nil until Init succeeds; updated by root imports
-	mu      sync.Mutex                // Serializes initialization, imports and head updates
+	mu      sync.Mutex                // Serializes block imports and shard/root tip selection and updates
 }
 
 // NewShardChain creates a shard chain on top of the given chain, reading root
 // blocks from db. Call Init before importing blocks.
 func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
-	return &ShardChain{db: db, chain: chain}
+	c := &ShardChain{db: db, chain: chain}
+	if config := chain.Config().QuarkChain; config != nil {
+		chain.SetXShardInbox(NewXShardInbox(config, c))
+	}
+	return c
 }
 
 // Init sets the shard head and root tip from a root checkpoint.
