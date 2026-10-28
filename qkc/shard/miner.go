@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
@@ -32,10 +33,14 @@ import (
 // ErrShardMinerStopped is returned when controlling a miner after Stop.
 var ErrShardMinerStopped = errors.New("shard miner stopped")
 
+const miningRetryInterval = time.Second
+
 // ShardMiner schedules candidates, sealing and imports using the miner and engine
 // bound to ShardChain. The caller owns those dependencies and stops them after Stop.
 type ShardMiner struct {
-	chain *ShardChain
+	chain               *ShardChain
+	coinbase            common.Address
+	workRefreshInterval time.Duration
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -64,21 +69,23 @@ type miningBuildResult struct {
 	err   error
 }
 
-// NewShardMiner creates a paused miner. Call Start after shard initialization.
-func NewShardMiner(chain *ShardChain) (*ShardMiner, error) {
+// NewShardMiner creates a paused miner with an explicit coinbase and work refresh
+// interval, independent of the builder's transaction-filling budget.
+// Call Start after shard initialization.
+func NewShardMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval time.Duration) (*ShardMiner, error) {
 	if chain == nil || chain.builder == nil {
 		return nil, errors.New("shard chain and builder must be configured")
 	}
 	if chain.chain.Config().QuarkChain == nil {
 		return nil, errNotQuarkChain
 	}
-	if chain.builder.RecommitInterval() <= 0 {
-		return nil, errors.New("mining recommit interval must be positive")
+	if workRefreshInterval <= 0 {
+		return nil, errors.New("mining work refresh interval must be positive")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &ShardMiner{
-		chain: chain,
-		ctx:   ctx, cancel: cancel, commands: make(chan miningCommand),
+		chain: chain, coinbase: coinbase, workRefreshInterval: workRefreshInterval,
+		ctx: ctx, cancel: cancel, commands: make(chan miningCommand),
 		tips: make(chan struct{}, 1), done: make(chan struct{}),
 	}
 	heads := make(chan core.ChainHeadEvent, 1)
@@ -173,7 +180,7 @@ func (m *ShardMiner) loop() {
 		m.wg.Wait()
 		close(m.done)
 	}()
-	retry := func(delay time.Duration) {
+	schedule := func(delay time.Duration) {
 		timer.Reset(delay)
 		tick = timer.C
 	}
@@ -188,20 +195,20 @@ func (m *ShardMiner) loop() {
 		parent, root := m.chain.chain.CurrentBlock(), m.chain.rootTip
 		m.chain.mu.Unlock()
 		if root == nil {
-			retry(m.chain.builder.RecommitInterval())
+			schedule(miningRetryInterval)
 			return
 		}
 		now := time.Now()
 		if parent.Time >= uint64(now.Unix()) {
 			// Low-difficulty sealing must not run the timestamp ahead of the clock.
-			retry(time.Until(time.Unix(int64(parent.Time)+1, 0)))
+			schedule(time.Until(time.Unix(int64(parent.Time)+1, 0)))
 			return
 		}
 		ctx, cancel := context.WithCancel(m.ctx)
 		task = &miningTask{
 			args: miner.QKCBlockArgs{
 				Parent: parent.Hash(), PrevRootBlock: root.Hash(),
-				Timestamp: uint64(now.Unix()), FeeRecipient: m.chain.builder.PendingFeeRecipient(),
+				Timestamp: uint64(now.Unix()), FeeRecipient: m.coinbase,
 			},
 			cancel: cancel, stop: ctx.Done(), results: make(chan *types.Block, 1),
 		}
@@ -240,7 +247,7 @@ func (m *ShardMiner) loop() {
 			if result.err != nil {
 				log.Warn("Failed to build shard candidate", "err", result.err)
 				cancelTask()
-				retry(m.chain.builder.RecommitInterval())
+				schedule(miningRetryInterval)
 				continue
 			}
 			if !m.matchesTips(task.args) {
@@ -251,22 +258,22 @@ func (m *ShardMiner) loop() {
 			if err := engine.Seal(m.chain.chain, task.block, task.results, task.stop); err != nil {
 				log.Warn("Failed to seal shard candidate", "err", err)
 				cancelTask()
-				retry(m.chain.builder.RecommitInterval())
+				schedule(miningRetryInterval)
 				continue
 			}
 			results = task.results
 			// Construction has its own transaction-filling time budget. Start the
 			// sealing interval now so slow builds still get a chance to publish work.
-			retry(m.chain.builder.RecommitInterval())
+			schedule(m.workRefreshInterval)
 		case block := <-results:
 			current := task
 			cancelTask()
 			if block == nil || engine.SealHash(block.Header()) != engine.SealHash(current.block.Header()) {
 				log.Warn("Discarding unrelated shard sealing result")
-				retry(m.chain.builder.RecommitInterval())
+				schedule(miningRetryInterval)
 			} else if err := m.importResult(current.args, block); err != nil {
 				log.Warn("Failed to import mined shard block", "number", block.NumberU64(), "err", err)
-				retry(m.chain.builder.RecommitInterval())
+				schedule(miningRetryInterval)
 			} else {
 				start()
 			}

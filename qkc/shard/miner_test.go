@@ -37,6 +37,11 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+const (
+	testBlockBuildBudget    = 2 * time.Second
+	testWorkRefreshInterval = 3 * time.Second
+)
+
 type controlledMiningWork struct {
 	chain   consensus.ChainHeaderReader
 	block   *types.Block
@@ -131,13 +136,14 @@ func newShardMiningEnv(t *testing.T, engine *controlledMiningEngine) (*testEnv, 
 	}
 	t.Cleanup(func() { pool.Close() })
 	config := miner.DefaultConfig
-	config.PendingFeeRecipient = common.Address{0x42}
+	config.Recommit = testBlockBuildBudget
+	config.PendingFeeRecipient = common.Address{0x99}
 	builder := miner.New(miningBackend{env.chain, pool}, config, engine)
 	env.sc = NewShardChain(env.db, env.chain, builder)
 	if err := env.sc.Init(env.rootGenesis); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewShardMiner(env.sc)
+	m, err := NewShardMiner(env.sc, common.Address{0x42}, testWorkRefreshInterval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +222,7 @@ func TestShardMinerLifecycle(t *testing.T) {
 		checkMiningCancelled(t, second)
 		late := second.sealed(2)
 		second.results <- late
-		time.Sleep(2 * m.chain.builder.RecommitInterval())
+		time.Sleep(2 * testWorkRefreshInterval)
 		checkNoMiningWork(t, engine)
 		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
 			t.Fatal("paused miner imported a late result")
@@ -244,7 +250,7 @@ func TestShardMinerLifecycle(t *testing.T) {
 	})
 }
 
-func TestShardMinerRecommit(t *testing.T) {
+func TestShardMinerWorkRefresh(t *testing.T) {
 	testShardMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
 		env, m, pool := newShardMiningEnv(t, engine)
@@ -263,33 +269,39 @@ func TestShardMinerRecommit(t *testing.T) {
 		if err := env.sc.builder.SetGasTip(big.NewInt(2 * params.GWei)); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(m.chain.builder.RecommitInterval())
+		time.Sleep(testBlockBuildBudget)
+		checkNoMiningWork(t, engine)
+		time.Sleep(testWorkRefreshInterval - testBlockBuildBudget)
+		refreshAt := time.Now()
 		second := nextMiningWork(t, engine)
+		if !time.Now().Equal(refreshAt) {
+			t.Fatal("work was not rebuilt at the configured refresh interval")
+		}
 		if second.block.GasLimit() != core.CalcGasLimit(env.genesis.GasLimit(), gasCeil) || len(second.block.Transactions()) != 1 {
-			t.Fatal("recommit did not use the bound miner's updated gas ceiling and tip filter")
+			t.Fatal("work refresh did not use the bound miner's updated gas ceiling and tip filter")
 		}
 		checkMiningCancelled(t, first)
 		if err := env.sc.builder.SetGasTip(big.NewInt(params.GWei)); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(m.chain.builder.RecommitInterval())
+		time.Sleep(testWorkRefreshInterval)
 		third := nextMiningWork(t, engine)
 		if txs := third.block.Transactions(); len(txs) != 2 || txs[1].Hash() != tx.Hash() {
-			t.Fatal("recommit did not incorporate the pool transaction after restoring the miner tip")
+			t.Fatal("work refresh did not incorporate the pool transaction after restoring the miner tip")
 		}
 		checkMiningCancelled(t, second)
 		late := first.sealed(1)
 		first.results <- late
 		synctest.Wait()
 		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
-			t.Fatal("recommitted miner imported obsolete work")
+			t.Fatal("work refresh allowed obsolete work to be imported")
 		}
 		sealed := third.sealed(2)
 		third.results <- sealed
 		next := nextMiningWork(t, engine)
 		env.checkHead(sealed)
 		if next.block.ParentHash() != sealed.Hash() {
-			t.Fatal("recommitted result did not become the mining parent")
+			t.Fatal("refreshed result did not become the mining parent")
 		}
 	})
 }
@@ -366,7 +378,7 @@ func TestShardMinerCancelBuild(t *testing.T) {
 			t.Fatal(err)
 		}
 		m.Resume()
-		time.Sleep(2 * m.chain.builder.RecommitInterval())
+		time.Sleep(2 * testWorkRefreshInterval)
 		checkNoMiningWork(t, engine)
 		if calls.Load() != 1 {
 			t.Fatal("started overlapping builds while cancelled preparation was pending")
@@ -394,13 +406,13 @@ func TestShardMinerSlowBuild(t *testing.T) {
 		_, m, _ := newShardMiningEnv(t, engine)
 		m.Start()
 		<-entered
-		time.Sleep(2 * m.chain.builder.RecommitInterval())
+		time.Sleep(2 * testWorkRefreshInterval)
 		close(release)
 		work := nextMiningWork(t, engine)
 		if calls.Load() != 1 {
-			t.Fatal("recommit discarded slow construction before it could publish work")
+			t.Fatal("work refresh discarded slow construction before it could publish work")
 		}
-		time.Sleep(m.chain.builder.RecommitInterval())
+		time.Sleep(testWorkRefreshInterval)
 		nextMiningWork(t, engine)
 		checkMiningCancelled(t, work)
 	})
@@ -411,9 +423,11 @@ func TestShardMinerFailureRecovery(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			testShardMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
+				failed := make(chan struct{})
 				var calls atomic.Int32
 				failOnce := func() error {
 					if calls.Add(1) == 1 {
+						close(failed)
 						return errors.New("injected mining failure")
 					}
 					return nil
@@ -428,19 +442,30 @@ func TestShardMinerFailureRecovery(t *testing.T) {
 				}
 				env, m, _ := newShardMiningEnv(t, engine)
 				m.Start()
+				if failure == "build" || failure == "seal" {
+					<-failed
+				} else {
+					work := nextMiningWork(t, engine)
+					switch failure {
+					case "import":
+						work.results <- work.sealed(1)
+						<-failed
+					case "unrelated":
+						header := work.block.Header()
+						header.Coinbase = common.Address{0x99}
+						work.results <- work.block.WithSeal(header)
+					case "nil":
+						work.results <- nil
+					}
+				}
+				synctest.Wait()
+				retryAt := time.Now().Add(miningRetryInterval)
+				time.Sleep(miningRetryInterval - time.Nanosecond)
+				checkNoMiningWork(t, engine)
+				time.Sleep(time.Nanosecond)
 				work := nextMiningWork(t, engine)
-				switch failure {
-				case "import":
-					work.results <- work.sealed(1)
-					work = nextMiningWork(t, engine)
-				case "unrelated":
-					header := work.block.Header()
-					header.Coinbase = common.Address{0x99}
-					work.results <- work.block.WithSeal(header)
-					work = nextMiningWork(t, engine)
-				case "nil":
-					work.results <- nil
-					work = nextMiningWork(t, engine)
+				if !time.Now().Equal(retryAt) {
+					t.Fatal("failure retry did not use its own interval")
 				}
 				env.checkHead(env.genesis)
 				sealed := work.sealed(2)
@@ -540,7 +565,7 @@ func TestShardMinerInitialization(t *testing.T) {
 		env.sc.rootTip = nil
 		env.sc.mu.Unlock()
 		m.Start()
-		time.Sleep(2 * m.chain.builder.RecommitInterval())
+		time.Sleep(2 * miningRetryInterval)
 		checkNoMiningWork(t, engine)
 		if err := env.sc.Init(env.rootGenesis); err != nil {
 			t.Fatal(err)

@@ -22,6 +22,7 @@ import (
 	"maps"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -287,8 +288,14 @@ func TestBuildShardBlockInputs(t *testing.T) {
 	if _, err := withoutMiner.BuildBlock(context.Background(), args); err == nil {
 		t.Fatal("accepted missing miner")
 	}
-	if _, err := NewShardMiner(withoutMiner); err == nil {
+	if _, err := NewShardMiner(withoutMiner, common.Address{}, time.Second); err == nil {
 		t.Fatal("started scheduler for an import-only shard")
+	}
+	for _, interval := range []time.Duration{0, -time.Second} {
+		if m, err := NewShardMiner(env.sc, common.Address{}, interval); err == nil {
+			m.Stop()
+			t.Fatalf("accepted non-positive work refresh interval %s", interval)
+		}
 	}
 	withoutPool := miner.New(miningBackend{chain: env.chain}, miner.DefaultConfig, env.engine)
 	withoutPoolChain := NewShardChain(env.db, env.chain, withoutPool)
