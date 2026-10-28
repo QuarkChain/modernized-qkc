@@ -134,7 +134,8 @@ type BaseConn struct {
 	peerRPCID uint64
 
 	// -- Frame send serialization (writeMu) --
-	writeMu sync.Mutex
+	writeMu     sync.Mutex
+	writeFailed bool // protected by writeMu; prevents writes before shutdown completes
 
 	// -- Synchronization primitives --
 	shutdownOnce sync.Once
@@ -248,12 +249,23 @@ func (c *BaseConn) SendRPCWithPeerID(
 		c.writeMu.Unlock()
 		return nil, err
 	}
+	if c.writeFailed {
+		c.writeMu.Unlock()
+		return nil, ErrConnectionClosed
+	}
 
 	c.mu.Lock()
 	if err := c.checkActiveLocked(); err != nil {
 		c.mu.Unlock()
 		c.writeMu.Unlock()
 		return nil, err
+	}
+	ser, ok := c.serializers[opcode]
+	_, nonRPC := c.nonRPCOps[opcode]
+	if !ok || nonRPC || ser.ResponseOpCode == opcode {
+		c.mu.Unlock()
+		c.writeMu.Unlock()
+		return nil, fmt.Errorf("unknown rpc request opcode 0x%x", opcode)
 	}
 
 	c.nextRPCID++
@@ -278,9 +290,7 @@ func (c *BaseConn) SendRPCWithPeerID(
 	c.writeMu.Unlock()
 
 	if err != nil {
-		// The transport is unusable: trigger shutdown (sync.Once,
-		// non-blocking). Shutdown completes this RPC with ErrConnectionClosed
-		// alongside every other pending RPC.
+		// A failed write may have left a partial frame on the stream.
 		c.shutdown(fmt.Errorf("write frame rpc=%d: %w", rpcID, err))
 	}
 
@@ -382,18 +392,14 @@ func rpcTimeoutError(err error) error {
 
 // -- Write path ---------------------------------------------------------------
 //
-// writeFrame serializes transport writes with writeMu. Write failures trigger
-// shutdown only after writeMu is released: shutdown never acquires writeMu
-// and does not wait for an in-flight write. Releasing writeMu first ensures
-// senders queued behind it can proceed and observe the Closed state once
-// shutdown marks the connection closed.
-
-// writeFrame writes a pre-built frame. It holds writeMu while checking the
-// connection state and performing the transport write. Transport panics are
-// converted to errors by writeFrameLocked, so writeMu is always released
-// before any shutdown is triggered.
+// writeFrame writes a pre-built frame. Failures are recorded before releasing
+// writeMu so queued writers cannot use a damaged stream before shutdown.
 func (c *BaseConn) writeFrame(f *wire.ClusterFrame) error {
 	c.writeMu.Lock()
+	if c.writeFailed {
+		c.writeMu.Unlock()
+		return ErrConnectionClosed
+	}
 
 	c.mu.RLock()
 	if err := c.checkActiveLocked(); err != nil {
@@ -412,14 +418,15 @@ func (c *BaseConn) writeFrame(f *wire.ClusterFrame) error {
 	return err
 }
 
-// writeFrameLocked writes f assuming writeMu is already held by the caller.
-// It converts a panic from the transport into an error so the caller can
-// release writeMu and trigger connection shutdown. This function does not
-// acquire or release writeMu and must not be called without holding it.
+// writeFrameLocked requires writeMu. A failed or panicked write may have sent
+// part of a frame, so no further writes are allowed on this stream.
 func (c *BaseConn) writeFrameLocked(f *wire.ClusterFrame) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("transport write panic: %v", r)
+		}
+		if err != nil {
+			c.writeFailed = true
 		}
 	}()
 	return c.transport.WriteFrame(f)
@@ -487,6 +494,10 @@ func (c *BaseConn) handleResponse(frame *wire.ClusterFrame, ser *OpSerializer) {
 	if ser == nil {
 		c.log.Warn("unknown response opcode", "opcode", frame.Opcode)
 		c.shutdown(fmt.Errorf("unknown response opcode 0x%x", frame.Opcode))
+		return
+	}
+	if ser.NewResponse == nil {
+		c.shutdown(fmt.Errorf("response opcode 0x%x has no response factory", frame.Opcode))
 		return
 	}
 	resp := ser.NewResponse()

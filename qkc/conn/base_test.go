@@ -181,7 +181,7 @@ func validPingPayload(t *testing.T) []byte {
 }
 
 func newConn(tr FrameTransport) *BaseConn {
-	return NewBaseConn(Config{Transport: tr, Logger: log.New()})
+	return NewBaseConn(Config{Transport: tr, Serializers: pingSerializers, Logger: log.New()})
 }
 
 func newPingConn(tr FrameTransport) *BaseConn {
@@ -721,6 +721,26 @@ func TestBaseConn_WriteFailureReleasesWriteMuAndShutsDown(t *testing.T) {
 	}
 }
 
+func TestBaseConn_WriteFailureBlocksWritesBeforeShutdown(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writeErr = errors.New("write failed")
+	conn := newConn(tr)
+	conn.Start()
+	defer conn.Close()
+
+	// Reproduce the interval after a writer releases writeMu but before it
+	// calls shutdown. Another sender must not write to the damaged stream.
+	conn.writeMu.Lock()
+	err := conn.writeFrameLocked(&wire.ClusterFrame{})
+	conn.writeMu.Unlock()
+	if err == nil {
+		t.Fatal("expected transport write error")
+	}
+	if err := conn.SendCommand(byte(wire.ClusterOpPing), nil); err != ErrConnectionClosed {
+		t.Fatalf("SendCommand before shutdown = %v, want ErrConnectionClosed", err)
+	}
+}
+
 // TestBaseConn_WriteFramePanicReleasesWriteMu: a panic from the transport's
 // WriteFrame is caught by writeFrameLocked (SendRPCWithPeerID/writeFrame release
 // writeMu via the returned error, not a defer). If writeMu were leaked, senders
@@ -1241,6 +1261,32 @@ func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 	}
 	if pending := conn.pendingLen(); pending != 0 {
 		t.Fatalf("pending RPC remains after response delivery: %d", pending)
+	}
+}
+
+func TestBaseConn_SendRPCRejectsNonRequestOpcodes(t *testing.T) {
+	tr := newFakeFrameTransport()
+	const commandOp = byte(0x42)
+	conn := NewBaseConn(Config{
+		Transport: tr,
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing): pingSer,
+			commandOp:                NonRPCSerializerFor[wire.PingRequest](),
+		},
+		NonRPCOps: map[byte]struct{}{commandOp: {}},
+	})
+	conn.Start()
+	defer conn.Close()
+
+	for _, opcode := range []byte{0xff, byte(wire.ClusterOpPong), commandOp} {
+		if _, err := conn.SendRPC(context.Background(), opcode, nil); err == nil {
+			t.Fatalf("SendRPC accepted opcode 0x%x", opcode)
+		}
+	}
+	select {
+	case frame := <-tr.writes:
+		t.Fatalf("unexpected frame: %+v", frame)
+	default:
 	}
 }
 
