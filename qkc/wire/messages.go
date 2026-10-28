@@ -103,13 +103,8 @@ type HelloCommand struct {
 	GenesisRootBlockHash common.Hash
 }
 
-// ArtificialTxConfig carries the current mining target intervals from Master.
-type ArtificialTxConfig struct {
-	TargetRootBlockTime  uint32
-	TargetMinorBlockTime uint32
-}
-
-// ShardStats reports shard status to Master; Difficulty is QKCDifficulty().
+// ShardStats is the SSZ wire representation of shard status. Difficulty is
+// QKCDifficulty encoded as a little-endian uint256.
 type ShardStats struct {
 	ChainID            uint32 // QuarkChainConfig.ShardID, not the Ethereum signing chain ID.
 	Height             uint64
@@ -134,10 +129,8 @@ type AddMinorBlockHeaderRequest struct {
 	ShardStats       ShardStats
 }
 
-// AddMinorBlockHeaderResponse returns the current mining target intervals.
 type AddMinorBlockHeaderResponse struct {
-	ErrorCode          uint32
-	ArtificialTxConfig ArtificialTxConfig
+	ErrorCode uint32
 }
 
 // AddXshardTxListRequest delivers one source block's deposits to a destination

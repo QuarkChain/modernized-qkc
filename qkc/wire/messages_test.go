@@ -395,7 +395,6 @@ func TestGeneratedCodecsRejectMalformedPayloads(t *testing.T) {
 		{"AddRootBlockRequest", 0, func() SSZMessage { return new(AddRootBlockRequest) }},
 		{"AddRootBlockResponse", -1, func() SSZMessage { return new(AddRootBlockResponse) }},
 		{"HelloCommand", 58, func() SSZMessage { return new(HelloCommand) }},
-		{"ArtificialTxConfig", -1, func() SSZMessage { return new(ArtificialTxConfig) }},
 		{"ShardStats", -1, func() SSZMessage { return new(ShardStats) }},
 		{"AddMinorBlockHeaderRequest", 0, func() SSZMessage { return new(AddMinorBlockHeaderRequest) }},
 		{"AddMinorBlockHeaderResponse", -1, func() SSZMessage { return new(AddMinorBlockHeaderResponse) }},
