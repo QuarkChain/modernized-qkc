@@ -73,7 +73,7 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	config := *params.MergedTestChainConfig
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 0, ShardIDs: []uint32{0, 1}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(0, 0, 1)
 	env := &testEnv{
 		t:      t,
 		engine: noVerifyEngine{beacon.New(ethash.NewFaker())},

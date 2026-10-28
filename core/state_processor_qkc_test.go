@@ -120,7 +120,7 @@ func TestDepositAfterTransaction(t *testing.T) {
 		sender = crypto.PubkeyToAddress(key.PublicKey)
 		to     = common.HexToAddress("0xe0a")
 	)
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1, ShardIDs: []uint32{0, 1}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(1, 0, 1)
 	gspec := &Genesis{
 		Config: &config,
 		Alloc:  withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),

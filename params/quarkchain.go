@@ -51,12 +51,22 @@ type QuarkChainConfig struct {
 	ShardID  uint32   `json:"shardId"`  // ID of this shard
 	ShardIDs []uint32 `json:"shardIds"` // IDs of all shards in the network, this one included
 
+	PoSW *PoSWConfig `json:"posw"` // Required consensus configuration for this shard.
 	// MaxBlocksPerRootBlock caps the number of blocks of this shard a root
 	// block can confirm, as max_blocks_per_shard_in_one_root_block in
 	// pyquarkchain. Zero means no cap.
 	MaxBlocksPerRootBlock uint64 `json:"maxBlocksPerRootBlock,omitempty"`
+}
 
-	PoSW *PoSWConfig `json:"posw,omitempty"` // PoSW configuration for this shard
+// Equal compares all shard configuration fields by value. Two nil configs are equal.
+func (c *QuarkChainConfig) Equal(other *QuarkChainConfig) bool {
+	if c == nil || other == nil {
+		return c == other
+	}
+	return c.ShardID == other.ShardID &&
+		slices.Equal(c.ShardIDs, other.ShardIDs) &&
+		c.PoSW.Equal(other.PoSW) &&
+		c.MaxBlocksPerRootBlock == other.MaxBlocksPerRootBlock
 }
 
 // String implements the stringer interface.
