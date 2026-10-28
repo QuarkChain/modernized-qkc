@@ -47,6 +47,7 @@ var ErrPoWMinerStopped = errors.New("pow miner stopped")
 // bound to ShardChain. The caller owns those dependencies and stops them after Stop.
 type PoWMiner struct {
 	chain               *ShardChain
+	coinbase            common.Address
 	workRefreshInterval time.Duration
 
 	ctx      context.Context
@@ -58,9 +59,8 @@ type PoWMiner struct {
 }
 
 type miningCommand struct {
-	running   bool
-	coinbases []common.Address // Non-nil replaces the address set, including an empty set
-	done      chan struct{}
+	running bool
+	done    chan struct{}
 }
 
 type miningTask struct {
@@ -69,7 +69,6 @@ type miningTask struct {
 	stop    <-chan struct{}
 	block   *types.Block
 	results chan *types.Block
-	next    time.Time // Next build attempt, or refresh deadline for published work
 }
 
 type miningBuildResult struct {
@@ -78,16 +77,9 @@ type miningBuildResult struct {
 	err   error
 }
 
-type miningSealResult struct {
-	task  *miningTask
-	block *types.Block
-}
-
-// NewPoWMiner creates a paused miner initially scheduling work for coinbase.
-// SetCoinbases changes the addresses to mine for. Each address has its own work
-// refresh interval, independent of the builder's transaction-filling budget.
-// Call Start after shard initialization. The engine must support simultaneous
-// sealing tasks when multiple coinbases are configured.
+// NewPoWMiner creates a paused miner with an explicit coinbase and work refresh
+// interval, independent of the builder's transaction-filling budget.
+// Call Start after shard initialization.
 func NewPoWMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval time.Duration) (*PoWMiner, error) {
 	if chain == nil || chain.builder == nil {
 		return nil, errors.New("shard chain and builder must be configured")
@@ -100,7 +92,7 @@ func NewPoWMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &PoWMiner{
-		chain: chain, workRefreshInterval: workRefreshInterval,
+		chain: chain, coinbase: coinbase, workRefreshInterval: workRefreshInterval,
 		ctx: ctx, cancel: cancel, commands: make(chan miningCommand),
 		tips: make(chan struct{}, 1), done: make(chan struct{}),
 	}
@@ -110,7 +102,7 @@ func NewPoWMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval
 	rootSub := chain.rootTipFeed.Subscribe(roots)
 	m.wg.Add(1)
 	go m.watchTips(heads, roots, headSub, rootSub)
-	go m.loop(coinbase)
+	go m.loop()
 	return m, nil
 }
 
@@ -124,13 +116,6 @@ func (m *PoWMiner) Resume() error { return m.Start() }
 // Synchronization callers pause before syncing and resume after completion.
 func (m *PoWMiner) Pause() error { return m.setRunning(false) }
 
-// SetCoinbases replaces the addresses to mine for, preserving work for retained
-// addresses and cancelling removed addresses. Duplicates are ignored; an empty
-// list cancels all work. New addresses start building when the miner is running.
-func (m *PoWMiner) SetCoinbases(coinbases []common.Address) error {
-	return m.command(miningCommand{coinbases: append([]common.Address{}, coinbases...)})
-}
-
 // Stop permanently stops mining and waits for imports and construction to end.
 // It is safe to call concurrently or more than once.
 func (m *PoWMiner) Stop() error {
@@ -140,11 +125,7 @@ func (m *PoWMiner) Stop() error {
 }
 
 func (m *PoWMiner) setRunning(running bool) error {
-	return m.command(miningCommand{running: running})
-}
-
-func (m *PoWMiner) command(cmd miningCommand) error {
-	cmd.done = make(chan struct{})
+	cmd := miningCommand{running: running, done: make(chan struct{})}
 	select {
 	case m.commands <- cmd:
 	case <-m.ctx.Done():
@@ -182,92 +163,70 @@ func (m *PoWMiner) watchTips(heads <-chan core.ChainHeadEvent, roots <-chan stru
 	}
 }
 
-func (m *PoWMiner) loop(coinbase common.Address) {
+func (m *PoWMiner) loop() {
 	var (
 		running  bool
-		building *miningTask
+		building bool
+		task     *miningTask
+		results  <-chan *types.Block
 		tick     <-chan time.Time
-		tasks    = make(map[common.Address]*miningTask)
 		built    = make(chan miningBuildResult, 1)
-		sealed   = make(chan miningSealResult)
 		timer    = time.NewTimer(miningTimerInitialDelay)
 	)
 	timer.Stop()
-	reset := func(coinbase common.Address, delay time.Duration) {
-		if task := tasks[coinbase]; task != nil && task.cancel != nil {
+	cancelTask := func() {
+		if task != nil {
 			task.cancel()
+			task = nil
 		}
-		tasks[coinbase] = &miningTask{
-			args: miner.QKCBlockArgs{FeeRecipient: coinbase}, next: time.Now().Add(delay),
-		}
+		results = nil
 	}
-	resetAll := func() {
-		for coinbase := range tasks {
-			reset(coinbase, 0)
-		}
-	}
-	reset(coinbase, 0)
 	defer func() {
 		m.cancel()
-		resetAll()
+		cancelTask()
 		timer.Stop()
 		m.wg.Wait()
 		close(m.done)
 	}()
-	schedule := func() {
+	schedule := func(delay time.Duration) {
+		timer.Reset(delay)
+		tick = timer.C
+	}
+	start := func() {
+		cancelTask()
 		timer.Stop()
 		tick = nil
-		if !running || m.ctx.Err() != nil {
+		if !running || building || m.ctx.Err() != nil {
+			return
+		}
+		m.chain.mu.Lock()
+		parent, root := m.chain.chain.CurrentBlock(), m.chain.rootTip
+		m.chain.mu.Unlock()
+		if root == nil {
+			schedule(miningRetryInterval)
 			return
 		}
 		now := time.Now()
-		var ready *miningTask
-		for coinbase, task := range tasks {
-			if task.block != nil && !task.next.After(now) {
-				reset(coinbase, 0)
-				task = tasks[coinbase]
-			}
-			if task.cancel == nil && !task.next.After(now) && (ready == nil || task.next.Before(ready.next)) {
-				ready = task
-			}
+		if parent.Time >= uint64(now.Unix()) {
+			// Low-difficulty sealing must not run the timestamp ahead of the clock.
+			schedule(time.Until(time.Unix(int64(parent.Time)+1, 0)))
+			return
 		}
-		if ready != nil && building == nil {
-			m.chain.mu.Lock()
-			parent, root := m.chain.chain.CurrentBlock(), m.chain.rootTip
-			m.chain.mu.Unlock()
-			switch {
-			case root == nil:
-				ready.next = now.Add(miningRetryInterval)
-			case parent.Time >= uint64(now.Unix()):
-				// Low-difficulty sealing must not run the timestamp ahead of the clock.
-				ready.next = time.Unix(int64(parent.Time)+1, 0)
-			default:
-				ctx, cancel := context.WithCancel(m.ctx)
-				ready.args.Parent, ready.args.PrevRootBlock = parent.Hash(), root.Hash()
-				ready.args.Timestamp = uint64(now.Unix())
-				ready.cancel, ready.stop, ready.results = cancel, ctx.Done(), make(chan *types.Block, 1)
-				building = ready
-				m.wg.Add(1)
-				go func(task *miningTask) {
-					defer m.wg.Done()
-					block, err := m.chain.BuildBlock(ctx, task.args)
-					built <- miningBuildResult{task, block, err}
-				}(ready)
-			}
+		ctx, cancel := context.WithCancel(m.ctx)
+		task = &miningTask{
+			args: miner.QKCBlockArgs{
+				Parent: parent.Hash(), PrevRootBlock: root.Hash(),
+				Timestamp: uint64(now.Unix()), FeeRecipient: m.coinbase,
+			},
+			cancel: cancel, stop: ctx.Done(), results: make(chan *types.Block, 1),
 		}
-		var next time.Time
-		for _, task := range tasks {
-			if task == building || (building != nil && task.cancel == nil && !task.next.After(now)) {
-				continue
-			}
-			if next.IsZero() || task.next.Before(next) {
-				next = task.next
-			}
-		}
-		if !next.IsZero() {
-			timer.Reset(time.Until(next))
-			tick = timer.C
-		}
+		building = true
+		m.wg.Add(1)
+		go func(task *miningTask) {
+			defer m.wg.Done()
+			block, err := m.chain.BuildBlock(ctx, task.args)
+			built <- miningBuildResult{task, block, err}
+		}(task)
 	}
 	engine := m.chain.chain.Engine()
 	for {
@@ -276,94 +235,56 @@ func (m *PoWMiner) loop(coinbase common.Address) {
 		}
 		select {
 		case cmd := <-m.commands:
-			if cmd.coinbases != nil {
-				keep := make(map[common.Address]bool, len(cmd.coinbases))
-				for _, coinbase := range cmd.coinbases {
-					keep[coinbase] = true
-					if tasks[coinbase] == nil {
-						reset(coinbase, 0)
-					}
-				}
-				for coinbase, task := range tasks {
-					if !keep[coinbase] {
-						if task.cancel != nil {
-							task.cancel()
-						}
-						delete(tasks, coinbase)
-					}
-				}
-			} else if running != cmd.running {
+			if running != cmd.running {
 				running = cmd.running
-				resetAll()
+				start()
 			}
-			schedule()
 			close(cmd.done)
 		case <-m.tips:
-			for coinbase, task := range tasks {
-				if !m.matchesTips(task.args) {
-					reset(coinbase, 0)
-				}
+			if task == nil || !m.matchesTips(task.args) {
+				start()
 			}
-			schedule()
 		case <-tick:
-			schedule()
+			start()
 		case result := <-built:
-			building = nil
-			task := result.task
-			coinbase := task.args.FeeRecipient
-			if tasks[coinbase] != task {
-				schedule()
+			building = false
+			if result.task != task {
+				start()
 				continue
 			}
 			if result.err != nil {
-				log.Warn("Failed to build shard candidate", "coinbase", coinbase, "err", result.err)
-				reset(coinbase, miningRetryInterval)
-				schedule()
+				log.Warn("Failed to build shard candidate", "err", result.err)
+				cancelTask()
+				schedule(miningRetryInterval)
 				continue
 			}
 			if !m.matchesTips(task.args) {
-				reset(coinbase, 0)
-				schedule()
+				start()
 				continue
 			}
 			task.block = result.block
 			if err := engine.Seal(m.chain.chain, task.block, task.results, task.stop); err != nil {
-				log.Warn("Failed to seal shard candidate", "coinbase", coinbase, "err", err)
-				reset(coinbase, miningRetryInterval)
-				schedule()
+				log.Warn("Failed to seal shard candidate", "err", err)
+				cancelTask()
+				schedule(miningRetryInterval)
 				continue
 			}
-			m.wg.Add(1)
-			go func() {
-				defer m.wg.Done()
-				select {
-				case block := <-task.results:
-					select {
-					case sealed <- miningSealResult{task, block}:
-					case <-task.stop:
-					}
-				case <-task.stop:
-				}
-			}()
+			results = task.results
 			// Construction has its own transaction-filling time budget. Start the
 			// sealing interval now so slow builds still get a chance to publish work.
-			task.next = time.Now().Add(m.workRefreshInterval)
-			schedule()
-		case result := <-sealed:
-			task, block := result.task, result.block
-			coinbase := task.args.FeeRecipient
-			if tasks[coinbase] != task {
-				continue
-			}
-			reset(coinbase, miningRetryInterval)
-			if block == nil || block.Coinbase() != coinbase || engine.SealHash(block.Header()) != engine.SealHash(task.block.Header()) {
+			schedule(m.workRefreshInterval)
+		case block := <-results:
+			current := task
+			cancelTask()
+			if block == nil || engine.SealHash(block.Header()) != engine.SealHash(current.block.Header()) {
 				log.Warn("Discarding unrelated shard sealing result")
-			} else if err := m.importResult(task.args, block); err != nil {
+				schedule(miningRetryInterval)
+			} else if err := m.importResult(current.args, block); err != nil {
 				log.Warn("Failed to import mined shard block", "number", block.NumberU64(), "err", err)
+				schedule(miningRetryInterval)
 			} else {
-				resetAll()
+				start()
 			}
-			schedule()
 		case <-m.ctx.Done():
 			return
 		}
