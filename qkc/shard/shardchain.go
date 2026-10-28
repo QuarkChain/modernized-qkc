@@ -27,7 +27,9 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -114,20 +116,20 @@ var (
 // canonical hash mappings. Callers must not independently change the head or
 // import canonical headers through core.BlockChain.
 type ShardChain struct {
-	db    ethdb.KeyValueStore // Database of the root blocks seen by the shard
-	chain *core.BlockChain
+	db      ethdb.KeyValueStore // Database of the root blocks seen by the shard
+	chain   *core.BlockChain
+	builder *miner.Miner // The node's shared miner; nil for an import-only shard
 
-	// NewShardChain creates a shard chain on top of the given chain, reading the
-	// root blocks and incoming deposits from db. For a QuarkChain configuration,
-	// construction and validation share the inbox backed by this database.
-	rootTip *qkctypes.RootBlockHeader // Nil until Init succeeds; updated by root imports
-	mu      sync.Mutex                // Serializes block imports and shard/root tip selection and updates
+	rootTip     *qkctypes.RootBlockHeader // Nil until Init succeeds; updated by root imports
+	mu          sync.Mutex                // Serializes block imports and shard/root tip selection and updates
+	rootTipFeed event.Feed                // Notifies miners even when the shard head does not change
 }
 
-// NewShardChain creates a shard chain on top of the given chain, reading root
-// blocks from db. Call Init before importing blocks.
-func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain) *ShardChain {
-	c := &ShardChain{db: db, chain: chain}
+// NewShardChain binds the node's existing blockchain and miner, reading root
+// blocks and incoming deposits from db. The builder must use this blockchain
+// and its engine; nil supports import-only shards. Call Init before use.
+func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain, builder *miner.Miner) *ShardChain {
+	c := &ShardChain{db: db, chain: chain, builder: builder}
 	if config := chain.Config().QuarkChain; config != nil {
 		chain.SetXShardInbox(NewXShardInbox(config, c))
 	}
@@ -201,6 +203,7 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		return err
 	}
 	c.rootTip = rootHeader
+	c.rootTipFeed.Send(struct{}{})
 	// TODO: wire Init into the shard service's master handshake, data sync and
 	// mining startup. Genesis construction/state setup stays in that service.
 	return nil
@@ -254,7 +257,11 @@ func (c *ShardChain) validateGenesisRoot(root *qkctypes.RootBlock) (*types.Heade
 func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.insertShardBlock(block)
+}
 
+// insertShardBlock is the shared import path. The caller must hold c.mu.
+func (c *ShardChain) insertShardBlock(block *types.Block) error {
 	// Shard genesis is already committed before Init; it is not imported here.
 	if block.NumberU64() == 0 {
 		return consensus.ErrInvalidNumber
@@ -484,6 +491,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	}
 	if switched {
 		c.rootTip = root.Header()
+		c.rootTipFeed.Send(struct{}{})
 	}
 	return switched, nil
 }

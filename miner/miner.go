@@ -90,6 +90,20 @@ func New(eth Backend, config Config, engine consensus.Engine) *Miner {
 	}
 }
 
+// RecommitInterval returns the interval for refreshing mining work.
+func (miner *Miner) RecommitInterval() time.Duration {
+	miner.confMu.RLock()
+	defer miner.confMu.RUnlock()
+	return miner.config.Recommit
+}
+
+// PendingFeeRecipient returns the configured recipient of pending block fees.
+func (miner *Miner) PendingFeeRecipient() common.Address {
+	miner.confMu.RLock()
+	defer miner.confMu.RUnlock()
+	return miner.config.PendingFeeRecipient
+}
+
 // Pending returns the currently pending block and associated receipts, logs
 // and statedb. The returned values can be nil in case the pending block is
 // not initialized.
