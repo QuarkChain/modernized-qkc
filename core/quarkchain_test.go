@@ -49,7 +49,7 @@ func TestXShardOutbox(t *testing.T) {
 		gasLimit = params.XShardSendGas
 		excess   = big.NewInt(1)
 	)
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 0, ShardIDs: []uint32{0, 1}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(0, 0, 1)
 	sendABI, err := abi.JSON(strings.NewReader(`[{"type": "function", "name": "send", "stateMutability": "payable", "outputs": [], "inputs": [
 		{"name": "dstShard", "type": "uint32"}, {"name": "to", "type": "address"}, {"name": "value", "type": "uint256"},
 		{"name": "gasLimit", "type": "uint64"}, {"name": "isMove", "type": "bool"}, {"name": "data", "type": "bytes"}]}]`))

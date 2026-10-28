@@ -22,11 +22,12 @@ package wire
 //   - ClusterOp: cluster RPC opcodes (Master ↔ chain, chain ↔ chain),
 //     0x80–0xFF, defined relative to ClusterOpBase.
 //
-// The currently defined set includes cluster connection opcodes and the
-// initial peer handshake. Add opcodes as protocol operations are introduced,
-// assigning unique values within the appropriate range. Opcode ranges identify
-// operation families, not frame types: a peer command keeps its CommandOp when
-// relayed through a ClusterFrame to a chain or virtual peer for dispatch.
+// The currently defined set includes cluster connection and chain business
+// opcodes plus the initial peer handshake. Add opcodes as operations are
+// introduced, assigning unique values within the appropriate range. Opcode
+// ranges identify operation families, not frame types: a peer command keeps
+// its CommandOp when relayed through a ClusterFrame to a chain or virtual peer
+// for dispatch.
 
 // ClusterOpBase is the offset added to all cluster op values on wire.
 // Values below ClusterOpBase belong to CommandOp (P2P).
@@ -41,6 +42,22 @@ const (
 	ClusterOpPong                    ClusterOp = 2 + ClusterOpBase // 0x82
 	ClusterOpConnectToChainsRequest  ClusterOp = 3 + ClusterOpBase // 0x83
 	ClusterOpConnectToChainsResponse ClusterOp = 4 + ClusterOpBase // 0x84
+
+	// Master-to-chain root block update.
+	ClusterOpAddRootBlockRequest  ClusterOp = 5 + ClusterOpBase // 0x85
+	ClusterOpAddRootBlockResponse ClusterOp = 6 + ClusterOpBase // 0x86
+
+	// Chain-to-Master block notification.
+	ClusterOpAddMinorBlockHeaderRequest  ClusterOp = 17 + ClusterOpBase // 0x91
+	ClusterOpAddMinorBlockHeaderResponse ClusterOp = 18 + ClusterOpBase // 0x92
+
+	// Chain-to-chain deposits.
+	ClusterOpAddXshardTxListRequest  ClusterOp = 19 + ClusterOpBase // 0x93
+	ClusterOpAddXshardTxListResponse ClusterOp = 20 + ClusterOpBase // 0x94
+
+	// Master-to-chain staking query.
+	ClusterOpGetRootChainStakesRequest  ClusterOp = 65 + ClusterOpBase // 0xc1
+	ClusterOpGetRootChainStakesResponse ClusterOp = 66 + ClusterOpBase // 0xc2
 )
 
 // CommandOp identifies peer command operations. They are carried in P2PFrame

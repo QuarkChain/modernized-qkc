@@ -29,14 +29,19 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+func stakingGenesisConfig(shardID uint32) *params.ChainConfig {
+	config := *params.AllEthashProtocolChanges
+	config.QuarkChain = params.NewTestQuarkChainConfig(shardID)
+	return &config
+}
+
 func TestGenerate(t *testing.T) {
 	for _, shardID := range []uint32{0, 1} {
-		config := *params.AllEthashProtocolChanges
-		config.QuarkChain = &params.QuarkChainConfig{ShardID: shardID}
+		config := stakingGenesisConfig(shardID)
 		funded := common.HexToAddress("0xabcd")
 		// Generation preserves configured accounts and fills missing staking accounts.
 		base := &core.Genesis{
-			Config: &config, GasLimit: 12_000_000, Difficulty: big.NewInt(1),
+			Config: config, GasLimit: 12_000_000, Difficulty: big.NewInt(1),
 			Alloc: types.GenesisAlloc{
 				funded: {Balance: big.NewInt(42), Code: []byte{0}},
 				params.ShardStakingContractAddress: {
@@ -85,14 +90,13 @@ func TestGenerate(t *testing.T) {
 }
 
 func TestGenerateRejectsInvalidGenesis(t *testing.T) {
-	config := *params.AllEthashProtocolChanges
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1}
-	wrongShard, err := json.Marshal(&core.Genesis{Config: &config, GasLimit: 12_000_000, Difficulty: big.NewInt(1), Alloc: core.PoSWStakingContractAllocs(0)})
+	config := stakingGenesisConfig(1)
+	wrongShard, err := json.Marshal(&core.Genesis{Config: config, GasLimit: 12_000_000, Difficulty: big.NewInt(1), Alloc: core.PoSWStakingContractAllocs(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	occupied, err := json.Marshal(&core.Genesis{
-		Config: &config, GasLimit: 12_000_000, Difficulty: big.NewInt(1),
+		Config: config, GasLimit: 12_000_000, Difficulty: big.NewInt(1),
 		Alloc: types.GenesisAlloc{params.ShardStakingContractAddress: {Balance: big.NewInt(99)}},
 	})
 	if err != nil {
