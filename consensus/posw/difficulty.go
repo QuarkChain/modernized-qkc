@@ -43,12 +43,22 @@ func CalcDifficulty(config *params.PoSWConfig, timestamp, parentTimestamp uint64
 	return diff
 }
 
-// GetAdjustedDifficulty applies the same stake quota rule on both chains. Mined
-// counts all blocks by this coinbase among the preceding windowSize-1 ancestors,
-// including ordinary PoW blocks. The candidate occupies the last window slot.
-// Stakes and the window must come from the candidate's parent fork/state.
-// number is the candidate's height on the new chain; the config applies the old height offset.
-// The configuration determines whether the stake requirement decays by epoch.
+// GetAdjustedDifficulty applies the same stake quota rule on root and shard chains.
+//
+// config supplies the staking rules. StakePerBlockAt provides the effective stake
+// requirement and handles the configured height offset and decay rules.
+//
+// number is the candidate's block height after regenesis.
+//
+// difficulty is the candidate's base PoW difficulty, before the staking discount.
+//
+// stakes come from the parent shard block's state for a shard candidate. For a root
+// candidate, they come from the state of the latest shard-0 block confirmed by
+// its parent root block.
+//
+// mined counts all blocks by this coinbase among the preceding windowSize-1
+// ancestors, including ordinary PoW blocks. Count ancestors on the candidate's
+// own chain, starting at its parent. The candidate occupies the last window slot.
 func GetAdjustedDifficulty(config *params.PoSWConfig, number, difficulty *big.Int, stakes *uint256.Int, mined uint64) *big.Int {
 	diff := new(big.Int).Set(difficulty)
 	if config == nil || !config.StakingEnabled || stakes == nil || number.Sign() == 0 {

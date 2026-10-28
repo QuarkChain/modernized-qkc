@@ -56,7 +56,7 @@ func TestAdjustedDifficulty(t *testing.T) {
 		want   int64
 	}{
 		{uint256.NewInt(99), 0, 100}, {uint256.NewInt(100), 0, 1}, {uint256.NewInt(100), 1, 100},
-		{uint256.NewInt(300), 2, 1}, {new(uint256.Int).SetAllOne(), 2, 1},
+		{uint256.NewInt(300), 2, 1}, {uint256.MustFromDecimal("1844674407370955161700"), 2, 1},
 	} {
 		if got := GetAdjustedDifficulty(c, big.NewInt(1), base, test.stakes, test.mined); got.Int64() != test.want {
 			t.Fatalf("stakes %s, mined %d: %v", test.stakes, test.mined, got)

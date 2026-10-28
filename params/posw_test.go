@@ -31,6 +31,62 @@ func validPoSWConfig() *PoSWConfig {
 	}
 }
 
+func TestPoSWConfigEqual(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		a, b *PoSWConfig
+		want bool
+	}{
+		{"nil", nil, nil, true},
+		{"nil versus empty", nil, &PoSWConfig{}, false},
+		{"empty", &PoSWConfig{}, &PoSWConfig{}, true},
+		{"independent configs", validPoSWConfig(), validPoSWConfig(), true},
+		{"missing fields", &PoSWConfig{}, validPoSWConfig(), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.a.Equal(test.b) != test.want || test.b.Equal(test.a) != test.want {
+				t.Fatalf("Equal returned the wrong result, want %v", test.want)
+			}
+		})
+	}
+}
+
+func TestPoSWConfigEqualFields(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*PoSWConfig)
+	}{
+		{"adjustmentCutoff", func(c *PoSWConfig) { c.AdjustmentCutoff++ }},
+		{"adjustmentFactor", func(c *PoSWConfig) { c.AdjustmentFactor++ }},
+		{"minimumDifficulty", func(c *PoSWConfig) { c.MinimumDifficulty.SetInt64(2) }},
+		{"coinbaseAmount", func(c *PoSWConfig) { c.CoinbaseAmount.SetInt64(200) }},
+		{"rewardTaxRate", func(c *PoSWConfig) { c.RewardTaxRate.SetFrac64(1, 4) }},
+		{"epochInterval", func(c *PoSWConfig) { c.EpochInterval++ }},
+		{"decayFactor", func(c *PoSWConfig) { c.DecayFactor.SetFrac64(1, 2) }},
+		{"originalBlockNumber", func(c *PoSWConfig) { c.OriginalBlockNumber++ }},
+		{"stakingEnabled", func(c *PoSWConfig) { c.StakingEnabled = false }},
+		{"windowSize", func(c *PoSWConfig) { c.WindowSize++ }},
+		{"diffDivider", func(c *PoSWConfig) { c.DiffDivider++ }},
+		{"stakePerBlock", func(c *PoSWConfig) { c.StakePerBlock.SetInt64(200) }},
+		{"poswStakingDecayEnabled", func(c *PoSWConfig) { c.PoSWStakingDecayEnabled = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stored, next := validPoSWConfig(), validPoSWConfig()
+			test.change(next)
+			if stored.Equal(next) || next.Equal(stored) {
+				t.Fatal("Equal ignored the changed field")
+			}
+		})
+	}
+	// Values, rather than pointer identity or rational representation, determine equality.
+	stored, next := validPoSWConfig(), validPoSWConfig()
+	stored.RewardTaxRate = new(big.Rat)
+	next.RewardTaxRate, _ = new(big.Rat).SetString("0.00")
+	if !stored.Equal(next) {
+		t.Fatal("equal consensus values compared unequal")
+	}
+}
+
 func TestNewTestQuarkChainConfigIsolation(t *testing.T) {
 	shardIDs := []uint32{0, 1}
 	first := NewTestQuarkChainConfig(1, shardIDs...)
@@ -493,36 +549,46 @@ func TestRegenesisRewards(t *testing.T) {
 
 func TestRewardDecay(t *testing.T) {
 	// Expected rewards follow pyquarkchain: floor the epoch decay first,
-	// then multiply by the local reward share and floor again.
+	// then multiply by the remaining reward share and floor again.
 	for _, test := range []struct {
 		name   string
 		factor string
+		tax    string
 		amount uint64
 		epoch  uint64
 		want   uint64
 	}{
-		{"before decay", "0.88", 100, 0, 50},
-		{"first epoch", "0.88", 100, 1, 44},
-		{"second epoch", "0.88", 100, 2, 38},
-		{"round once after exponentiation", "0.88", 100, 3, 34},
-		{"slow decay", "0.88", 100, 6, 23},
-		{"decay before tax", "0.88", 3, 1, 1},
-		{"denominator limit", "0.99", 100, 100, 18},
-		{"fully decayed", "0.88", 100, 100, 0},
-		{"no decay", "1", 100, 100, 50},
-		{"zero factor before decay", "0", 100, 0, 50},
-		{"zero factor after decay", "0", 100, 1, 0},
-		{"zero subsidy", "0.88", 0, 0, 0},
+		{"root before decay", "0.88", "0", 100, 0, 100},
+		{"root first epoch", "0.88", "0", 100, 1, 88},
+		{"root second epoch", "0.88", "0", 100, 2, 77},
+		{"before decay", "0.88", "0.5", 100, 0, 50},
+		{"first epoch", "0.88", "0.5", 100, 1, 44},
+		{"second epoch", "0.88", "0.5", 100, 2, 38},
+		{"round once after exponentiation", "0.88", "0.5", 100, 3, 34},
+		{"slow decay", "0.88", "0.5", 100, 6, 23},
+		{"decay before tax", "0.88", "0.25", 2, 1, 0},
+		{"denominator limit", "0.99", "0.5", 100, 100, 18},
+		{"fully decayed", "0.88", "0.5", 100, 100, 0},
+		{"no decay", "1", "0.5", 100, 100, 50},
+		{"zero factor before decay", "0", "0.5", 100, 0, 50},
+		{"zero factor after decay", "0", "0.5", 100, 1, 0},
+		{"zero subsidy", "0.88", "0.5", 0, 0, 0},
+		{"full tax before decay", "0.88", "1", 100, 0, 0},
+		{"full tax after decay", "0.88", "1", 100, 1, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			factor, ok := new(big.Rat).SetString(test.factor)
 			if !ok {
 				t.Fatal("invalid test factor", test.factor)
 			}
+			tax, ok := new(big.Rat).SetString(test.tax)
+			if !ok {
+				t.Fatal("invalid test tax rate", test.tax)
+			}
 			config := &PoSWConfig{
 				AdjustmentCutoff: 7, AdjustmentFactor: 512, MinimumDifficulty: big.NewInt(1),
 				CoinbaseAmount: new(big.Int).SetUint64(test.amount), EpochInterval: 1,
-				DecayFactor: new(big.Rat).Set(factor), RewardTaxRate: big.NewRat(1, 2),
+				DecayFactor: new(big.Rat).Set(factor), RewardTaxRate: new(big.Rat).Set(tax),
 				OriginalBlockNumber: test.epoch,
 			}
 			if err := config.Check(); err != nil {
@@ -538,8 +604,8 @@ func TestRewardDecay(t *testing.T) {
 			if got := config.BlockRewardAt(big.NewInt(1)); got.Cmp(new(big.Int).SetUint64(test.want)) != 0 {
 				t.Fatalf("reward %s, want %d", got, test.want)
 			}
-			if config.DecayFactor.Cmp(factor) != 0 {
-				t.Fatalf("decay factor mutated: %s", config.DecayFactor)
+			if config.DecayFactor.Cmp(factor) != 0 || config.RewardTaxRate.Cmp(tax) != 0 {
+				t.Fatal("reward calculation modified the configured decay factor or tax rate")
 			}
 		})
 	}

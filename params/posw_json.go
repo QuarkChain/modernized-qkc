@@ -24,22 +24,23 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 )
 
-// MarshalJSON emits integers and ratios as unquoted decimal numbers.
+// MarshalJSON uses lowerCamelCase field names and emits integers and ratios as
+// unquoted decimal numbers. Ratios must have a finite decimal representation.
 func (c PoSWConfig) MarshalJSON() ([]byte, error) {
 	type configJSON struct {
-		AdjustmentCutoff        uint64       `json:"adjustmentCutoff"`
-		AdjustmentFactor        uint64       `json:"adjustmentFactor"`
-		MinimumDifficulty       *big.Int     `json:"minimumDifficulty"`
-		CoinbaseAmount          *big.Int     `json:"coinbaseAmount"`
-		RewardTaxRate           *json.Number `json:"rewardTaxRate"`
-		EpochInterval           uint64       `json:"epochInterval"`
-		DecayFactor             *json.Number `json:"decayFactor"`
-		OriginalBlockNumber     uint64       `json:"originalBlockNumber,omitempty"`
-		StakingEnabled          bool         `json:"stakingEnabled"`
-		WindowSize              uint64       `json:"windowSize"`
-		DiffDivider             uint64       `json:"diffDivider"`
-		StakePerBlock           *big.Int     `json:"stakePerBlock"`
-		PoSWStakingDecayEnabled bool         `json:"poswStakingDecayEnabled"`
+		AdjustmentCutoff        uint64       `json:"adjustmentCutoff"`              // Output example: 7, without quotes.
+		AdjustmentFactor        uint64       `json:"adjustmentFactor"`              // Output example: 512, without quotes.
+		MinimumDifficulty       *big.Int     `json:"minimumDifficulty"`             // Output example: 1000000, without quotes; null if nil.
+		CoinbaseAmount          *big.Int     `json:"coinbaseAmount"`                // Output example: 6500000000000000000, without quotes; null if nil.
+		RewardTaxRate           *json.Number `json:"rewardTaxRate"`                 // Output example: 0.5, without quotes; null if nil.
+		EpochInterval           uint64       `json:"epochInterval"`                 // Output example: 3153600, without quotes.
+		DecayFactor             *json.Number `json:"decayFactor"`                   // Output example: 0.88, without quotes; null if nil.
+		OriginalBlockNumber     uint64       `json:"originalBlockNumber,omitempty"` // Output example: 12345678, without quotes; omitted when zero.
+		StakingEnabled          bool         `json:"stakingEnabled"`                // Output example: true or false, without quotes.
+		WindowSize              uint64       `json:"windowSize"`                    // Output example: 512, without quotes.
+		DiffDivider             uint64       `json:"diffDivider"`                   // Output example: 10000, without quotes.
+		StakePerBlock           *big.Int     `json:"stakePerBlock"`                 // Output example: 1000000000000000000000000, without quotes; null if nil.
+		PoSWStakingDecayEnabled bool         `json:"poswStakingDecayEnabled"`       // Output example: true or false, without quotes.
 	}
 	tax, err := ratioToJSON(c.RewardTaxRate)
 	if err != nil {
@@ -68,22 +69,25 @@ func (c PoSWConfig) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON accepts decimal numbers, decimal strings and hex strings for
-// integers, as core.Genesis does. Call Check separately to validate the rules.
+// integers, as core.Genesis does. Ratios accept numbers (0.88) or numeric strings
+// ("0.88"). All numeric values are parsed exactly without using float64.
+// Omitted or null fields leave the existing configuration values unchanged.
+// Call Check separately to validate the consensus rules.
 func (c *PoSWConfig) UnmarshalJSON(input []byte) error {
 	type configJSON struct {
-		AdjustmentCutoff        *math.HexOrDecimal64  `json:"adjustmentCutoff"`
-		AdjustmentFactor        *math.HexOrDecimal64  `json:"adjustmentFactor"`
-		MinimumDifficulty       *math.HexOrDecimal256 `json:"minimumDifficulty"`
-		CoinbaseAmount          *math.HexOrDecimal256 `json:"coinbaseAmount"`
-		RewardTaxRate           *json.Number          `json:"rewardTaxRate"`
-		EpochInterval           *math.HexOrDecimal64  `json:"epochInterval"`
-		DecayFactor             *json.Number          `json:"decayFactor"`
-		OriginalBlockNumber     *math.HexOrDecimal64  `json:"originalBlockNumber,omitempty"`
-		StakingEnabled          *bool                 `json:"stakingEnabled"`
-		WindowSize              *math.HexOrDecimal64  `json:"windowSize"`
-		DiffDivider             *math.HexOrDecimal64  `json:"diffDivider"`
-		StakePerBlock           *math.HexOrDecimal256 `json:"stakePerBlock"`
-		PoSWStakingDecayEnabled *bool                 `json:"poswStakingDecayEnabled"`
+		AdjustmentCutoff        *math.HexOrDecimal64  `json:"adjustmentCutoff"`              // Supported input: 7, "7" or "0x07".
+		AdjustmentFactor        *math.HexOrDecimal64  `json:"adjustmentFactor"`              // Supported input: 512, "512" or "0x200".
+		MinimumDifficulty       *math.HexOrDecimal256 `json:"minimumDifficulty"`             // Supported input: 1000000, "1000000" or "0xf4240".
+		CoinbaseAmount          *math.HexOrDecimal256 `json:"coinbaseAmount"`                // Supported input: decimal integer or decimal/hex string, e.g. 100, "100" or "0x64".
+		RewardTaxRate           *json.Number          `json:"rewardTaxRate"`                 // Supported input: 0.5 or "0.5"; fraction strings such as "1/2" are rejected.
+		EpochInterval           *math.HexOrDecimal64  `json:"epochInterval"`                 // Supported input: 3153600, "3153600" or "0x301ec0".
+		DecayFactor             *json.Number          `json:"decayFactor"`                   // Supported input: 0.88 or "0.88"; fraction strings such as "22/25" are rejected.
+		OriginalBlockNumber     *math.HexOrDecimal64  `json:"originalBlockNumber,omitempty"` // Supported input: 12345678, "12345678" or "0xbc614e".
+		StakingEnabled          *bool                 `json:"stakingEnabled"`                // Supported input: true or false, without quotes.
+		WindowSize              *math.HexOrDecimal64  `json:"windowSize"`                    // Supported input: 512, "512" or "0x200".
+		DiffDivider             *math.HexOrDecimal64  `json:"diffDivider"`                   // Supported input: 10000, "10000" or "0x2710".
+		StakePerBlock           *math.HexOrDecimal256 `json:"stakePerBlock"`                 // Supported input: decimal integer or decimal/hex string, e.g. 100, "100" or "0x64".
+		PoSWStakingDecayEnabled *bool                 `json:"poswStakingDecayEnabled"`       // Supported input: true or false, without quotes.
 	}
 	var dec configJSON
 	if err := json.Unmarshal(input, &dec); err != nil {

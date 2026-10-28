@@ -45,7 +45,10 @@ import (
 
 //go:generate go run github.com/fjl/gencodec -type Genesis -field-override genesisSpecMarshaling -out gen_genesis.go
 
-var errGenesisNoConfig = errors.New("genesis has no chain configuration")
+var (
+	errGenesisNoConfig          = errors.New("genesis has no chain configuration")
+	errQuarkChainConfigMismatch = errors.New("quarkchain config differs from stored config; check your config or use a new database for a different chain")
+)
 
 // Deprecated: use types.Account instead.
 type GenesisAccount = types.Account
@@ -319,6 +322,8 @@ func (o *ChainOverrides) apply(cfg *params.ChainConfig) error {
 // The stored chain configuration will be updated if it is compatible (i.e. does not
 // specify a fork block below the local head block). In case of a conflict, the
 // error is a *params.ConfigCompatError and the new, unwritten config is returned.
+// QuarkChain configuration must match the stored configuration, even at genesis.
+// A mismatch returns a startup error without updating the database.
 func SetupGenesisBlock(db ethdb.Database, triedb *triedb.Database, genesis *Genesis) (*params.ChainConfig, common.Hash, *params.ConfigCompatError, error) {
 	return SetupGenesisBlockWithOverride(db, triedb, genesis, nil, nil)
 }
@@ -404,6 +409,14 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 	// Sanity-check the new configuration.
 	if err := newCfg.CheckConfigForkOrder(); err != nil {
 		return nil, common.Hash{}, nil, err
+	}
+
+	// QKC configuration has no scheduled transitions that can be applied by
+	// rewinding. Keep it fixed once the database is initialized, even at genesis.
+	// On mismatch, check for configuration mistakes; an intentionally different
+	// chain configuration must use a new database instead of reusing this one.
+	if !storedCfg.QuarkChain.Equal(newCfg.QuarkChain) {
+		return newCfg, ghash, nil, errQuarkChainConfigMismatch
 	}
 
 	// TODO(rjl493456442) better to define the comparator of chain config

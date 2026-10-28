@@ -58,6 +58,17 @@ type QuarkChainConfig struct {
 	MaxBlocksPerRootBlock uint64 `json:"maxBlocksPerRootBlock,omitempty"`
 }
 
+// Equal compares all shard configuration fields by value. Two nil configs are equal.
+func (c *QuarkChainConfig) Equal(other *QuarkChainConfig) bool {
+	if c == nil || other == nil {
+		return c == other
+	}
+	return c.ShardID == other.ShardID &&
+		slices.Equal(c.ShardIDs, other.ShardIDs) &&
+		c.PoSW.Equal(other.PoSW) &&
+		c.MaxBlocksPerRootBlock == other.MaxBlocksPerRootBlock
+}
+
 // String implements the stringer interface.
 func (c QuarkChainConfig) String() string {
 	return fmt.Sprintf("quarkchain(shard: %d, shards: %v)", c.ShardID, c.ShardIDs)
