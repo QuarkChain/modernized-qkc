@@ -24,10 +24,10 @@ package wire
 //
 // The currently defined set includes cluster connection and chain business
 // opcodes plus the initial peer handshake. Add opcodes as operations are
-// introduced,
-// assigning unique values within the appropriate range. Opcode ranges identify
-// operation families, not frame types: a peer command keeps its CommandOp when
-// relayed through a ClusterFrame to a chain or virtual peer for dispatch.
+// introduced, assigning unique values within the appropriate range. Opcode
+// ranges identify operation families, not frame types: a peer command keeps
+// its CommandOp when relayed through a ClusterFrame to a chain or virtual peer
+// for dispatch.
 
 // ClusterOpBase is the offset added to all cluster op values on wire.
 // Values below ClusterOpBase belong to CommandOp (P2P).
