@@ -28,6 +28,8 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// getLockedStakesSelector is bytes4(keccak256("getLockedStakes(address)")).
+// Obtain with: cast sig "getLockedStakes(address)"
 const getLockedStakesSelector = "0xfd8c4646"
 
 var _ consensus.StakingReader = (*BlockChain)(nil)
@@ -60,7 +62,11 @@ func (bc *BlockChain) getLockedStakes(header *types.Header, address, staker comm
 	if err != nil {
 		return nil, common.Address{}, err
 	}
-	if statedb.GetCodeHash(address) != params.PoSWStakingRuntimeCodeHash {
+	codeHash := statedb.GetCodeHash(address)
+	if err := statedb.Error(); err != nil {
+		return nil, common.Address{}, err
+	}
+	if codeHash != params.PoSWStakingRuntimeCodeHash {
 		return nil, common.Address{}, errors.New("invalid staking contract runtime")
 	}
 	evm := vm.NewEVM(NewEVMBlockContext(header, bc, nil), statedb, bc.chainConfig, vm.Config{})
@@ -68,16 +74,19 @@ func (bc *BlockChain) getLockedStakes(header *types.Header, address, staker comm
 	evm.SetTxContext(vm.TxContext{})
 	rules := evm.GetRules()
 	statedb.Prepare(rules, common.Address{}, common.Address{}, &address, vm.ActivePrecompiles(rules), nil)
+	// ABI calldata: a 4-byte selector followed by a 32-byte address word.
+	// The 20 address bytes start after 12 padding bytes, at offset 4 + 12 = 16.
 	input := make([]byte, 36)
 	copy(input, common.FromHex(getLockedStakesSelector))
 	copy(input[16:], staker[:])
-	output, _, err := evm.StaticCall(common.Address{}, address, input, vm.NewGasBudget(100_000, 100_000))
+	output, _, err := evm.StaticCall(common.Address{}, address, input, vm.NewGasBudget(1_000_000, 0))
 	if err != nil {
 		return nil, common.Address{}, fmt.Errorf("getLockedStakes: %w", err)
 	}
 	if err := statedb.Error(); err != nil {
 		return nil, common.Address{}, err
 	}
+	// ABI result: two 32-byte words (amount, signer); signer starts at 32 + 12 = 44.
 	if len(output) != 64 {
 		return nil, common.Address{}, fmt.Errorf("invalid getLockedStakes response length %d", len(output))
 	}
