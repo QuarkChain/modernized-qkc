@@ -162,6 +162,23 @@ func nextMiningWork(t *testing.T, engine *controlledMiningEngine) controlledMini
 	}
 }
 
+func nextMiningWorks(t *testing.T, engine *controlledMiningEngine, coinbases ...common.Address) map[common.Address]controlledMiningWork {
+	t.Helper()
+	works := make(map[common.Address]controlledMiningWork, len(coinbases))
+	for _, coinbase := range coinbases {
+		works[coinbase] = controlledMiningWork{}
+	}
+	for range len(works) {
+		work := nextMiningWork(t, engine)
+		coinbase := work.block.Coinbase()
+		if previous, ok := works[coinbase]; !ok || previous.block != nil {
+			t.Fatalf("unexpected or duplicate work for coinbase %s", coinbase)
+		}
+		works[coinbase] = work
+	}
+	return works
+}
+
 func checkMiningCancelled(t *testing.T, work controlledMiningWork) {
 	t.Helper()
 	select {
@@ -250,6 +267,197 @@ func TestPoWMinerLifecycle(t *testing.T) {
 	})
 }
 
+func TestPoWMinerCoinbases(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		env, m, _ := newShardMiningEnv(t, engine)
+		a, b := common.Address{0x42}, common.Address{0x43}
+		if err := m.SetCoinbases([]common.Address{a, b, a}); err != nil {
+			t.Fatal(err)
+		}
+		checkNoMiningWork(t, engine)
+		m.Start()
+		works := nextMiningWorks(t, engine, a, b)
+		if engine.SealHash(works[a].block.Header()) == engine.SealHash(works[b].block.Header()) {
+			t.Fatal("different coinbases shared a sealing candidate")
+		}
+		checkNoMiningWork(t, engine)
+		if err := m.SetCoinbases([]common.Address{a}); err != nil {
+			t.Fatal(err)
+		}
+		checkMiningCancelled(t, works[b])
+		if err := m.SetCoinbases([]common.Address{a, b}); err != nil {
+			t.Fatal(err)
+		}
+		replacement := nextMiningWork(t, engine)
+		if replacement.block.Coinbase() != b {
+			t.Fatal("retained coinbase work was rebuilt")
+		}
+		// Re-adding the address can produce the same seal hash. The cancelled
+		// task's result must still be rejected using its task identity.
+		late := works[b].sealed(1)
+		works[b].results <- late
+		synctest.Wait()
+		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
+			t.Fatal("removed coinbase work was imported after re-adding its address")
+		}
+		// An address must not consume another address's result or cancel its work.
+		replacement.results <- works[a].sealed(2)
+		synctest.Wait()
+		time.Sleep(miningRetryInterval)
+		replacement = nextMiningWork(t, engine)
+		if replacement.block.Coinbase() != b {
+			t.Fatal("unrelated result retried the wrong coinbase")
+		}
+		select {
+		case <-works[a].stop:
+			t.Fatal("another coinbase's retry cancelled retained work")
+		default:
+		}
+		env.checkHead(env.genesis)
+		block := replacement.sealed(3)
+		replacement.results <- block
+		works = nextMiningWorks(t, engine, a, b)
+		env.checkHead(block)
+		for _, work := range works {
+			if work.block.ParentHash() != block.Hash() {
+				t.Fatal("coinbase work did not follow the imported head")
+			}
+		}
+		if err := m.SetCoinbases(nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, work := range works {
+			checkMiningCancelled(t, work)
+			work.results <- work.sealed(4)
+		}
+		time.Sleep(2 * testWorkRefreshInterval)
+		checkNoMiningWork(t, engine)
+		env.checkHead(block)
+		m.SetCoinbases([]common.Address{a})
+		if work := nextMiningWork(t, engine); work.block.Coinbase() != a {
+			t.Fatal("adding an address to an empty running miner did not publish work")
+		}
+		m.Stop()
+		if err := m.SetCoinbases([]common.Address{a}); !errors.Is(err, ErrPoWMinerStopped) {
+			t.Fatalf("set coinbases after stop: %v", err)
+		}
+	})
+}
+
+func TestPoWMinerCoinbaseRefresh(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		_, m, _ := newShardMiningEnv(t, engine)
+		a, b := common.Address{0x42}, common.Address{0x43}
+		m.Start()
+		first := nextMiningWork(t, engine)
+		time.Sleep(time.Second)
+		m.SetCoinbases([]common.Address{a, b})
+		second := nextMiningWork(t, engine)
+		if second.block.Coinbase() != b {
+			t.Fatal("new coinbase did not receive its own candidate")
+		}
+		time.Sleep(testWorkRefreshInterval - time.Second)
+		refresh := nextMiningWork(t, engine)
+		if refresh.block.Coinbase() != a {
+			t.Fatal("first coinbase did not refresh at its own deadline")
+		}
+		checkMiningCancelled(t, first)
+		select {
+		case <-second.stop:
+			t.Fatal("refresh cancelled another coinbase's work")
+		default:
+		}
+		time.Sleep(time.Second)
+		refresh = nextMiningWork(t, engine)
+		if refresh.block.Coinbase() != b {
+			t.Fatal("second coinbase did not refresh at its own deadline")
+		}
+		checkMiningCancelled(t, second)
+	})
+}
+
+func TestPoWMinerCoinbaseBuildFailure(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		a, b := common.Address{0x42}, common.Address{0x43}
+		var calls atomic.Int32
+		engine.prepare = func(header *types.Header) error {
+			if header.Coinbase == b && calls.Add(1) == 1 {
+				return errors.New("injected coinbase build failure")
+			}
+			return nil
+		}
+		_, m, _ := newShardMiningEnv(t, engine)
+		m.SetCoinbases([]common.Address{a, b})
+		m.Start()
+		work := nextMiningWork(t, engine)
+		if work.block.Coinbase() != a {
+			t.Fatal("failed coinbase prevented the other address from publishing work")
+		}
+		checkNoMiningWork(t, engine)
+		time.Sleep(miningRetryInterval)
+		retry := nextMiningWork(t, engine)
+		if retry.block.Coinbase() != b {
+			t.Fatal("build failure did not retry the affected coinbase")
+		}
+		select {
+		case <-work.stop:
+			t.Fatal("failed build cancelled another coinbase's work")
+		default:
+		}
+	})
+}
+
+func TestPoWMinerCoinbaseBuildQueue(t *testing.T) {
+	for _, remove := range []bool{false, true} {
+		name := "slow"
+		if remove {
+			name = "cancelled"
+		}
+		t.Run(name, func(t *testing.T) {
+			testPoWMiner(t, func(t *testing.T) {
+				engine := newControlledMiningEngine()
+				a, b := common.Address{0x42}, common.Address{0x43}
+				entered, release := make(chan struct{}), make(chan struct{})
+				var calls atomic.Int32
+				engine.prepare = func(header *types.Header) error {
+					calls.Add(1)
+					if header.Coinbase == b {
+						close(entered)
+						<-release
+					}
+					return nil
+				}
+				_, m, _ := newShardMiningEnv(t, engine)
+				m.Start()
+				first := nextMiningWork(t, engine)
+				m.SetCoinbases([]common.Address{a, b})
+				<-entered
+				if remove {
+					m.SetCoinbases([]common.Address{a})
+				}
+				time.Sleep(2 * testWorkRefreshInterval)
+				checkMiningCancelled(t, first)
+				checkNoMiningWork(t, engine)
+				if calls.Load() != 2 {
+					t.Fatal("started overlapping builds for different coinbases")
+				}
+				close(release)
+				coinbases := []common.Address{a}
+				if !remove {
+					coinbases = append(coinbases, b)
+				}
+				nextMiningWorks(t, engine, coinbases...)
+				if calls.Load() != 3 {
+					t.Fatal("queued work did not build after slow construction finished")
+				}
+			})
+		})
+	}
+}
+
 func TestPoWMinerWorkRefresh(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		engine := newControlledMiningEngine()
@@ -316,8 +524,11 @@ func TestPoWMinerTipChanges(t *testing.T) {
 			testPoWMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
 				env, m, _ := newShardMiningEnv(t, engine)
+				a, b := common.Address{0x42}, common.Address{0x43}
+				m.SetCoinbases([]common.Address{a, b})
 				m.Start()
-				first := nextMiningWork(t, engine)
+				works := nextMiningWorks(t, engine, a, b)
+				first := works[a]
 				parent, root := env.genesis.Hash(), env.rootGenesis.Hash()
 				if rootChange {
 					newTip := newRoot(env.rootGenesis, 1)
@@ -333,8 +544,11 @@ func TestPoWMinerTipChanges(t *testing.T) {
 					}
 					parent = competitor.Hash()
 				}
-				second := nextMiningWork(t, engine)
-				checkMiningCancelled(t, first)
+				refreshed := nextMiningWorks(t, engine, a, b)
+				second := refreshed[a]
+				for _, work := range works {
+					checkMiningCancelled(t, work)
+				}
 				extra, _ := second.block.Header().QKCExtra()
 				if second.block.ParentHash() != parent || extra.PrevRootBlock != root {
 					t.Fatal("candidate did not follow the new tips")
@@ -352,7 +566,7 @@ func TestPoWMinerTipChanges(t *testing.T) {
 				}
 				sealed := second.sealed(3)
 				second.results <- sealed
-				nextMiningWork(t, engine)
+				nextMiningWorks(t, engine, a, b)
 				env.checkHead(sealed)
 			})
 		})
@@ -498,8 +712,11 @@ func TestPoWMinerWaitForImport(t *testing.T) {
 					return nil
 				}
 				env, m, _ := newShardMiningEnv(t, engine)
+				a, b := common.Address{0x42}, common.Address{0x43}
+				m.SetCoinbases([]common.Address{a, b})
 				m.Start()
-				work := nextMiningWork(t, engine)
+				works := nextMiningWorks(t, engine, a, b)
+				work := works[b]
 				sealed := work.sealed(1)
 				work.results <- sealed
 				<-entered
@@ -522,7 +739,9 @@ func TestPoWMinerWaitForImport(t *testing.T) {
 					t.Fatal(err)
 				}
 				env.checkHead(sealed)
-				checkMiningCancelled(t, work)
+				for _, work := range works {
+					checkMiningCancelled(t, work)
+				}
 				checkNoMiningWork(t, engine)
 			})
 		})
