@@ -227,7 +227,7 @@ func TestPoWMinerLifecycle(t *testing.T) {
 		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
 			t.Fatal("paused miner imported a late result")
 		}
-		if err := m.Resume(); err != nil {
+		if err := m.Start(); err != nil {
 			t.Fatal(err)
 		}
 		third := nextMiningWork(t, engine)
@@ -241,8 +241,8 @@ func TestPoWMinerLifecycle(t *testing.T) {
 		third.results <- third.sealed(3)
 		checkNoMiningWork(t, engine)
 		env.checkHead(sealed)
-		if err := m.Resume(); !errors.Is(err, ErrPoWMinerStopped) {
-			t.Fatalf("resume after stop: %v", err)
+		if err := m.Start(); !errors.Is(err, ErrPoWMinerStopped) {
+			t.Fatalf("start after stop: %v", err)
 		}
 		if err := m.Stop(); err != nil {
 			t.Fatal(err)
@@ -420,7 +420,7 @@ func TestPoWMinerCancelBuild(t *testing.T) {
 		if err := m.Pause(); err != nil {
 			t.Fatal(err)
 		}
-		m.Resume()
+		m.Start()
 		time.Sleep(2 * testWorkRefreshInterval)
 		checkNoMiningWork(t, engine)
 		if calls.Load() != 1 {

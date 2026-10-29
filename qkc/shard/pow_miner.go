@@ -106,14 +106,11 @@ func NewPoWMiner(chain *ShardChain, coinbase common.Address, workRefreshInterval
 	return m, nil
 }
 
-// Start begins mining. Calling Start on a running miner is harmless.
+// Start begins or resumes mining. Calling Start on a running miner is harmless.
 func (m *PoWMiner) Start() error { return m.setRunning(true) }
 
-// Resume starts a fresh task after a pause.
-func (m *PoWMiner) Resume() error { return m.Start() }
-
 // Pause cancels construction and sealing, and waits for any started import.
-// Synchronization callers pause before syncing and resume after completion.
+// Synchronization callers pause before syncing and call Start after completion.
 func (m *PoWMiner) Pause() error { return m.setRunning(false) }
 
 // Stop permanently stops mining and waits for imports and construction to end.
