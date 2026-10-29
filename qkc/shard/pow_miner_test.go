@@ -164,6 +164,7 @@ func nextMiningWork(t *testing.T, engine *controlledMiningEngine) controlledMini
 
 func checkMiningCancelled(t *testing.T, work controlledMiningWork) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-work.stop:
 	default:
@@ -290,18 +291,243 @@ func TestPoWMinerWorkRefresh(t *testing.T) {
 			t.Fatal("work refresh did not incorporate the pool transaction after restoring the builder tip")
 		}
 		checkMiningCancelled(t, second)
-		late := first.sealed(1)
-		first.results <- late
-		synctest.Wait()
-		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
-			t.Fatal("work refresh allowed obsolete work to be imported")
-		}
-		sealed := third.sealed(2)
+		// Remote engines may return an older solution through the latest result
+		// channel. Refreshing work does not invalidate its parent or root.
+		sealed := first.sealed(1)
 		third.results <- sealed
 		next := nextMiningWork(t, engine)
 		env.checkHead(sealed)
 		if next.block.ParentHash() != sealed.Hash() {
-			t.Fatal("refreshed result did not become the mining parent")
+			t.Fatal("older result did not become the mining parent")
+		}
+		checkMiningCancelled(t, third)
+		// Importing the result changes the head and invalidates all siblings.
+		late := second.sealed(2)
+		next.results <- late
+		checkNoMiningWork(t, engine)
+		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
+			t.Fatal("head change allowed an obsolete sibling to be imported")
+		}
+	})
+}
+
+func TestPoWMinerRestartRejectsOldResults(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		env, m, _ := newShardMiningEnv(t, engine)
+		m.Start()
+		first := nextMiningWork(t, engine)
+		m.Pause()
+		m.Start()
+		second := nextMiningWork(t, engine)
+		if engine.SealHash(first.block.Header()) != engine.SealHash(second.block.Header()) {
+			t.Fatal("expected identical candidates when resuming without advancing time")
+		}
+		late := first.sealed(1)
+		first.results <- late
+		checkNoMiningWork(t, engine)
+		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
+			t.Fatal("resumed miner imported a result from before the pause")
+		}
+		sealed := second.sealed(2)
+		second.results <- sealed
+		nextMiningWork(t, engine)
+		env.checkHead(sealed)
+	})
+}
+
+func TestPoWMinerRefreshDuringBuild(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		entered, release := make(chan struct{}), make(chan struct{})
+		var calls atomic.Int32
+		engine.prepare = func(*types.Header) error {
+			if calls.Add(1) == 2 {
+				close(entered)
+				<-release
+			}
+			return nil
+		}
+		env, m, _ := newShardMiningEnv(t, engine)
+		// Release a blocked build before cleanup waits for the miner to stop.
+		defer func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		}()
+		m.Start()
+		first := nextMiningWork(t, engine)
+		time.Sleep(testWorkRefreshInterval)
+		<-entered
+		time.Sleep(testBlockBuildBudget)
+		select {
+		case <-first.stop:
+			t.Fatal("refresh stopped sealing before the replacement was ready")
+		default:
+		}
+		checkNoMiningWork(t, engine)
+		sealed := first.sealed(1)
+		first.results <- sealed
+		synctest.Wait()
+		env.checkHead(sealed)
+		checkMiningCancelled(t, first)
+		close(release)
+		next := nextMiningWork(t, engine)
+		if next.block.ParentHash() != sealed.Hash() {
+			t.Fatal("cancelled refresh was published after its parent changed")
+		}
+		checkNoMiningWork(t, engine)
+	})
+}
+
+func TestPoWMinerRefreshFailure(t *testing.T) {
+	for _, failure := range []string{"build", "seal"} {
+		t.Run(failure, func(t *testing.T) {
+			testPoWMiner(t, func(t *testing.T) {
+				engine := newControlledMiningEngine()
+				failed := make(chan struct{})
+				var calls atomic.Int32
+				failRefresh := func() error {
+					if calls.Add(1) == 2 {
+						close(failed)
+						return errors.New("injected refresh failure")
+					}
+					return nil
+				}
+				if failure == "build" {
+					engine.prepare = func(*types.Header) error { return failRefresh() }
+				} else {
+					engine.seal = failRefresh
+				}
+				env, m, _ := newShardMiningEnv(t, engine)
+				m.Start()
+				first := nextMiningWork(t, engine)
+				time.Sleep(testWorkRefreshInterval)
+				<-failed
+				checkNoMiningWork(t, engine)
+				select {
+				case <-first.stop:
+					t.Fatal("failed refresh stopped existing sealing work")
+				default:
+				}
+				sealed := first.sealed(1)
+				first.results <- sealed
+				nextMiningWork(t, engine)
+				env.checkHead(sealed)
+			})
+		})
+	}
+}
+
+func TestPoWMinerRootRefreshKeepsWork(t *testing.T) {
+	for _, duringBuild := range []bool{false, true} {
+		name := "sealing"
+		if duringBuild {
+			name = "building"
+		}
+		t.Run(name, func(t *testing.T) {
+			testPoWMiner(t, func(t *testing.T) {
+				engine := newControlledMiningEngine()
+				entered, release := make(chan struct{}), make(chan struct{})
+				var calls atomic.Int32
+				engine.prepare = func(*types.Header) error {
+					if calls.Add(1) == 2 {
+						close(entered)
+						<-release
+					}
+					return nil
+				}
+				env, m, _ := newShardMiningEnv(t, engine)
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				m.Start()
+				first := nextMiningWork(t, engine)
+				if duringBuild {
+					time.Sleep(testWorkRefreshInterval)
+					<-entered
+				}
+				root := newRoot(env.rootGenesis, 1)
+				if changed, err := env.sc.InsertRootBlock(root); err != nil || !changed {
+					t.Fatalf("root import: changed %v, err %v", changed, err)
+				}
+				if !duringBuild {
+					// A root advance leaves current work alone; the next timed
+					// refresh picks up the new root.
+					checkNoMiningWork(t, engine)
+					time.Sleep(testWorkRefreshInterval)
+					<-entered
+				}
+				checkNoMiningWork(t, engine)
+				select {
+				case <-first.stop:
+					t.Fatal("root advance stopped sealing before the replacement was ready")
+				default:
+				}
+				close(release)
+				next := nextMiningWork(t, engine)
+				wantRoot := root.Hash()
+				if duringBuild {
+					// Work already under construction keeps its selected root.
+					wantRoot = env.rootGenesis.Hash()
+				}
+				extra, _ := next.block.Header().QKCExtra()
+				if next.block.ParentHash() != first.block.ParentHash() || extra.PrevRootBlock != wantRoot {
+					t.Fatal("refresh changed the selected parent or root")
+				}
+				if next.results != first.results {
+					t.Fatal("root refresh retired the result channel for pending work")
+				}
+				checkMiningCancelled(t, first)
+				// The original candidate is still valid after both the root
+				// advance and the refresh, even though its local search stopped.
+				sealed := first.sealed(1)
+				next.results <- sealed
+				after := nextMiningWork(t, engine)
+				env.checkHead(sealed)
+				extra, _ = after.block.Header().QKCExtra()
+				if after.block.ParentHash() != sealed.Hash() || extra.PrevRootBlock != root.Hash() {
+					t.Fatal("next candidate did not use the new head and root tip")
+				}
+			})
+		})
+	}
+}
+
+func TestPoWMinerUnrelatedResults(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		env, m, _ := newShardMiningEnv(t, engine)
+		m.Start()
+		work := nextMiningWork(t, engine)
+		header := work.block.Header()
+		header.Coinbase = common.Address{0x99}
+		work.results <- work.block.WithSeal(header)
+		work.results <- nil
+		time.Sleep(miningRetryInterval)
+		checkNoMiningWork(t, engine)
+		select {
+		case <-work.stop:
+			t.Fatal("unrelated results stopped valid sealing work")
+		default:
+		}
+		sealed := work.sealed(1)
+		work.results <- sealed
+		next := nextMiningWork(t, engine)
+		env.checkHead(sealed)
+		// A duplicate result must not interrupt mining on the new head either.
+		next.results <- sealed
+		checkNoMiningWork(t, engine)
+		select {
+		case <-next.stop:
+			t.Fatal("duplicate result stopped valid sealing work")
+		default:
 		}
 	})
 }
@@ -462,7 +688,7 @@ func TestPoWMinerSlowBuild(t *testing.T) {
 }
 
 func TestPoWMinerFailureRecovery(t *testing.T) {
-	for _, failure := range []string{"build", "seal", "import", "unrelated", "nil"} {
+	for _, failure := range []string{"build", "seal", "import"} {
 		t.Run(failure, func(t *testing.T) {
 			testPoWMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
@@ -489,17 +715,8 @@ func TestPoWMinerFailureRecovery(t *testing.T) {
 					<-failed
 				} else {
 					work := nextMiningWork(t, engine)
-					switch failure {
-					case "import":
-						work.results <- work.sealed(1)
-						<-failed
-					case "unrelated":
-						header := work.block.Header()
-						header.Coinbase = common.Address{0x99}
-						work.results <- work.block.WithSeal(header)
-					case "nil":
-						work.results <- nil
-					}
+					work.results <- work.sealed(1)
+					<-failed
 				}
 				synctest.Wait()
 				retryAt := time.Now().Add(miningRetryInterval)
@@ -515,10 +732,8 @@ func TestPoWMinerFailureRecovery(t *testing.T) {
 				work.results <- sealed
 				nextMiningWork(t, engine)
 				env.checkHead(sealed)
-				if failure == "build" || failure == "seal" || failure == "import" {
-					if calls.Load() < 2 {
-						t.Fatal("failed operation was not retried")
-					}
+				if calls.Load() < 2 {
+					t.Fatal("failed operation was not retried")
 				}
 			})
 		})

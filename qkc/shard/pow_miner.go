@@ -64,11 +64,10 @@ type miningCommand struct {
 }
 
 type miningTask struct {
-	args    miner.QKCBlockArgs
-	cancel  context.CancelFunc
-	stop    <-chan struct{}
-	block   *types.Block
-	results chan *types.Block
+	args   miner.QKCBlockArgs
+	cancel context.CancelFunc
+	stop   <-chan struct{}
+	block  *types.Block
 }
 
 type miningBuildResult struct {
@@ -161,26 +160,38 @@ func (m *PoWMiner) watchTips(heads <-chan core.ChainHeadEvent, roots <-chan stru
 }
 
 func (m *PoWMiner) loop() {
+	// This loop owns all scheduling state and pending tasks. Workers only
+	// return results through channels, so pendingTasks needs no separate lock.
 	var (
-		running  bool
-		building bool
-		task     *miningTask
-		results  <-chan *types.Block
-		tick     <-chan time.Time
-		built    = make(chan miningBuildResult, 1)
-		timer    = time.NewTimer(miningTimerInitialDelay)
+		running      bool
+		building     bool
+		workParent   common.Hash // Parent shared by the current build and pending work
+		task         *miningTask // Candidate under construction
+		sealing      *miningTask // Current local search; older candidates remain pending
+		pendingTasks = make(map[common.Hash]*miningTask)
+		results      = make(chan *types.Block, 1)
+		tick         <-chan time.Time
+		built        = make(chan miningBuildResult, 1)
+		timer        = time.NewTimer(miningTimerInitialDelay)
 	)
 	timer.Stop()
-	cancelTask := func() {
+	invalidateWork := func() {
 		if task != nil {
 			task.cancel()
 			task = nil
 		}
-		results = nil
+		if sealing != nil {
+			sealing.cancel()
+			sealing = nil
+		}
+		clear(pendingTasks)
+		// Refreshes share one result channel. On invalidation, retire it so late
+		// results cannot match a rebuilt candidate with the same seal hash.
+		results = make(chan *types.Block, 1)
 	}
 	defer func() {
 		m.cancel()
-		cancelTask()
+		invalidateWork()
 		timer.Stop()
 		m.wg.Wait()
 		close(m.done)
@@ -190,10 +201,9 @@ func (m *PoWMiner) loop() {
 		tick = timer.C
 	}
 	start := func() {
-		cancelTask()
 		timer.Stop()
 		tick = nil
-		if !running || building || m.ctx.Err() != nil {
+		if !running || m.ctx.Err() != nil {
 			return
 		}
 		m.chain.mu.Lock()
@@ -201,6 +211,15 @@ func (m *PoWMiner) loop() {
 		m.chain.mu.Unlock()
 		if root == nil {
 			schedule(miningRetryInterval)
+			return
+		}
+		// A new parent invalidates all work. Cancel an obsolete build before
+		// waiting for it to finish.
+		if workParent != parent.Hash() {
+			invalidateWork()
+			workParent = parent.Hash()
+		}
+		if building {
 			return
 		}
 		now := time.Now()
@@ -215,7 +234,7 @@ func (m *PoWMiner) loop() {
 				Parent: parent.Hash(), PrevRootBlock: root.Hash(),
 				Timestamp: uint64(now.Unix()), FeeRecipient: m.coinbase,
 			},
-			cancel: cancel, stop: ctx.Done(), results: make(chan *types.Block, 1),
+			cancel: cancel, stop: ctx.Done(),
 		}
 		building = true
 		m.wg.Add(1)
@@ -234,13 +253,19 @@ func (m *PoWMiner) loop() {
 		case cmd := <-m.commands:
 			if running != cmd.running {
 				running = cmd.running
+				invalidateWork()
 				start()
 			}
 			close(cmd.done)
 		case <-m.tips:
-			if task == nil || !m.matchesHead(task.args) {
-				start()
+			current := task
+			if current == nil {
+				current = sealing
 			}
+			if current != nil && m.matchesHead(current.args) {
+				continue
+			}
+			start()
 		case <-tick:
 			start()
 		case result := <-built:
@@ -251,37 +276,57 @@ func (m *PoWMiner) loop() {
 			}
 			if result.err != nil {
 				log.Warn("Failed to build shard candidate", "err", result.err)
-				cancelTask()
+				task.cancel()
+				task = nil
 				schedule(miningRetryInterval)
 				continue
 			}
 			if !m.matchesHead(task.args) {
+				task.cancel()
+				task = nil
 				start()
 				continue
 			}
-			task.block = result.block
-			if err := engine.Seal(m.chain.chain, task.block, task.results, task.stop); err != nil {
+			next := task
+			task = nil
+			next.block = result.block
+			sealHash := engine.SealHash(next.block.Header())
+			if _, exists := pendingTasks[sealHash]; exists {
+				next.cancel()
+				schedule(m.workRefreshInterval)
+				continue
+			}
+			pendingTasks[sealHash] = next
+			if err := engine.Seal(m.chain.chain, next.block, results, next.stop); err != nil {
 				log.Warn("Failed to seal shard candidate", "err", err)
-				cancelTask()
+				delete(pendingTasks, sealHash)
+				next.cancel()
 				schedule(miningRetryInterval)
 				continue
 			}
-			results = task.results
+			// Keep searching the previous candidate until its replacement is ready.
+			// Closing stop ends local searching, not acceptance of pending results.
+			if sealing != nil {
+				sealing.cancel()
+			}
+			sealing = next
 			// Construction has its own transaction-filling time budget. Start the
 			// sealing interval now so slow builds still get a chance to publish work.
 			schedule(m.workRefreshInterval)
 		case block := <-results:
-			current := task
-			cancelTask()
-			if block == nil || engine.SealHash(block.Header()) != engine.SealHash(current.block.Header()) {
+			if block == nil || m.chain.chain.HasBlock(block.Hash(), block.NumberU64()) {
+				continue
+			}
+			current := pendingTasks[engine.SealHash(block.Header())]
+			if current == nil {
 				log.Warn("Discarding unrelated shard sealing result")
-				schedule(miningRetryInterval)
-			} else if err := m.importResult(current.args, block); err != nil {
+				continue
+			}
+			if err := m.importResult(current.args, block); err != nil {
 				log.Warn("Failed to import mined shard block", "number", block.NumberU64(), "err", err)
 				schedule(miningRetryInterval)
-			} else {
-				start()
 			}
+			// A successful canonical import triggers the head event above.
 		case <-m.ctx.Done():
 			return
 		}
