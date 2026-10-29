@@ -78,9 +78,10 @@ type PoWMinerConfig struct {
 
 // PoWMiner serves shard work to remote miners and mines locally, following
 // pyquarkchain's Miner. Work is built on demand, current per coinbase until it
-// expires or the shard head changes. Served candidates stay acceptable while
-// their parent is the head, including candidates superseded by newer work.
-// Seals are applied to the served candidate, which the backend imports.
+// expires or the shard head or root tip changes. Served candidates stay
+// acceptable while their parent is the head, including candidates superseded by
+// newer work. Seals are applied to the served candidate, which the backend
+// imports.
 type PoWMiner struct {
 	backend MinerBackend
 	config  PoWMinerConfig
@@ -97,6 +98,7 @@ type PoWMiner struct {
 type servedWork struct {
 	MiningWork
 	parent  common.Hash
+	root    common.Hash
 	expires time.Time
 }
 
@@ -116,7 +118,8 @@ func NewPoWMiner(backend MinerBackend, config PoWMinerConfig) *PoWMiner {
 }
 
 // GetWork returns the current work for coinbase, building it on the shard head
-// if coinbase has none, its work has expired or its parent is no longer the head.
+// if coinbase has none, its work has expired, or the shard head or root tip has
+// changed since it was built.
 func (m *PoWMiner) GetWork(ctx context.Context, coinbase common.Address) (*MiningWork, error) {
 	w, err := m.getWork(ctx, coinbase)
 	if err != nil {
@@ -146,7 +149,12 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if err != nil {
 		return nil, err
 	}
-	sealHash, err := block.Header().QKCSealHash()
+	header := block.Header()
+	sealHash, err := header.QKCSealHash()
+	if err != nil {
+		return nil, err
+	}
+	extra, err := header.QKCExtra()
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +166,7 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 			Time:       block.Time(),
 		},
 		parent:  block.ParentHash(),
+		root:    extra.PrevRootBlock,
 		expires: time.Now().Add(m.config.WorkRefresh),
 	}
 	m.mu.Lock()
@@ -167,13 +176,16 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	return w, nil
 }
 
-// currentWork returns the unexpired work for coinbase on the shard head, if any.
+// currentWork returns the unexpired work for coinbase on the shard head and root
+// tip, if any. Unlike pyquarkchain, a root tip change also rebuilds the work: a
+// root reorg can orphan the root block it references without moving the shard
+// head, after which the candidate cannot become the head.
 func (m *PoWMiner) currentWork(coinbase common.Address) *servedWork {
-	head := m.backend.CurrentBlock().Hash()
+	head, root := m.backend.CurrentBlock().Hash(), m.backend.RootTip()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w, ok := m.current.Get(coinbase)
-	if !ok || w.parent != head || !time.Now().Before(w.expires) || !m.works.Contains(w.SealHash) {
+	if !ok || w.parent != head || w.root != root || !time.Now().Before(w.expires) || !m.works.Contains(w.SealHash) {
 		return nil
 	}
 	return w

@@ -42,6 +42,9 @@ type MinerBackend interface {
 	// CurrentBlock returns the shard head.
 	CurrentBlock() *types.Header
 
+	// RootTip returns the hash of the root tip, which new candidates reference.
+	RootTip() common.Hash
+
 	// SubscribeChainHeadEvent registers a subscription for shard head changes.
 	SubscribeChainHeadEvent(ch chan<- core.ChainHeadEvent) event.Subscription
 }
@@ -92,6 +95,15 @@ func (s *Shard) InsertMinedBlock(block *types.Block) error {
 // CurrentBlock returns the shard head.
 func (s *Shard) CurrentBlock() *types.Header {
 	return s.chain.chain.CurrentBlock()
+}
+
+// RootTip returns the hash of the root tip, or the zero hash before the shard
+// chain is initialized.
+func (s *Shard) RootTip() common.Hash {
+	if tip := s.chain.RootTip(); tip != nil {
+		return tip.Hash()
+	}
+	return common.Hash{}
 }
 
 // SubscribeChainHeadEvent registers a subscription for shard head changes.

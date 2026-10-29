@@ -209,6 +209,14 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 	return nil
 }
 
+// RootTip returns the root tip, or nil before Init. It waits for an import in
+// progress.
+func (c *ShardChain) RootTip() *qkctypes.RootBlockHeader {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rootTip
+}
+
 // validateGenesisRoot verifies the body commitment and this shard's sole
 // genesis header. Other shards' genesis hashes and heights are their own
 // responsibility; this shard only decodes their shard IDs to skip them.

@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/holiman/uint256"
 )
 
 func testPoWMiner(t *testing.T, test func(*testing.T)) {
@@ -106,6 +107,24 @@ func TestPoWMinerGetWork(t *testing.T) {
 		next := getWork(t, m, a)
 		if next.Number != 2 || m.servedBlock(next.SealHash).ParentHash() != env.chain.CurrentBlock().Hash() {
 			t.Fatal("work was not rebuilt on the new head")
+		}
+	})
+}
+
+func TestPoWMinerGetWorkRootReorg(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		env, m := newPoWMinerEnv(t, PoWMinerConfig{})
+		coinbase := common.Address{0xaa}
+		first := getWork(t, m, coinbase)
+		// Replace the root tip the work references, keeping the shard head.
+		seed := uint64(1)
+		fork := env.sc.RootBlock(env.sc.rootTip.ParentHash).Header().CreateBlockToAppend(nil, uint256.NewInt(1), nil, &seed, nil)
+		env.insertRoot(fork, true)
+		env.checkHead(env.genesis)
+		work := getWork(t, m, coinbase)
+		extra, _ := m.servedBlock(work.SealHash).Header().QKCExtra()
+		if work.SealHash == first.SealHash || extra.PrevRootBlock != fork.Hash() {
+			t.Fatal("work was not rebuilt on the new root tip")
 		}
 	})
 }
