@@ -19,6 +19,11 @@ import (
 
 // TypedHandler processes a deserialized request and returns a deserialized
 // response. The framework handles payload serialization/deserialization.
+// RPC handlers must return a non-nil response. Business rejections belong in
+// the response (for example, ErrorCode), with a nil error. A non-nil error or
+// panic is fatal to the connection. Non-RPC handlers may return a nil response.
+// Handlers run concurrently, without an execution-order guarantee, and are
+// neither canceled nor awaited by Close.
 type TypedHandler func(req any) (resp any, err error)
 
 // OpSerializer describes how to deserialize a request and serialize a response
@@ -33,6 +38,7 @@ type OpSerializer struct {
 
 // OpSerializerFor creates an OpSerializer for request type R and response type
 // S, with the response opcode set to respOp.
+// Its Serialize callback accepts both requests and responses.
 func OpSerializerFor[R, S any](respOp byte) *OpSerializer {
 	return &OpSerializer{
 		NewRequest:  func() any { return new(R) },
@@ -57,7 +63,8 @@ func OpSerializerFor[R, S any](respOp byte) *OpSerializer {
 
 // pendingRPC represents an in-flight RPC call waiting for its response.
 type pendingRPC struct {
-	result chan any // cap 1
+	result     chan any // cap 1
+	expectedOp byte
 }
 
 // ConnectionState is the connection lifecycle state.
@@ -101,10 +108,11 @@ type BaseConn struct {
 	transport FrameTransport
 
 	// Configuration. Immutable after construction.
-	serializers   map[byte]*OpSerializer
-	typedHandlers map[byte]TypedHandler
-	nonRPCOps     map[byte]struct{}
-	forwarder     func(*wire.ClusterFrame) bool
+	requestSerializers  map[byte]*OpSerializer
+	responseSerializers map[byte]*OpSerializer
+	typedHandlers       map[byte]TypedHandler
+	nonRPCOps           map[byte]struct{}
+	forwarder           func(*wire.ClusterFrame) bool
 
 	// -- Protocol state (mu) --
 	mu        sync.RWMutex
@@ -142,14 +150,15 @@ func NewBaseConn(cfg Config) *BaseConn {
 		logger = log.Root()
 	}
 
-	// Register RPC serializers under both their request and response opcodes;
-	// non-RPC serializers are request-only (dummy response opcode ignored).
-	serializers := make(map[byte]*OpSerializer, len(cfg.Serializers)*2)
+	// Keep request and response opcodes separate. A request without a local
+	// handler is outbound-only and must never be accepted as a response.
+	requestSerializers := make(map[byte]*OpSerializer, len(cfg.Serializers))
+	responseSerializers := make(map[byte]*OpSerializer, len(cfg.Serializers))
 	for opcode, ser := range cfg.Serializers {
-		serializers[opcode] = ser
+		requestSerializers[opcode] = ser
 
 		if _, nonRPC := cfg.NonRPCOps[opcode]; !nonRPC {
-			serializers[ser.ResponseOpCode] = ser
+			responseSerializers[ser.ResponseOpCode] = ser
 		}
 	}
 
@@ -164,16 +173,17 @@ func NewBaseConn(cfg Config) *BaseConn {
 	}
 
 	rc := &BaseConn{
-		transport:     cfg.Transport,
-		typedHandlers: handlers,
-		serializers:   serializers,
-		nonRPCOps:     nonRPCOps,
-		forwarder:     cfg.Forwarder,
-		activeChan:    make(chan struct{}),
-		closedChan:    make(chan struct{}),
-		pending:       make(map[uint64]*pendingRPC),
-		state:         ConnectionStateConnecting,
-		log:           logger,
+		transport:           cfg.Transport,
+		typedHandlers:       handlers,
+		requestSerializers:  requestSerializers,
+		responseSerializers: responseSerializers,
+		nonRPCOps:           nonRPCOps,
+		forwarder:           cfg.Forwarder,
+		activeChan:          make(chan struct{}),
+		closedChan:          make(chan struct{}),
+		pending:             make(map[uint64]*pendingRPC),
+		state:               ConnectionStateConnecting,
+		log:                 logger,
 	}
 	return rc
 }
@@ -196,6 +206,7 @@ func (c *BaseConn) Start() {
 }
 
 // Close closes the connection and wakes all pending RPCs.
+// It does not cancel or wait for handler goroutines.
 func (c *BaseConn) Close() {
 	c.shutdown(nil)
 }
@@ -214,12 +225,15 @@ func (c *BaseConn) SendRPCWithPeerID(
 	payload []byte,
 	clusterPeerID uint64,
 ) (any, error) {
-	ser, ok := c.serializers[opcode]
+	ser, ok := c.requestSerializers[opcode]
 	_, nonRPC := c.nonRPCOps[opcode]
-	if !ok || nonRPC || ser.ResponseOpCode == opcode {
+	if !ok || nonRPC {
 		return nil, fmt.Errorf("unknown rpc request opcode 0x%x", opcode)
 	}
-	call := &pendingRPC{result: make(chan any, 1)}
+	call := &pendingRPC{
+		result:     make(chan any, 1),
+		expectedOp: ser.ResponseOpCode,
+	}
 
 	c.writeMu.Lock()
 
@@ -458,16 +472,16 @@ func (c *BaseConn) handleFrame(frame *wire.ClusterFrame) {
 		return
 	}
 
-	// Handler registration defines the inbound request opcode set; see Config.Handlers.
-	handler, isRequest := c.typedHandlers[frame.Opcode]
-	_, isNonRPC := c.nonRPCOps[frame.Opcode]
-	ser := c.serializers[frame.Opcode]
-
-	if isRequest {
-		c.handleRequest(frame, handler, ser, isNonRPC)
-	} else {
+	if ser := c.responseSerializers[frame.Opcode]; ser != nil {
 		c.handleResponse(frame, ser)
+		return
 	}
+	if handler, ok := c.typedHandlers[frame.Opcode]; ok {
+		_, isNonRPC := c.nonRPCOps[frame.Opcode]
+		c.handleRequest(frame, handler, c.requestSerializers[frame.Opcode], isNonRPC)
+		return
+	}
+	c.shutdown(fmt.Errorf("unsupported inbound opcode 0x%x", frame.Opcode))
 }
 
 // -- handleResponse (inbound response matching) -------------------------------
@@ -475,16 +489,16 @@ func (c *BaseConn) handleFrame(frame *wire.ClusterFrame) {
 // handleResponse matches an inbound response to a pending RPC.
 // Late and duplicate responses are ignored.
 func (c *BaseConn) handleResponse(frame *wire.ClusterFrame, ser *OpSerializer) {
-	if ser == nil {
-		c.log.Warn("unknown response opcode", "opcode", frame.Opcode)
-		c.shutdown(fmt.Errorf("unknown response opcode 0x%x", frame.Opcode))
-		return
-	}
-
 	c.mu.Lock()
 	// A missing call with an allocated ID is a late or duplicate response.
 	allocated := frame.RPCID > 0 && frame.RPCID <= c.nextRPCID
 	call := c.pending[frame.RPCID]
+	if call != nil && frame.Opcode != call.expectedOp {
+		c.mu.Unlock()
+		c.shutdown(fmt.Errorf("unexpected response opcode 0x%x for rpc %d (want 0x%x)",
+			frame.Opcode, frame.RPCID, call.expectedOp))
+		return
+	}
 	delete(c.pending, frame.RPCID)
 	c.mu.Unlock()
 
@@ -552,7 +566,6 @@ func (c *BaseConn) dispatch(frame *wire.ClusterFrame, handler TypedHandler, ser 
 	if frame.RPCID == 0 {
 		return
 	}
-
 	respPayload, err := ser.Serialize(resp)
 	if err != nil {
 		c.shutdown(fmt.Errorf("serialize response failed: %w", err))
@@ -611,6 +624,9 @@ func (c *BaseConn) shutdown(cause error) {
 
 // -- RPC ID validation (default) ---------------------------------------------
 
+// defaultValidateRPCID preserves the monotonic request-ID rule inherited from
+// pyquarkchain's AbstractConnection.validate_and_update_peer_rpc_id in quarkchain/protocol.py.
+// It validates arrival order only; dispatch goroutines may execute out of order.
 func (c *BaseConn) defaultValidateRPCID(rpcID uint64) bool {
 	if rpcID <= c.peerRPCID {
 		return false

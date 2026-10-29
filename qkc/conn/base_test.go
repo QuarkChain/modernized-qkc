@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -319,6 +320,50 @@ func serializerMissingCallback(missing string) *OpSerializer {
 	return ser
 }
 
+// Keep the canonical serializer pairs consistent with the wire payload registry.
+// The registry itself does not carry request/response pairing information.
+func TestOpSerializerFor_WireRegistry(t *testing.T) {
+	serializers := map[wire.ClusterOp]*OpSerializer{
+		wire.ClusterOpPing:                       pingSer,
+		wire.ClusterOpConnectToChainsRequest:     OpSerializerFor[wire.ConnectToChainsRequest, wire.ConnectToChainsResponse](byte(wire.ClusterOpConnectToChainsResponse)),
+		wire.ClusterOpAddRootBlockRequest:        OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
+		wire.ClusterOpAddMinorBlockHeaderRequest: OpSerializerFor[wire.AddMinorBlockHeaderRequest, wire.AddMinorBlockHeaderResponse](byte(wire.ClusterOpAddMinorBlockHeaderResponse)),
+		wire.ClusterOpAddXshardTxListRequest:     OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+		wire.ClusterOpGetRootChainStakesRequest:  OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
+	}
+	covered := make(map[wire.ClusterOp]bool)
+	for requestOp, ser := range serializers {
+		for _, tc := range []struct {
+			op      wire.ClusterOp
+			message any
+		}{
+			{requestOp, ser.NewRequest()},
+			{wire.ClusterOp(ser.ResponseOpCode), ser.NewResponse()},
+		} {
+			registered, err := wire.NewClusterMessage(tc.op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reflect.TypeOf(tc.message) != reflect.TypeOf(registered) {
+				t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", tc.op, tc.message, registered)
+			}
+			covered[tc.op] = true
+		}
+	}
+	for op := int(wire.ClusterOpBase); op <= math.MaxUint8; op++ {
+		if _, err := wire.NewClusterMessage(wire.ClusterOp(op)); err == nil && !covered[wire.ClusterOp(op)] {
+			t.Errorf("opcode 0x%x has no serializer coverage", op)
+		}
+	}
+	hello, err := wire.NewCommandMessage(wire.CommandOpHello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request := NonRPCSerializerFor[wire.HelloCommand]().NewRequest(); reflect.TypeOf(request) != reflect.TypeOf(hello) {
+		t.Errorf("Hello serializer creates %T, wire registry creates %T", request, hello)
+	}
+}
+
 // TestConfig_ValidationPanics covers config validation panics.
 func TestConfig_ValidationPanics(t *testing.T) {
 	tests := []struct {
@@ -356,9 +401,8 @@ func TestConfig_ValidationPanics(t *testing.T) {
 }
 
 // TestConfig_ResponseOpcodePanics: response opcodes must be unique and disjoint
-// from every request opcode (RPC or non-RPC), otherwise serializers[respOp]
-// would be overwritten by map-iteration order and inbound frames decoded
-// through a random serializer.
+// from every request opcode (RPC or non-RPC), so classification is unambiguous
+// and response serializers cannot depend on map-iteration order.
 func TestConfig_ResponseOpcodePanics(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -814,41 +858,80 @@ func TestBaseConn_DuplicateResponseDoesNotCompleteNextRPC(t *testing.T) {
 	}
 }
 
-// TestBaseConn_ResponseOpcodeSelectsSerializer documents the internal protocol
-// contract: RPCID selects the pending call and the frame opcode selects the
-// response serializer. The peer is responsible for sending the paired opcode.
-func TestBaseConn_ResponseOpcodeSelectsSerializer(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(Config{
-		Transport: tr,
-		Serializers: map[byte]*OpSerializer{
-			byte(wire.ClusterOpPing):                   pingSer,
-			byte(wire.ClusterOpConnectToChainsRequest): OpSerializerFor[wire.ConnectToChainsRequest, wire.ConnectToChainsResponse](byte(wire.ClusterOpConnectToChainsResponse)),
+// Registered request and command opcodes must never complete a pending RPC.
+// A response opcode must match the response paired with that RPC's request.
+func TestBaseConn_InvalidResponseOpcodeClosesConnection(t *testing.T) {
+	rootOp := byte(wire.ClusterOpAddRootBlockRequest)
+	rootSer := OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse))
+	connectOp := byte(wire.ClusterOpConnectToChainsRequest)
+	connectSer := OpSerializerFor[wire.ConnectToChainsRequest, wire.ConnectToChainsResponse](byte(wire.ClusterOpConnectToChainsResponse))
+	helloOp := byte(wire.CommandOpHello)
+	for _, tc := range []struct {
+		name        string
+		requestOp   byte
+		inboundOp   byte
+		payload     []byte
+		serializers map[byte]*OpSerializer
+		nonRPC      map[byte]struct{}
+	}{
+		{
+			name:        "request opcode instead of root block acknowledgement",
+			requestOp:   rootOp,
+			inboundOp:   rootOp,
+			payload:     mustSerialize(t, &wire.AddRootBlockResponse{}),
+			serializers: map[byte]*OpSerializer{rootOp: rootSer},
 		},
-	})
-	conn.Start()
-	defer conn.Close()
-
-	result := make(chan rpcResult, 1)
-	go func() {
-		resp, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		result <- rpcResult{resp: resp, err: err}
-	}()
-	request := receive(t, tr.writes, "ping request")
-	payload, err := (&wire.ConnectToChainsResponse{}).MarshalSSZ()
-	if err != nil {
-		t.Fatal(err)
-	}
-	feedFrame(t, tr, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpConnectToChainsResponse), RPCID: request.RPCID, Payload: payload})
-	res := receive(t, result, "response result")
-	if res.err != nil {
-		t.Fatalf("RPC failed: %v", res.err)
-	}
-	if _, ok := res.resp.(*wire.ConnectToChainsResponse); !ok {
-		t.Fatalf("response type = %T, want *wire.ConnectToChainsResponse", res.resp)
-	}
-	if !conn.IsActive() || conn.pendingLen() != 0 {
-		t.Fatal("response did not complete the pending RPC cleanly")
+		{
+			name:        "response opcode paired with a different request",
+			requestOp:   byte(wire.ClusterOpPing),
+			inboundOp:   byte(wire.ClusterOpConnectToChainsResponse),
+			payload:     mustSerialize(t, &wire.ConnectToChainsResponse{}),
+			serializers: map[byte]*OpSerializer{byte(wire.ClusterOpPing): pingSer, connectOp: connectSer},
+		},
+		{
+			name:        "outbound-only request opcode",
+			requestOp:   byte(wire.ClusterOpPing),
+			inboundOp:   rootOp,
+			payload:     mustSerialize(t, &wire.AddRootBlockRequest{}),
+			serializers: map[byte]*OpSerializer{byte(wire.ClusterOpPing): pingSer, rootOp: rootSer},
+		},
+		{
+			name:        "non-RPC command without handler and nonzero RPC ID",
+			requestOp:   byte(wire.ClusterOpPing),
+			inboundOp:   helloOp,
+			payload:     validHelloPayload(t),
+			serializers: map[byte]*OpSerializer{byte(wire.ClusterOpPing): pingSer, helloOp: NonRPCSerializerFor[wire.HelloCommand]()},
+			nonRPC:      map[byte]struct{}{helloOp: {}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newFakeFrameTransport()
+			conn := NewBaseConn(Config{Transport: tr, Serializers: tc.serializers, NonRPCOps: tc.nonRPC})
+			conn.Start()
+			defer conn.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan rpcResult, 1)
+			ser := tc.serializers[tc.requestOp]
+			requestPayload, err := ser.Serialize(ser.NewRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() {
+				resp, err := conn.SendRPC(ctx, tc.requestOp, requestPayload)
+				result <- rpcResult{resp: resp, err: err}
+			}()
+			request := receive(t, tr.writes, "RPC request")
+			feedFrame(t, tr, &wire.ClusterFrame{Opcode: tc.inboundOp, RPCID: request.RPCID, Payload: tc.payload})
+			res := receive(t, result, "rejected response result")
+			if res.err != ErrConnectionClosed || res.resp != nil {
+				t.Fatalf("invalid response completed RPC: response=%T err=%v", res.resp, res.err)
+			}
+			awaitClosed(t, conn, "invalid response opcode")
+			if n := conn.pendingLen(); n != 0 {
+				t.Fatalf("pending = %d, want 0", n)
+			}
+		})
 	}
 }
 
@@ -1775,6 +1858,30 @@ func TestBaseConn_HandlerErrorShutsDownConnection(t *testing.T) {
 	}
 }
 
+func TestBaseConn_BusinessRejectionKeepsConnectionActive(t *testing.T) {
+	tr := newFakeFrameTransport()
+	requestOp := byte(wire.ClusterOpAddRootBlockRequest)
+	responseOp := byte(wire.ClusterOpAddRootBlockResponse)
+	conn := NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: map[byte]*OpSerializer{requestOp: OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](responseOp)},
+		Handlers: map[byte]TypedHandler{
+			requestOp: func(any) (any, error) { return &wire.AddRootBlockResponse{ErrorCode: 7}, nil },
+		},
+	})
+	conn.Start()
+	defer conn.Close()
+	feedFrame(t, tr, &wire.ClusterFrame{Opcode: requestOp, RPCID: 1, Payload: mustSerialize(t, &wire.AddRootBlockRequest{})})
+	frame := receive(t, tr.writes, "business rejection response")
+	response := new(wire.AddRootBlockResponse)
+	if err := response.UnmarshalSSZ(frame.Payload); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Opcode != responseOp || frame.RPCID != 1 || response.ErrorCode != 7 || !conn.IsActive() {
+		t.Fatalf("business rejection: frame=%+v response=%+v state=%v", frame, response, conn.State())
+	}
+}
+
 // TestBaseConn_ResponseSerializationFailureShutsDown: the handler succeeds but
 // serializing its response fails -> connection shutdown, nothing written.
 func TestBaseConn_ResponseSerializationFailureShutsDown(t *testing.T) {
@@ -2074,48 +2181,36 @@ func TestNonRPC(t *testing.T) {
 	})
 }
 
-// TestBaseConn_OpcodeWithoutHandlerUsesResponsePath documents that Handlers,
-// rather than Serializers, defines the inbound request opcode set.
-func TestBaseConn_OpcodeWithoutHandlerUsesResponsePath(t *testing.T) {
-	const cmdOp = byte(wire.CommandOpHello)
-	tr := newFakeFrameTransport()
-	barrier := make(chan struct{})
-	conn := NewBaseConn(Config{
-		Transport: tr,
-		Serializers: map[byte]*OpSerializer{
-			byte(wire.ClusterOpPing): pingSer,
-			cmdOp:                    OpSerializerFor[wire.HelloCommand, wire.HelloCommand](cmdOp),
-		},
-		NonRPCOps: map[byte]struct{}{cmdOp: {}},
-		Forwarder: func(frame *wire.ClusterFrame) bool {
-			if frame.RPCID == math.MaxUint64 {
-				close(barrier)
-				return true
+// A canceled RPC ID only permits late responses, never unsupported requests.
+func TestBaseConn_OpcodeWithoutHandlerClosesConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opcode  byte
+		payload []byte
+	}{
+		{"RPC request", byte(wire.ClusterOpPing), validPingPayload(t)},
+		{"non-RPC command", byte(wire.CommandOpHello), validHelloPayload(t)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newFakeFrameTransport()
+			conn := newConnWithHello(tr)
+			conn.Start()
+			defer conn.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+				result <- err
+			}()
+			request := receive(t, tr.writes, "RPC request")
+			cancel()
+			if err := receive(t, result, "canceled RPC"); err != context.Canceled {
+				t.Fatalf("RPC error = %v, want context canceled", err)
 			}
-			return false
-		},
-	})
-	conn.Start()
-	defer conn.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	result := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-		result <- err
-	}()
-	request := receive(t, tr.writes, "RPC request")
-	cancel()
-	if err := receive(t, result, "canceled RPC"); err != context.Canceled {
-		t.Fatalf("RPC error = %v, want context canceled", err)
-	}
-	// Without a handler this registered opcode takes the response path. Since
-	// the RPC ID was already allocated and canceled, it is ignored as late.
-	feedFrame(t, tr, &wire.ClusterFrame{Opcode: cmdOp, RPCID: request.RPCID, Payload: validHelloPayload(t)})
-	feedFrame(t, tr, &wire.ClusterFrame{RPCID: math.MaxUint64})
-	receive(t, barrier, "reader barrier")
-	if !conn.IsActive() {
-		t.Fatal("opcode without a handler was dispatched as a request")
+			feedFrame(t, tr, &wire.ClusterFrame{Opcode: tc.opcode, RPCID: request.RPCID, Payload: tc.payload})
+			awaitClosed(t, conn, "request opcode without a handler")
+		})
 	}
 }
 

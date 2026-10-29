@@ -16,19 +16,20 @@ type Config struct {
 
 	// Serializers maps locally supported request opcodes to their serializers.
 	// It may include outbound-only requests which have no entry in Handlers.
-	// RPC serializers are also registered under their response opcode;
-	// non-RPC serializers (see NonRPCOps) are request-only.
-	// Responses are correlated by RPC ID, while their opcode selects the
-	// serializer. Peers must therefore reply with the configured ResponseOpCode.
+	// RPC response opcodes are kept in a separate internal table;
+	// non-RPC serializers (see NonRPCOps) have no response opcode.
+	// A response must match both the pending RPC ID and its ResponseOpCode.
 	// All serializer callbacks are required.
 	Serializers map[byte]*OpSerializer
 
 	// Handlers maps inbound request opcodes to their handlers. Its keys define
-	// which opcodes are dispatched as requests; any other registered opcode is
-	// handled as a response. Both endpoints must therefore register a handler
-	// for every request the other endpoint can send.
+	// which request opcodes this endpoint accepts. Requests without a handler
+	// are rejected, even if their serializer is registered for outbound use.
 	// Must be safe for concurrent use: handlers may be called from multiple
-	// dispatch goroutines.
+	// dispatch goroutines, in a different order from frame arrival. Business
+	// operations that require ordering must serialize their own execution.
+	// The external peer ingress layer must bound admitted work; dispatch itself
+	// does not impose a concurrency limit.
 	Handlers map[byte]TypedHandler
 
 	// NonRPCOps marks fire-and-forget opcodes that must use rpc_id=0.
@@ -37,13 +38,19 @@ type Config struct {
 
 	// Forwarder optionally routes inbound frames before normal dispatch.
 	//
-	// It runs synchronously on the reader goroutine. The callback should be
-	// lightweight and must not block waiting for work that requires this
-	// connection's reader loop (for example, sending an RPC and waiting for its
-	// response).
+	// It runs synchronously on the reader goroutine. Handoff must be nonblocking;
+	// a full destination queue requires an explicit ingress policy. Blocking the
+	// callback prevents all RPC responses and virtual peers on this link from
+	// making progress.
+	//
+	// On a multiplexed physical connection, it must consume every frame with a
+	// nonzero ClusterPeerID, including responses and unknown or destroyed routes.
+	// Such frames must never fall through to local dispatch. Reject unknown routes
+	// according to the routing layer's policy and return true.
 	//
 	// To close the connection, call c.Close() directly. It does not wait for
-	// the reader loop, but it calls transport.Close synchronously.
+	// the reader loop, but it calls transport.Close synchronously. Return true
+	// to prevent the current frame from being dispatched after closing.
 	//
 	// The callback is responsible for synchronizing any shared state it accesses.
 	Forwarder func(*wire.ClusterFrame) bool
@@ -65,8 +72,8 @@ func (cfg *Config) validate() {
 
 	// Every configured opcode is a request opcode, whether sent or handled by
 	// this endpoint. Response opcodes must stay disjoint from them and unique:
-	// otherwise serializers[respOp] would be overwritten by map-iteration
-	// order and inbound frames decoded through a random serializer.
+	// otherwise request/response classification would be ambiguous or a
+	// response serializer would depend on map-iteration order.
 	requestOps := make(map[byte]struct{}, len(cfg.Serializers))
 	for op, ser := range cfg.Serializers {
 		if ser == nil {

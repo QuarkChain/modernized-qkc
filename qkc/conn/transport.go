@@ -26,6 +26,8 @@ var frameWriteTimeout = 20 * time.Second
 //
 // Close must be safe to call concurrently with ReadFrame/WriteFrame and must
 // unblock any currently blocked I/O operation.
+// A virtual transport's Close must close only that virtual connection and leave
+// the shared physical transport available to other routes.
 type FrameTransport interface {
 	ReadFrame() (*wire.ClusterFrame, error)
 	WriteFrame(*wire.ClusterFrame) error
