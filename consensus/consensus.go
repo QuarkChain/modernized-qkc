@@ -61,6 +61,13 @@ type StakingReader interface {
 	GetShardLockedStakes(header *types.Header, staker common.Address) (*uint256.Int, error)
 }
 
+// SealVerifier extends engines whose seals depend on execution state. ValidateBody
+// calls it after checking the parent state; such engines must not verify seals in
+// VerifyHeaders. Other engines retain their existing header-verification behavior.
+type SealVerifier interface {
+	VerifySeal(chain ChainHeaderReader, header *types.Header) error
+}
+
 // Engine is an algorithm agnostic consensus engine.
 type Engine interface {
 	// Author retrieves the Ethereum address of the account that minted the given
