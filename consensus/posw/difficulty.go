@@ -19,6 +19,9 @@ package posw
 import (
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -77,4 +80,47 @@ func GetAdjustedDifficulty(config *params.PoSWConfig, number, difficulty *big.In
 		}
 	}
 	return diff
+}
+
+// AdjustedShardDifficulty returns the difficulty a shard block's seal must
+// meet: the base difficulty in its header, divided if its coinbase has enough
+// stake at the parent state. Block producers serve it as the mining target and
+// seal verification checks against it, so both must use this function.
+func AdjustedShardDifficulty(config *params.PoSWConfig, chain consensus.ChainHeaderReader, stakes consensus.StakingReader, header *types.Header) (*big.Int, error) {
+	diff := header.QKCDifficulty()
+	if config == nil || !config.StakingEnabled || header.Number.Sign() == 0 {
+		return diff, nil
+	}
+	parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+	if parent == nil {
+		return nil, consensus.ErrUnknownAncestor
+	}
+	locked, err := stakes.GetShardLockedStakes(parent, header.Coinbase)
+	if err != nil {
+		return nil, err
+	}
+	mined, err := minedInWindow(chain, parent, header.Coinbase, config.WindowSize-1)
+	if err != nil {
+		return nil, err
+	}
+	return GetAdjustedDifficulty(config, header.Number, diff, locked, mined), nil
+}
+
+// minedInWindow counts the blocks by coinbase among the n blocks ending at
+// header, or fewer near genesis. Like pyquarkchain, genesis is counted.
+func minedInWindow(chain consensus.ChainHeaderReader, header *types.Header, coinbase common.Address, n uint64) (uint64, error) {
+	var mined uint64
+	for ; n > 0; n-- {
+		if header.Coinbase == coinbase {
+			mined++
+		}
+		if n == 1 || header.Number.Sign() == 0 {
+			break
+		}
+		header = chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+		if header == nil {
+			return 0, consensus.ErrUnknownAncestor
+		}
+	}
+	return mined, nil
 }
