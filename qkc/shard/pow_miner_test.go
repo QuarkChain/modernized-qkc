@@ -306,54 +306,97 @@ func TestPoWMinerWorkRefresh(t *testing.T) {
 	})
 }
 
-func TestPoWMinerTipChanges(t *testing.T) {
-	for _, rootChange := range []bool{false, true} {
-		name := "shard"
-		if rootChange {
-			name = "root"
+func TestPoWMinerHeadChange(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		engine := newControlledMiningEngine()
+		env, m, _ := newShardMiningEnv(t, engine)
+		m.Start()
+		first := nextMiningWork(t, engine)
+		competitor := first.sealed(2)
+		if err := env.sc.InsertShardBlock(competitor); err != nil {
+			t.Fatal(err)
 		}
-		t.Run(name, func(t *testing.T) {
+		second := nextMiningWork(t, engine)
+		checkMiningCancelled(t, first)
+		extra, _ := second.block.Header().QKCExtra()
+		if second.block.ParentHash() != competitor.Hash() || extra.PrevRootBlock != env.rootGenesis.Hash() {
+			t.Fatal("candidate did not follow the new head")
+		}
+		late := first.sealed(1)
+		first.results <- late
+		// Also exercise the final freshness check independently of event delivery.
+		oldExtra, _ := first.block.Header().QKCExtra()
+		if err := m.importResult(miner.QKCBlockArgs{Parent: first.block.ParentHash(), PrevRootBlock: oldExtra.PrevRootBlock}, late); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
+			t.Fatal("head change allowed obsolete work to be imported")
+		}
+		sealed := second.sealed(3)
+		second.results <- sealed
+		nextMiningWork(t, engine)
+		env.checkHead(sealed)
+	})
+}
+
+func TestPoWMinerRootAdvance(t *testing.T) {
+	for _, stage := range []string{"building", "sealing"} {
+		t.Run(stage, func(t *testing.T) {
 			testPoWMiner(t, func(t *testing.T) {
 				engine := newControlledMiningEngine()
+				entered, release := make(chan struct{}), make(chan struct{})
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				var calls atomic.Int32
+				engine.prepare = func(*types.Header) error {
+					if calls.Add(1) == 1 {
+						close(entered)
+						<-release
+					}
+					return nil
+				}
 				env, m, _ := newShardMiningEnv(t, engine)
 				m.Start()
-				first := nextMiningWork(t, engine)
-				parent, root := env.genesis.Hash(), env.rootGenesis.Hash()
-				if rootChange {
-					newTip := newRoot(env.rootGenesis, 1)
-					if changed, err := env.sc.InsertRootBlock(newTip); err != nil || !changed {
-						t.Fatalf("root import: changed %v, err %v", changed, err)
-					}
-					root = newTip.Hash()
-					env.checkHead(env.genesis)
-				} else {
-					competitor := first.sealed(2)
-					if err := env.sc.InsertShardBlock(competitor); err != nil {
-						t.Fatal(err)
-					}
-					parent = competitor.Hash()
+				<-entered
+				var work controlledMiningWork
+				if stage == "sealing" {
+					close(release)
+					work = nextMiningWork(t, engine)
 				}
-				second := nextMiningWork(t, engine)
-				checkMiningCancelled(t, first)
-				extra, _ := second.block.Header().QKCExtra()
-				if second.block.ParentHash() != parent || extra.PrevRootBlock != root {
-					t.Fatal("candidate did not follow the new tips")
+				newTip := newRoot(env.rootGenesis, 1)
+				env.insertRoot(newTip, true)
+				env.checkHead(env.genesis)
+				checkNoMiningWork(t, engine)
+				if stage == "building" {
+					close(release)
+					work = nextMiningWork(t, engine)
 				}
-				late := first.sealed(1)
-				first.results <- late
-				// Also exercise the final freshness check independently of event delivery.
-				oldExtra, _ := first.block.Header().QKCExtra()
-				if err := m.importResult(miner.QKCBlockArgs{Parent: first.block.ParentHash(), PrevRootBlock: oldExtra.PrevRootBlock}, late); err != nil {
-					t.Fatal(err)
+				if calls.Load() != 1 {
+					t.Fatal("root advance restarted candidate construction")
 				}
-				synctest.Wait()
-				if env.chain.HasBlock(late.Hash(), late.NumberU64()) {
-					t.Fatal("tip change allowed obsolete work to be imported")
+				select {
+				case <-work.stop:
+					t.Fatal("root advance cancelled valid sealing work")
+				default:
 				}
-				sealed := second.sealed(3)
-				second.results <- sealed
-				nextMiningWork(t, engine)
+				extra, _ := work.block.Header().QKCExtra()
+				if extra.PrevRootBlock != env.rootGenesis.Hash() {
+					t.Fatal("root advance replaced work referencing the previous root")
+				}
+				sealed := work.sealed(1)
+				work.results <- sealed
+				next := nextMiningWork(t, engine)
 				env.checkHead(sealed)
+				extra, _ = next.block.Header().QKCExtra()
+				if next.block.ParentHash() != sealed.Hash() || extra.PrevRootBlock != newTip.Hash() {
+					t.Fatal("next candidate did not use the new head and root tip")
+				}
 			})
 		})
 	}

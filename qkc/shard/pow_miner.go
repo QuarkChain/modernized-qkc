@@ -241,7 +241,7 @@ func (m *PoWMiner) loop() {
 			}
 			close(cmd.done)
 		case <-m.tips:
-			if task == nil || !m.matchesTips(task.args) {
+			if task == nil || !m.matchesHead(task.args) {
 				start()
 			}
 		case <-tick:
@@ -258,7 +258,7 @@ func (m *PoWMiner) loop() {
 				schedule(miningRetryInterval)
 				continue
 			}
-			if !m.matchesTips(task.args) {
+			if !m.matchesHead(task.args) {
 				start()
 				continue
 			}
@@ -291,23 +291,18 @@ func (m *PoWMiner) loop() {
 	}
 }
 
-func (m *PoWMiner) matchesTips(args miner.QKCBlockArgs) bool {
-	m.chain.mu.Lock()
-	defer m.chain.mu.Unlock()
-	return m.matchesTipsLocked(args)
-}
-
-func (m *PoWMiner) matchesTipsLocked(args miner.QKCBlockArgs) bool {
-	return m.chain.rootTip != nil && m.chain.rootTip.Hash() == args.PrevRootBlock &&
-		m.chain.chain.CurrentBlock().Hash() == args.Parent
+// Root validity is checked on import; advancing the root tip alone does not
+// invalidate work that still extends the shard head.
+func (m *PoWMiner) matchesHead(args miner.QKCBlockArgs) bool {
+	return m.chain.chain.CurrentBlock().Hash() == args.Parent
 }
 
 func (m *PoWMiner) importResult(args miner.QKCBlockArgs, block *types.Block) error {
 	m.chain.mu.Lock()
 	defer m.chain.mu.Unlock()
-	// Check freshness under the import lock so a concurrent tip update cannot
+	// Check freshness under the import lock so a concurrent head update cannot
 	// turn this result stale between the check and InsertShardBlock's shared path.
-	if m.ctx.Err() != nil || !m.matchesTipsLocked(args) {
+	if m.ctx.Err() != nil || !m.matchesHead(args) {
 		return nil
 	}
 	return m.chain.insertShardBlock(block)
