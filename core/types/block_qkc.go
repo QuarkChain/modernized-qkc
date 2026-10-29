@@ -144,8 +144,8 @@ func (h *Header) QKCExtra() (*QKCExtra, error) {
 }
 
 // SanityCheckQKC checks a QKC header's field constraints without reading
-// configuration, parents or state. Callers validate protocol gas limits, height,
-// shard identity, difficulty adjustment, timestamps and the seal separately.
+// configuration, parents or state. Callers validate fork-dependent fields,
+// protocol gas limits, height, shard identity, difficulty, timestamps and the seal.
 func (h *Header) SanityCheckQKC() error {
 	extra, err := h.QKCExtra()
 	if err != nil {
@@ -169,25 +169,6 @@ func (h *Header) SanityCheckQKC() error {
 	if extra.XShardGasUsed > extra.XShardGasLimit {
 		return fmt.Errorf("cross-shard gas used exceeds limit: used %d, limit %d", extra.XShardGasUsed, extra.XShardGasLimit)
 	}
-	// QKC has no beacon withdrawals or blob transactions. Unused optional
-	// fields may be nil; when present they must be empty or zero.
-	if h.WithdrawalsHash != nil && *h.WithdrawalsHash != EmptyWithdrawalsHash {
-		return errors.New("qkc withdrawals must be empty")
-	}
-	if h.BlobGasUsed != nil && *h.BlobGasUsed != 0 {
-		return errors.New("qkc blob gas used must be zero")
-	}
-	if h.ExcessBlobGas != nil && *h.ExcessBlobGas != 0 {
-		return errors.New("qkc excess blob gas must be zero")
-	}
-	if h.ParentBeaconRoot != nil && *h.ParentBeaconRoot != (common.Hash{}) {
-		return errors.New("qkc parent beacon root must be zero")
-	}
-	if h.SlotNumber != nil && *h.SlotNumber != 0 {
-		return errors.New("qkc slot number must be zero")
-	}
-	// RequestsHash and BlockAccessListHash commit to execution results;
-	// BlockValidator.ValidateState checks their contents after execution.
 	return nil
 }
 

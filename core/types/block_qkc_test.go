@@ -51,24 +51,15 @@ import (
 // difficulty is put in MixDigest, and the header's own Difficulty and Nonce are
 // left at zero. There is no setter for any of those header fields, by design.
 
-// TestSanityCheckQKC checks static QKC header constraints, including gas bounds
-// and nil/empty reserved fields. Execution commitments may contain nonempty hashes.
+// TestSanityCheckQKC checks QKC format, reserved PoW fields and gas bounds.
+// Fork-dependent fields are checked by the consensus engine.
 func TestSanityCheckQKC(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*Header)
 		valid  bool
 	}{
-		{"nil optional fields", func(*Header) {}, true},
-		{"empty optional fields", func(h *Header) {
-			h.WithdrawalsHash = &EmptyWithdrawalsHash
-			h.BlobGasUsed, h.ExcessBlobGas = new(uint64), new(uint64)
-			h.ParentBeaconRoot, h.SlotNumber = new(common.Hash), new(uint64)
-			h.RequestsHash, h.BlockAccessListHash = &EmptyRequestsHash, &EmptyBlockAccessListHash
-		}, true},
-		{"execution commitments", func(h *Header) {
-			h.RequestsHash, h.BlockAccessListHash = &common.Hash{1}, &common.Hash{2}
-		}, true},
+		{"valid", func(*Header) {}, true},
 		{"gas at limit", func(h *Header) {
 			h.GasUsed = h.GasLimit
 			e, _ := h.QKCExtra()
@@ -87,11 +78,6 @@ func TestSanityCheckQKC(t *testing.T) {
 			e.XShardGasUsed = e.XShardGasLimit + 1
 			h.Extra = e.Encode()
 		}, false},
-		{"withdrawals", func(h *Header) { h.WithdrawalsHash = &common.Hash{1} }, false},
-		{"blob gas used", func(h *Header) { h.BlobGasUsed = new(uint64); *h.BlobGasUsed = 1 }, false},
-		{"excess blob gas", func(h *Header) { h.ExcessBlobGas = new(uint64); *h.ExcessBlobGas = 1 }, false},
-		{"beacon root", func(h *Header) { h.ParentBeaconRoot = &common.Hash{1} }, false},
-		{"slot number", func(h *Header) { h.SlotNumber = new(uint64); *h.SlotNumber = 1 }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			header := &Header{

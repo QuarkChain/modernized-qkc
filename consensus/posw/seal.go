@@ -37,7 +37,9 @@ func (p *PoSW) VerifySeal(chain consensus.ChainHeaderReader, header *types.Heade
 	if err != nil {
 		return err
 	}
-	difficulty, err := p.adjustedDifficulty(chain, header)
+	// The calculator requires a staking reader only when staking is enabled.
+	reader, _ := chain.(consensus.StakingReader)
+	difficulty, err := GetAdjustedDifficulty(p.config.PoSW, reader, header)
 	if err != nil {
 		return err
 	}
@@ -58,56 +60,6 @@ func (p *PoSW) VerifySeal(chain consensus.ChainHeaderReader, header *types.Heade
 		return errors.New("invalid Ethash proof of work")
 	}
 	return nil
-}
-
-// adjustedDifficulty combines the miner's parent-state stake with its recent
-// block count on the candidate's fork, without changing the header's base difficulty.
-func (p *PoSW) adjustedDifficulty(chain consensus.ChainHeaderReader, header *types.Header) (*big.Int, error) {
-	difficulty := header.QKCDifficulty()
-	if difficulty.Sign() <= 0 {
-		return nil, errInvalidDifficulty
-	}
-	config := p.config.PoSW
-	if !config.StakingEnabled {
-		// Ordinary PoW needs neither a staking reader nor a window traversal.
-		return difficulty, nil
-	}
-	reader, ok := chain.(consensus.StakingReader)
-	if !ok {
-		return nil, errors.New("shard staking reader unavailable")
-	}
-	parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
-	if parent == nil {
-		return nil, consensus.ErrUnknownAncestor
-	}
-	// Pin the read to the actual parent, including on side forks. Candidate
-	// transactions, deposits and rewards must not affect its staking eligibility.
-	stakes, err := reader.GetShardLockedStakes(parent, header.Coinbase)
-	if err != nil {
-		return nil, err
-	}
-	// An address with no locked stake returns a non-nil zero value.
-	// Nil indicates an invalid reader result, not an unstaked miner.
-	if stakes == nil {
-		return nil, errors.New("missing shard staking result")
-	}
-	// Count all blocks by this coinbase on the candidate's fork, including genesis
-	// when it lies inside the window, just as pyquarkchain's block counter does.
-	var mined uint64
-	for i, ancestor := uint64(0), parent; i < config.WindowSize-1; i++ {
-		if ancestor.Coinbase == header.Coinbase {
-			mined++
-		}
-		// Do not require an ancestor outside the configured history window.
-		if ancestor.Number.Sign() == 0 || i+1 == config.WindowSize-1 {
-			break
-		}
-		ancestor = chain.GetHeader(ancestor.ParentHash, ancestor.Number.Uint64()-1)
-		if ancestor == nil {
-			return nil, consensus.ErrUnknownAncestor
-		}
-	}
-	return GetAdjustedDifficulty(config, header.Number, difficulty, stakes, mined), nil
 }
 
 // cache retains two immutable epoch caches. Serialize generation so concurrent

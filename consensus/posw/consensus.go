@@ -35,10 +35,7 @@ import (
 	"github.com/holiman/uint256"
 )
 
-var (
-	errInvalidDifficulty = errors.New("invalid shard PoW difficulty")
-	errOlderBlockTime    = errors.New("timestamp must be greater than parent")
-)
+var errOlderBlockTime = errors.New("timestamp must be greater than parent")
 
 // PoSW implements shard Ethash consensus with a parent-state staking discount.
 // MixDigest carries the base difficulty; geth's Difficulty and Nonce stay zero.
@@ -183,6 +180,48 @@ func (p *PoSW) verifyHeader(chain consensus.ChainHeaderReader, header, parent *t
 			return errors.New("base fee before London")
 		}
 	}
+	// Preserve fork-dependent header encoding. QKC requires empty withdrawals
+	// and zero blob/beacon fields because it has no corresponding data sources.
+	if config.IsShanghai(header.Number, header.Time) != (header.WithdrawalsHash != nil) {
+		return errors.New("invalid withdrawals hash presence")
+	}
+	if header.WithdrawalsHash != nil && *header.WithdrawalsHash != types.EmptyWithdrawalsHash {
+		return errors.New("qkc withdrawals must be empty")
+	}
+	cancun := config.IsCancun(header.Number, header.Time)
+	if cancun != (header.ParentBeaconRoot != nil) {
+		return errors.New("invalid parent beacon root presence")
+	}
+	if header.ParentBeaconRoot != nil && *header.ParentBeaconRoot != (common.Hash{}) {
+		return errors.New("qkc parent beacon root must be zero")
+	}
+	if cancun != (header.BlobGasUsed != nil) {
+		return errors.New("invalid blob gas used presence")
+	}
+	if header.BlobGasUsed != nil && *header.BlobGasUsed != 0 {
+		return errors.New("qkc blob gas used must be zero")
+	}
+	if cancun != (header.ExcessBlobGas != nil) {
+		return errors.New("invalid excess blob gas presence")
+	}
+	if header.ExcessBlobGas != nil && *header.ExcessBlobGas != 0 {
+		return errors.New("qkc excess blob gas must be zero")
+	}
+	if config.IsPrague(header.Number, header.Time) != (header.RequestsHash != nil) {
+		return errors.New("invalid requests hash presence")
+	}
+	amsterdam := config.IsAmsterdam(header.Number, header.Time)
+	if amsterdam != (header.BlockAccessListHash != nil) {
+		return errors.New("invalid block access list hash presence")
+	}
+	if amsterdam != (header.SlotNumber != nil) {
+		return errors.New("invalid slot number presence")
+	}
+	if header.SlotNumber != nil && *header.SlotNumber != 0 {
+		return errors.New("qkc slot number must be zero")
+	}
+	// RequestsHash and BlockAccessListHash commit to execution results;
+	// their contents are checked during full block import.
 	return nil
 }
 

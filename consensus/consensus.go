@@ -58,6 +58,7 @@ type ChainReader interface {
 // StakingReader provides read-only shard staking data at a specified block's state.
 // It is separate from ChainHeaderReader because a header-only chain has no state.
 type StakingReader interface {
+	ChainReader
 	GetShardLockedStakes(header *types.Header, staker common.Address) (*uint256.Int, error)
 }
 

@@ -54,6 +54,9 @@ func (c *testChain) GetHeader(hash common.Hash, number uint64) *types.Header {
 }
 func (c *testChain) GetHeaderByNumber(uint64) *types.Header         { panic("must use the candidate's fork") }
 func (c *testChain) GetHeaderByHash(hash common.Hash) *types.Header { return c.headers[hash] }
+func (c *testChain) GetBlock(common.Hash, uint64) *types.Block {
+	panic("staking difficulty must use headers")
+}
 func (c *testChain) GetShardLockedStakes(parent *types.Header, _ common.Address) (*uint256.Int, error) {
 	c.stakeParent = parent.Hash()
 	if c.stakeErr != nil {
@@ -241,6 +244,123 @@ func TestFixedGasLimitAcrossLondon(t *testing.T) {
 	}
 }
 
+// TestHeaderForkFields checks field presence before and at each execution fork,
+// QKC's empty/zero constraints, and acceptance of nonempty execution commitments.
+func TestHeaderForkFields(t *testing.T) {
+	chain, parent := newTestChain()
+	chain.config.ShanghaiTime = uint64Ptr(10)
+	chain.config.CancunTime = uint64Ptr(20)
+	chain.config.PragueTime, chain.config.OsakaTime = uint64Ptr(30), uint64Ptr(30)
+	chain.config.AmsterdamTime = uint64Ptr(40)
+	engine := newTestEngine(t, chain)
+	headerAt := func(timestamp uint64) *types.Header {
+		header := child(parent)
+		header.Time = timestamp
+		if timestamp >= 10 {
+			header.WithdrawalsHash = &types.EmptyWithdrawalsHash
+		}
+		if timestamp >= 20 {
+			header.ParentBeaconRoot = new(common.Hash)
+			header.BlobGasUsed, header.ExcessBlobGas = new(uint64), new(uint64)
+		}
+		if timestamp >= 30 {
+			header.RequestsHash = &common.Hash{1}
+		}
+		if timestamp >= 40 {
+			header.BlockAccessListHash, header.SlotNumber = &common.Hash{2}, new(uint64)
+		}
+		return header
+	}
+	for _, field := range []struct {
+		name   string
+		fork   uint64
+		toggle func(*types.Header)
+	}{
+		{"withdrawals", 10, func(h *types.Header) {
+			if h.WithdrawalsHash == nil {
+				h.WithdrawalsHash = &types.EmptyWithdrawalsHash
+			} else {
+				h.WithdrawalsHash = nil
+			}
+		}},
+		{"beacon root", 20, func(h *types.Header) {
+			if h.ParentBeaconRoot == nil {
+				h.ParentBeaconRoot = new(common.Hash)
+			} else {
+				h.ParentBeaconRoot = nil
+			}
+		}},
+		{"blob gas used", 20, func(h *types.Header) {
+			if h.BlobGasUsed == nil {
+				h.BlobGasUsed = new(uint64)
+			} else {
+				h.BlobGasUsed = nil
+			}
+		}},
+		{"excess blob gas", 20, func(h *types.Header) {
+			if h.ExcessBlobGas == nil {
+				h.ExcessBlobGas = new(uint64)
+			} else {
+				h.ExcessBlobGas = nil
+			}
+		}},
+		{"requests", 30, func(h *types.Header) {
+			if h.RequestsHash == nil {
+				h.RequestsHash = &types.EmptyRequestsHash
+			} else {
+				h.RequestsHash = nil
+			}
+		}},
+		{"block access list", 40, func(h *types.Header) {
+			if h.BlockAccessListHash == nil {
+				h.BlockAccessListHash = &types.EmptyBlockAccessListHash
+			} else {
+				h.BlockAccessListHash = nil
+			}
+		}},
+		{"slot number", 40, func(h *types.Header) {
+			if h.SlotNumber == nil {
+				h.SlotNumber = new(uint64)
+			} else {
+				h.SlotNumber = nil
+			}
+		}},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			for _, timestamp := range []uint64{field.fork - 1, field.fork} {
+				header := headerAt(timestamp)
+				if err := engine.VerifyHeader(chain, header); err != nil {
+					t.Fatalf("valid header at %d: %v", timestamp, err)
+				}
+				field.toggle(header)
+				if err := engine.VerifyHeader(chain, header); err == nil {
+					t.Fatalf("invalid field presence accepted at %d", timestamp)
+				}
+			}
+		})
+	}
+	for _, field := range []struct {
+		name   string
+		mutate func(*types.Header)
+	}{
+		{"withdrawals", func(h *types.Header) { h.WithdrawalsHash = &common.Hash{1} }},
+		{"beacon root", func(h *types.Header) { h.ParentBeaconRoot = &common.Hash{1} }},
+		{"blob gas used", func(h *types.Header) { *h.BlobGasUsed = 1 }},
+		{"excess blob gas", func(h *types.Header) { *h.ExcessBlobGas = 1 }},
+		{"slot number", func(h *types.Header) { *h.SlotNumber = 1 }},
+	} {
+		t.Run("nonempty "+field.name, func(t *testing.T) {
+			header := headerAt(40)
+			field.mutate(header)
+			if err := engine.VerifyHeader(chain, header); err == nil {
+				t.Fatal("nonempty reserved field accepted")
+			}
+		})
+	}
+}
+
+func uint64Ptr(value uint64) *uint64 { return &value }
+
 // TestPrepareAndFinalize checks base difficulty initialization, clearing stale
 // seals while preserving other QKC fields, the fixed genesis gas limit, invalid
 // inputs and subsidy crediting.
@@ -345,7 +465,9 @@ func TestSealParentFork(t *testing.T) {
 		powChain.headerReads = 0
 		powChain.stakeErr = errors.New("staking must not be read")
 		powChain.stakeParent = common.Hash{}
-		if err := engine.VerifySeal(&powChain, h); err == nil || err.Error() != "invalid Ethash proof of work" {
+		// Expose only the header interface: disabled staking needs no StakingReader.
+		powReader := struct{ consensus.ChainHeaderReader }{&powChain}
+		if err := engine.VerifySeal(powReader, h); err == nil || err.Error() != "invalid Ethash proof of work" {
 			t.Fatalf("ordinary PoW with insufficient work: %v", err)
 		}
 		// Difficulty one accepts this real seal even without staking or ancestors.
@@ -356,7 +478,7 @@ func TestSealParentFork(t *testing.T) {
 		extra, _ := header.QKCExtra()
 		extra.MixHash = common.BytesToHash(digest)
 		header.Extra = extra.Encode()
-		if err := engine.VerifySeal(&powChain, header); err != nil {
+		if err := engine.VerifySeal(powReader, header); err != nil {
 			t.Fatalf("ordinary PoW with valid seal: %v", err)
 		}
 		if powChain.stakeParent != (common.Hash{}) || powChain.headerReads != 0 {
@@ -376,14 +498,13 @@ func TestSealParentFork(t *testing.T) {
 	}
 	// The same coinbase on this parent has already exhausted its one-block quota.
 	h.Coinbase = parent.Coinbase
-	if got, err := engine.adjustedDifficulty(chain, h); err != nil || got.Int64() != 100 {
+	if got, err := GetAdjustedDifficulty(c, chain, h); err != nil || got.Int64() != 100 {
 		t.Fatalf("fork quota: %v %v", got, err)
 	}
 	t.Run("window boundary and fork", func(t *testing.T) {
 		chain, genesis := newTestChain()
 		c := chain.config.QuarkChain.PoSW
 		c.StakingEnabled, c.WindowSize, c.DiffDivider, c.StakePerBlock = true, 3, 100, big.NewInt(100)
-		engine := newTestEngine(t, chain)
 		// Only the two ancestors inside the window are available.
 		older := child(genesis)
 		older.Number, older.ParentHash, older.Coinbase = big.NewInt(2), common.Hash{99}, common.Address{1}
@@ -391,22 +512,22 @@ func TestSealParentFork(t *testing.T) {
 		chain.headers[older.Hash()], chain.headers[parent.Hash()] = older, parent
 		chain.stakes[parent.Hash()] = uint256.NewInt(200)
 		header := child(parent)
-		if got, err := engine.adjustedDifficulty(chain, header); err != nil || got.Int64() != 100 {
+		if got, err := GetAdjustedDifficulty(c, chain, header); err != nil || got.Int64() != 100 {
 			t.Fatalf("two-block quota: %v %v", got, err)
 		}
 		fork := types.CopyHeader(parent)
 		fork.Coinbase = common.Address{2}
 		chain.headers[fork.Hash()], chain.stakes[fork.Hash()] = fork, uint256.NewInt(200)
 		header.ParentHash = fork.Hash()
-		if got, err := engine.adjustedDifficulty(chain, header); err != nil || got.Int64() != 1 {
+		if got, err := GetAdjustedDifficulty(c, chain, header); err != nil || got.Int64() != 1 {
 			t.Fatalf("side-fork quota: %v %v", got, err)
 		}
 		delete(chain.headers, older.Hash())
-		if _, err := engine.adjustedDifficulty(chain, header); !errors.Is(err, consensus.ErrUnknownAncestor) {
+		if _, err := GetAdjustedDifficulty(c, chain, header); !errors.Is(err, consensus.ErrUnknownAncestor) {
 			t.Fatalf("missing ancestor inside window: %v", err)
 		}
 		c.WindowSize = 1
-		if got, err := engine.adjustedDifficulty(chain, header); err != nil || got.Int64() != 1 {
+		if got, err := GetAdjustedDifficulty(c, chain, header); err != nil || got.Int64() != 1 {
 			t.Fatalf("empty history window: %v %v", got, err)
 		}
 	})
