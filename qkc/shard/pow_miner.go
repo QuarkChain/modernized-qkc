@@ -73,7 +73,7 @@ type NonceSearch interface {
 type PoWMinerConfig struct {
 	Coinbase    common.Address // Recipient of locally mined blocks
 	WorkRefresh time.Duration  // Lifetime of current work; zero selects DefaultWorkRefresh
-	Search      NonceSearch    // Local seal search; nil disables Start
+	Search      NonceSearch    // Local seal search; nil disables StartLocalMining
 }
 
 // PoWMiner serves shard work to remote miners and mines locally, following
@@ -101,7 +101,7 @@ type servedWork struct {
 }
 
 // NewPoWMiner creates a miner on the shard layer backend. Local mining starts
-// with Start.
+// with StartLocalMining.
 func NewPoWMiner(backend MinerBackend, config PoWMinerConfig) *PoWMiner {
 	if config.WorkRefresh <= 0 {
 		config.WorkRefresh = DefaultWorkRefresh
@@ -219,9 +219,9 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	return nil
 }
 
-// Start begins mining locally for the configured coinbase. It is a no-op if
-// local mining is running. Work served to remote miners is unaffected.
-func (m *PoWMiner) Start() error {
+// StartLocalMining begins mining locally for the configured coinbase. It is a
+// no-op if local mining is running. Work served to remote miners is unaffected.
+func (m *PoWMiner) StartLocalMining() error {
 	if m.config.Search == nil {
 		return errors.New("local mining search not configured")
 	}
@@ -251,8 +251,8 @@ func (m *PoWMiner) Start() error {
 	return nil
 }
 
-// Stop ends local mining and waits for an import in progress.
-func (m *PoWMiner) Stop() {
+// StopLocalMining ends local mining and waits for an import in progress.
+func (m *PoWMiner) StopLocalMining() {
 	m.lifecycle.Lock()
 	defer m.lifecycle.Unlock()
 	if m.stop != nil {

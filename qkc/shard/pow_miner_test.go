@@ -40,7 +40,7 @@ func newPoWMinerEnv(t *testing.T, config PoWMinerConfig) (*testEnv, *PoWMiner) {
 	t.Helper()
 	env, _, _ := newMiningEnv(t, 1)
 	m := NewPoWMiner(NewShard(env.sc), config)
-	t.Cleanup(m.Stop)
+	t.Cleanup(m.StopLocalMining)
 	return env, m
 }
 
@@ -211,10 +211,10 @@ func TestPoWMinerLocal(t *testing.T) {
 		coinbase := common.Address{0x42}
 		search := newSealing()
 		env, m := newPoWMinerEnv(t, PoWMinerConfig{Coinbase: coinbase, Search: search})
-		if err := m.Start(); err != nil {
+		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.Start(); err != nil {
+		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
 		if first := <-search.works; first.Number != 1 {
@@ -242,13 +242,13 @@ func TestPoWMinerLocal(t *testing.T) {
 		if refreshed.SealHash == third.SealHash || refreshed.Number != 3 {
 			t.Fatal("local search did not refresh expired work")
 		}
-		m.Stop()
+		m.StopLocalMining()
 		head := env.chain.CurrentBlock().Hash()
 		time.Sleep(time.Minute)
 		if env.chain.CurrentBlock().Hash() != head {
 			t.Fatal("stopped miner imported a block")
 		}
-		if err := m.Start(); err != nil {
+		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
 		if work := <-search.works; work.Number != 3 {
@@ -261,11 +261,11 @@ func TestPoWMinerSimulated(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		coinbase := common.Address{0x42}
 		env, m := newPoWMinerEnv(t, PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
-		if err := m.Start(); err != nil {
+		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
 		waitForHead(t, env, 3)
-		m.Stop()
+		m.StopLocalMining()
 		for n := uint64(1); n <= 3; n++ {
 			block, parent := env.chain.GetBlockByNumber(n), env.chain.GetBlockByNumber(n-1)
 			if block.Coinbase() != coinbase || block.Time() <= parent.Time() || block.Time() > uint64(time.Now().Unix()) {
@@ -277,7 +277,7 @@ func TestPoWMinerSimulated(t *testing.T) {
 
 func TestPoWMinerStartWithoutSearch(t *testing.T) {
 	_, m := newPoWMinerEnv(t, PoWMinerConfig{})
-	if err := m.Start(); err == nil {
+	if err := m.StartLocalMining(); err == nil {
 		t.Fatal("started local mining without a search")
 	}
 }
