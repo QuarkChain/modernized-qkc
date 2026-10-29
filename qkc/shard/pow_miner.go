@@ -142,7 +142,7 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if w := m.currentWork(coinbase); w != nil {
 		return w, nil
 	}
-	block, err := m.backend.CreateBlockToMine(ctx, coinbase)
+	block, diff, err := m.backend.CreateBlockToMine(ctx, coinbase)
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +152,9 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	}
 	w := &servedWork{
 		MiningWork: MiningWork{
-			SealHash: sealHash,
-			Number:   block.NumberU64(),
-			// TODO: serve the PoSW-adjusted difficulty for coinbase once the QKC
-			// engine provides it. The header carries the unadjusted difficulty.
-			Difficulty: block.Header().QKCDifficulty(),
+			SealHash:   sealHash,
+			Number:     block.NumberU64(),
+			Difficulty: diff,
 			Time:       block.Time(),
 		},
 		parent:  block.ParentHash(),
@@ -204,8 +202,14 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	}
 	extra.Nonce, extra.MixHash = nonce, mixHash
 	header.Extra = extra.Encode()
-	// TODO: verify the seal against the PoSW-adjusted difficulty before
-	// importing, so invalid submissions cannot trigger block execution.
+	// Like pyquarkchain, the import verifies the seal before executing the
+	// block: InsertChain runs the engine's VerifyHeader first.
+	//
+	// TODO: no engine verifies QKC seals yet. The QKC engine's VerifyHeader
+	// must check that MixDigest is posw.CalcDifficulty from the parent, and that
+	// the seal meets posw.AdjustedShardDifficulty unless the chain is configured
+	// for simulated PoW. The seal check, its ethash epoch caches and the chain
+	// config switch between ethash and simulate belong to that engine.
 	if err := m.backend.InsertMinedBlock(block.WithSeal(header)); err != nil {
 		return err
 	}

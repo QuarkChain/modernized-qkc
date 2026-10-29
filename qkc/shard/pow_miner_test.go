@@ -83,6 +83,10 @@ func TestPoWMinerGetWork(t *testing.T) {
 		if sealHash, _ := block.Header().QKCSealHash(); sealHash != first.SealHash || first.Number != 1 || first.Time != block.Time() {
 			t.Fatalf("work does not describe its candidate: %+v", first)
 		}
+		// Without staking, the work targets the candidate's base difficulty.
+		if first.Difficulty.Sign() <= 0 || first.Difficulty.Cmp(block.Header().QKCDifficulty()) != 0 {
+			t.Fatalf("work difficulty %v, want base difficulty %v", first.Difficulty, block.Header().QKCDifficulty())
+		}
 		time.Sleep(DefaultWorkRefresh - time.Second)
 		if work := getWork(t, m, a); work.SealHash != first.SealHash {
 			t.Fatal("current work was rebuilt")

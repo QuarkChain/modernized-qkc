@@ -18,9 +18,11 @@ package shard
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
@@ -31,8 +33,8 @@ import (
 // MinerAPI. Mined blocks take the same path as blocks from the network.
 type MinerBackend interface {
 	// CreateBlockToMine builds an unsealed candidate on the shard head, paying
-	// coinbase.
-	CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, error)
+	// coinbase, and returns the difficulty its seal must meet.
+	CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, *big.Int, error)
 
 	// InsertMinedBlock imports a sealed candidate.
 	InsertMinedBlock(block *types.Block) error
@@ -59,14 +61,24 @@ func NewShard(chain *ShardChain) *Shard {
 
 // CreateBlockToMine builds a candidate on the shard head with the chain's
 // builder. Like pyquarkchain, its timestamp may run up to a second ahead of the
-// clock to follow the parent.
-func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, error) {
-	parent := s.chain.chain.CurrentBlock()
-	return s.chain.BuildBlock(ctx, miner.QKCBlockArgs{
+// clock to follow the parent. The returned difficulty is the candidate's base
+// difficulty adjusted for coinbase's stake, like goquarkchain's.
+func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, *big.Int, error) {
+	bc := s.chain.chain
+	parent := bc.CurrentBlock()
+	block, err := s.chain.BuildBlock(ctx, miner.QKCBlockArgs{
 		Parent:       parent.Hash(),
 		Timestamp:    max(uint64(time.Now().Unix()), parent.Time+1),
 		FeeRecipient: coinbase,
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	diff, err := posw.AdjustedShardDifficulty(bc.Config().QuarkChain.PoSW, bc, bc, block.Header())
+	if err != nil {
+		return nil, nil, err
+	}
+	return block, diff, nil
 }
 
 // InsertMinedBlock imports a block sealed for this shard.

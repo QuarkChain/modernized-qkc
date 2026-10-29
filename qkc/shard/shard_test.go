@@ -29,12 +29,16 @@ func TestShardCreateBlockToMine(t *testing.T) {
 		env, _, _ := newMiningEnv(t, 1)
 		s := NewShard(env.sc)
 		coinbase := common.Address{0xaa}
-		block, err := s.CreateBlockToMine(context.Background(), coinbase)
+		block, diff, err := s.CreateBlockToMine(context.Background(), coinbase)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if block.ParentHash() != env.genesis.Hash() || block.Coinbase() != coinbase || block.Time() != uint64(time.Now().Unix()) {
 			t.Fatal("candidate was not built on the head for coinbase at the current time")
+		}
+		// Without staking, the seal must meet the base difficulty.
+		if diff.Sign() <= 0 || diff.Cmp(block.Header().QKCDifficulty()) != 0 {
+			t.Fatalf("difficulty %v, want base difficulty %v", diff, block.Header().QKCDifficulty())
 		}
 		if err := s.InsertMinedBlock(block); err != nil {
 			t.Fatal(err)
@@ -43,7 +47,7 @@ func TestShardCreateBlockToMine(t *testing.T) {
 			t.Fatal("mined block did not become the head")
 		}
 		// A candidate built within the same second still follows its parent.
-		next, err := s.CreateBlockToMine(context.Background(), coinbase)
+		next, _, err := s.CreateBlockToMine(context.Background(), coinbase)
 		if err != nil {
 			t.Fatal(err)
 		}
