@@ -21,12 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/node"
@@ -48,13 +50,31 @@ type RootConfig struct {
 	PoSW *params.PoSWConfig
 }
 
-// NodeConfig contains local settings for a node hosting the root and all shards.
-// Eth supplies shared shard execution settings; chain definitions belong in the
-// network file. NetworkFile is relative to the local TOML file when loaded.
-type NodeConfig struct {
+const (
+	RoleMaster = "master"
+	RoleShard  = "shard"
+)
+
+// ClusterConfig describes a deployment. Every process reads the same network
+// definition and selects either Master or one entry from ShardNodes.
+type ClusterConfig struct {
 	NetworkFile string
-	Node        node.Config
-	Eth         ethconfig.Config
+	Master      NodeConfig
+	ShardNodes  []NodeConfig
+}
+
+// NodeConfig contains the effective settings of one process. Master has no
+// ShardID, Address or Eth settings. A shard's Address is its internal TCP endpoint,
+// used both for listening and for dialing by Master and the other shards.
+type NodeConfig struct {
+	ShardID *uint32
+	Address string
+	Node    node.Config
+	Eth     *ethconfig.Config
+
+	Role           string            `toml:"-"`
+	NetworkFile    string            `toml:"-"`
+	ShardEndpoints map[uint32]string `toml:"-"` // Derived for Master; never configured separately.
 }
 
 // TOML uses geth's case-sensitive Go field names and rejects unknown fields.
@@ -63,33 +83,152 @@ var tomlSettings = toml.Config{
 	FieldToKey:    func(_ reflect.Type, field string) string { return field },
 }
 
-// DefaultNodeConfig returns geth defaults with a separate QKC data directory and
-// IPC endpoint. Network definitions have no implicit Ethereum network preset.
-func DefaultNodeConfig() NodeConfig {
-	cfg := NodeConfig{Node: node.DefaultConfig, Eth: ethconfig.Defaults}
-	cfg.Node.Name = "qkc"
+// DefaultNodeConfig returns per-process geth defaults. A nil shardID selects
+// Master; a non-nil ID selects one shard, including shard zero.
+func DefaultNodeConfig(shardID *uint32) NodeConfig {
+	cfg := NodeConfig{Role: RoleMaster, Node: node.DefaultConfig}
+	name := "master"
+	if shardID != nil {
+		id := *shardID
+		cfg.Role, cfg.ShardID = RoleShard, &id
+		name = fmt.Sprintf("shard-%d", id)
+		eth := ethconfig.Defaults
+		// TOML text decoding mutates big integers in place. Keep defaults and
+		// other shard entries independent when overriding these values.
+		eth.Miner.GasPrice = new(big.Int).Set(eth.Miner.GasPrice)
+		eth.GPO.MaxPrice = new(big.Int).Set(eth.GPO.MaxPrice)
+		eth.GPO.IgnorePrice = new(big.Int).Set(eth.GPO.IgnorePrice)
+		cfg.Eth = &eth
+		cfg.Node.P2P.ListenAddr, cfg.Node.P2P.DiscAddr = "", ""
+		cfg.Node.P2P.MaxPeers = 0
+		cfg.Node.P2P.NoDiscovery, cfg.Node.P2P.NoDial = true, true
+		cfg.Node.P2P.DiscoveryV4, cfg.Node.P2P.DiscoveryV5 = false, false
+		cfg.Node.HTTPModules = append(slices.Clone(cfg.Node.HTTPModules), "eth")
+		cfg.Node.WSModules = append(slices.Clone(cfg.Node.WSModules), "eth")
+	}
+	cfg.Node.Name = "qkc-" + name
 	if cfg.Node.DataDir != "" {
-		cfg.Node.DataDir = filepath.Join(cfg.Node.DataDir, "qkc")
+		cfg.Node.DataDir = filepath.Join(cfg.Node.DataDir, "qkc", name)
 	}
 	cfg.Node.IPCPath = "qkc.ipc"
-	cfg.Node.HTTPModules = append(slices.Clone(cfg.Node.HTTPModules), "eth")
-	cfg.Node.WSModules = append(slices.Clone(cfg.Node.WSModules), "eth")
 	return cfg
 }
 
-// LoadNode overlays local TOML settings on defaults. Validation is deferred so
-// callers can apply explicit CLI values first. An empty file uses only defaults.
-func LoadNode(file string) (*NodeConfig, error) {
-	cfg := DefaultNodeConfig()
-	if file != "" {
-		if err := load(file, &cfg); err != nil {
-			return nil, err
-		}
-		if cfg.NetworkFile != "" && !filepath.IsAbs(cfg.NetworkFile) {
-			cfg.NetworkFile = filepath.Join(filepath.Dir(file), cfg.NetworkFile)
-		}
+// UnmarshalTOML reads identity first, then overlays explicit settings on that
+// process's defaults. Both passes use the same strict schema; zero and false
+// values remain explicit overrides, including in array-of-table entries.
+func (c *NodeConfig) UnmarshalTOML(decode func(interface{}) error) error {
+	type plain NodeConfig
+	var identity plain
+	if err := decode(&identity); err != nil {
+		return err
+	}
+	cfg := DefaultNodeConfig(identity.ShardID)
+	if err := decode((*plain)(&cfg)); err != nil {
+		return err
+	}
+	*c = cfg
+	return nil
+}
+
+// LoadCluster loads a deployment, resolving NetworkFile relative to it.
+// Validation follows process selection and explicit CLI overrides.
+func LoadCluster(file string) (*ClusterConfig, error) {
+	if file == "" {
+		return nil, errors.New("deployment file is required")
+	}
+	cfg := ClusterConfig{Master: DefaultNodeConfig(nil)}
+	if err := load(file, &cfg); err != nil {
+		return nil, err
+	}
+	if cfg.NetworkFile != "" && !filepath.IsAbs(cfg.NetworkFile) {
+		cfg.NetworkFile = filepath.Join(filepath.Dir(file), cfg.NetworkFile)
 	}
 	return &cfg, nil
+}
+
+// SelectNode selects one process. Only Master's effective configuration includes
+// the shard endpoint map, derived from deployment entries without duplication.
+func (c *ClusterConfig) SelectNode(role string, shardID *uint32) (*NodeConfig, error) {
+	var selected *NodeConfig
+	switch role {
+	case RoleMaster:
+		if shardID != nil {
+			return nil, errors.New("master cannot select a shard ID")
+		}
+		selected = &c.Master
+		selected.ShardEndpoints = make(map[uint32]string, len(c.ShardNodes))
+		for _, shard := range c.ShardNodes {
+			if shard.ShardID != nil {
+				selected.ShardEndpoints[*shard.ShardID] = shard.Address
+			}
+		}
+	case RoleShard:
+		if shardID == nil {
+			return nil, errors.New("shard process requires a shard ID")
+		}
+		for i := range c.ShardNodes {
+			if c.ShardNodes[i].ShardID != nil && *c.ShardNodes[i].ShardID == *shardID {
+				selected = &c.ShardNodes[i]
+				break
+			}
+		}
+		if selected == nil {
+			return nil, fmt.Errorf("shard %d is not in the deployment", *shardID)
+		}
+	default:
+		return nil, errors.New("set --qkc.role to master or shard")
+	}
+	selected.NetworkFile = c.NetworkFile
+	return selected, nil
+}
+
+// Validate checks the complete deployment after overrides. Every network shard
+// has one process, with a distinct internal endpoint and persistent data directory.
+func (c *ClusterConfig) Validate(network *NetworkConfig) error {
+	if err := network.Validate(); err != nil {
+		return err
+	}
+	if c.Master.Role != RoleMaster || c.Master.ShardID != nil {
+		return errors.New("Master must not specify ShardID")
+	}
+	if err := c.Master.Validate(network); err != nil {
+		return fmt.Errorf("Master: %w", err)
+	}
+	ids, addresses, dirs := make(map[uint32]bool), make(map[string]bool), make(map[string]bool)
+	for i, cfg := range append([]NodeConfig{c.Master}, c.ShardNodes...) {
+		if i > 0 {
+			if cfg.ShardID == nil {
+				return fmt.Errorf("ShardNodes[%d]: ShardID is required", i-1)
+			}
+			if ids[*cfg.ShardID] {
+				return fmt.Errorf("duplicate deployed shard ID %d", *cfg.ShardID)
+			}
+			ids[*cfg.ShardID] = true
+			if err := cfg.Validate(network); err != nil {
+				return fmt.Errorf("ShardNodes[%d]: %w", i-1, err)
+			}
+			address := strings.ToLower(cfg.Address)
+			if addresses[address] {
+				return fmt.Errorf("duplicate internal address %q", cfg.Address)
+			}
+			addresses[address] = true
+		}
+		if cfg.Node.DataDir != "" {
+			dir, err := filepath.Abs(cfg.Node.DataDir)
+			if err != nil {
+				return err
+			}
+			if dirs[dir] {
+				return fmt.Errorf("process data directory is shared: %s", cfg.Node.DataDir)
+			}
+			dirs[dir] = true
+		}
+	}
+	if len(ids) != len(network.Shards) {
+		return errors.New("deployment must contain every network shard")
+	}
+	return nil
 }
 
 // LoadNetwork loads and validates an explicit network definition. Omitted shard
@@ -188,35 +327,72 @@ func (c *NetworkConfig) Validate() error {
 	return nil
 }
 
-// Validate checks the effective local settings after CLI overrides. A zero
-// Eth.NetworkId means unspecified and is resolved from the network definition,
-// never from a shard's EVM chain ID. A nonzero value must match the network.
+// Validate checks effective process settings. Master uses the network definition
+// directly; only shard execution settings bind Eth.NetworkId to NetworkID.
 func (c *NodeConfig) Validate(network *NetworkConfig) error {
 	if err := network.Validate(); err != nil {
 		return err
 	}
-	if c.Eth.NetworkId != 0 && c.Eth.NetworkId != uint64(network.NetworkID) {
-		return fmt.Errorf("Eth.NetworkId %d conflicts with NetworkID %d", c.Eth.NetworkId, network.NetworkID)
+	switch c.Role {
+	case RoleMaster:
+		if c.Eth != nil || c.ShardID != nil || c.Address != "" {
+			return errors.New("master cannot configure Eth, ShardID or an internal Address")
+		}
+	case RoleShard:
+		if c.ShardID == nil || c.Eth == nil {
+			return errors.New("shard requires ShardID and execution settings")
+		}
+		found := false
+		for _, shard := range network.Shards {
+			found = found || shard.QuarkChain.ShardID == *c.ShardID
+		}
+		if !found {
+			return fmt.Errorf("shard ID %d is not in the network", *c.ShardID)
+		}
+		host, port, err := net.SplitHostPort(c.Address)
+		if err != nil {
+			return fmt.Errorf("invalid internal Address %q: %w", c.Address, err)
+		}
+		value, err := strconv.ParseUint(port, 10, 16)
+		if host == "" || net.ParseIP(host).IsUnspecified() || strings.ContainsAny(host, " \t\r\n/") || err != nil || value == 0 {
+			return fmt.Errorf("internal Address must have a concrete host and port between 1 and 65535: %q", c.Address)
+		}
+		p := c.Node.P2P
+		if p.ListenAddr != "" || p.DiscAddr != "" || p.MaxPeers != 0 || !p.NoDiscovery || !p.NoDial ||
+			p.DiscoveryV4 || p.DiscoveryV5 || len(p.BootstrapNodes)+len(p.BootstrapNodesV5)+len(p.StaticNodes)+len(p.TrustedNodes) != 0 {
+			return errors.New("shard external P2P must be disabled; configure internal Address instead")
+		}
+	default:
+		return fmt.Errorf("invalid process role %q", c.Role)
 	}
-	if c.Eth.Genesis != nil {
-		return errors.New("Eth.Genesis is a network definition and cannot be set locally")
-	}
-	if c.Eth.OverrideOsaka != nil || c.Eth.OverrideAmsterdam != nil || c.Eth.OverrideBPO1 != nil || c.Eth.OverrideBPO2 != nil || c.Eth.OverrideUBT != nil {
-		return errors.New("local fork overrides are not allowed; configure forks in the network file")
+	if c.Eth != nil {
+		if c.Eth.NetworkId != 0 && c.Eth.NetworkId != uint64(network.NetworkID) {
+			return fmt.Errorf("Eth.NetworkId %d conflicts with NetworkID %d", c.Eth.NetworkId, network.NetworkID)
+		}
+		if c.Eth.Genesis != nil {
+			return errors.New("Eth.Genesis is a network definition and cannot be set locally")
+		}
+		if c.Eth.OverrideOsaka != nil || c.Eth.OverrideAmsterdam != nil || c.Eth.OverrideBPO1 != nil || c.Eth.OverrideBPO2 != nil || c.Eth.OverrideUBT != nil {
+			return errors.New("local fork overrides are not allowed; configure forks in the network file")
+		}
+		if c.Eth.StateScheme != "" && c.Eth.StateScheme != "hash" && c.Eth.StateScheme != "path" {
+			return fmt.Errorf("invalid Eth.StateScheme %q", c.Eth.StateScheme)
+		}
+		if !c.Eth.SyncMode.IsValid() {
+			return fmt.Errorf("invalid Eth.SyncMode %d", c.Eth.SyncMode)
+		}
+		for name, value := range map[string]int{"Eth.DatabaseCache": c.Eth.DatabaseCache, "Eth.TrieCleanCache": c.Eth.TrieCleanCache, "Eth.TrieDirtyCache": c.Eth.TrieDirtyCache, "Eth.SnapshotCache": c.Eth.SnapshotCache} {
+			if value < 0 {
+				return fmt.Errorf("%s must not be negative", name)
+			}
+		}
+		c.Eth.NetworkId = uint64(network.NetworkID)
 	}
 	if c.Node.DBEngine != "" && c.Node.DBEngine != "pebble" && c.Node.DBEngine != "leveldb" {
 		return fmt.Errorf("invalid Node.DBEngine %q", c.Node.DBEngine)
 	}
-	if c.Eth.StateScheme != "" && c.Eth.StateScheme != "hash" && c.Eth.StateScheme != "path" {
-		return fmt.Errorf("invalid Eth.StateScheme %q", c.Eth.StateScheme)
-	}
-	if !c.Eth.SyncMode.IsValid() {
-		return fmt.Errorf("invalid Eth.SyncMode %d", c.Eth.SyncMode)
-	}
 	for name, value := range map[string]int{
 		"Node.P2P.MaxPeers": c.Node.P2P.MaxPeers, "Node.P2P.MaxPendingPeers": c.Node.P2P.MaxPendingPeers,
-		"Eth.DatabaseCache": c.Eth.DatabaseCache, "Eth.TrieCleanCache": c.Eth.TrieCleanCache,
-		"Eth.TrieDirtyCache": c.Eth.TrieDirtyCache, "Eth.SnapshotCache": c.Eth.SnapshotCache,
 	} {
 		if value < 0 {
 			return fmt.Errorf("%s must not be negative", name)
@@ -239,6 +415,5 @@ func (c *NodeConfig) Validate(network *NetworkConfig) error {
 			return fmt.Errorf("%s: invalid port %q", name, port)
 		}
 	}
-	c.Eth.NetworkId = uint64(network.NetworkID)
 	return nil
 }

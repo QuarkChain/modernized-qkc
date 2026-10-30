@@ -1,4 +1,4 @@
-# Network and node configuration
+# Network, deployment and process configuration
 
 The shared network TOML file defines `NetworkID`, root-chain PoSW, and each
 shard's native geth `params.ChainConfig`. `NetworkID` is the uint32 P2P network
@@ -28,35 +28,59 @@ height, and `PoSWStakingDecayEnabled` explicitly enables stake requirement decay
 These settings do not control staking contract deployment; the deployment rules
 from #18 still apply. The example uses zero block subsidies.
 
-The local TOML file references the shared file through `NetworkFile` and embeds
-geth's `node.Config` under `[Node]` and `ethconfig.Config` under `[Eth]`. These
-execution settings are shared by the shards hosted in this single-node cluster.
-Both files follow geth TOML conventions: case-sensitive Go field names, native
+`cluster.toml` describes one Master process and one process per shard. It
+references the shared network file through `NetworkFile`. `[Master.Node]`
+reuses geth's `node.Config`. Each `[[ShardNodes]]` entry has a routing `ShardID`,
+an internal TCP `Address`, its own `[ShardNodes.Node]`, and native
+`ethconfig.Config` under `[ShardNodes.Eth]`. Master has no EVM execution config.
+Every network shard must appear exactly once in the deployment, with a distinct
+internal address and persistent data directory.
+
+`--qkc.role master` selects Master. `--qkc.role shard --qkc.shard <id>`
+selects one shard by routing ID, including zero; the selector is required and is
+independent of the EVM chain ID. Master's effective shard endpoint map is derived
+from the deployment entries. There is no second endpoint list to maintain.
+`Address` is the shard's listening and advertised internal TCP endpoint, so it
+requires a concrete host and a port from 1 to 65535. Connection management and
+handshakes are handled separately by #16.
+
+Master owns external devp2p through `Master.Node.P2P`. Shards disable geth's
+external P2P by default and must keep it disabled; their internal TCP service
+uses `Address`. HTTP/WS/IPC settings are independent for each process.
+The example assigns different HTTP ports to the two shards and puts IPC sockets
+under separate data directories.
+
+Both TOML files follow geth conventions: case-sensitive Go field names, native
 geth types, and errors for unknown fields and duplicate keys. Fork block numbers
 and chain IDs use geth's quoted big-integer representation.
 
-Local precedence is **explicit CLI values > local TOML > defaults**. Defaults
-come from `node.DefaultConfig` and `ethconfig.Defaults`, with a `qkc` subdirectory
-under geth's default data directory, `qkc.ipc`, and the `eth` RPC module added.
-HTTP and WebSocket remain disabled by default. No Ethereum bootstrap nodes or
-network preset are injected. No network or EVM chain ID is guessed. The effective
-`Eth.NetworkId` always comes from `NetworkID`; a nonzero local `Eth.NetworkId`
-or explicit `--networkid` must match. `--networkid=0` is rejected. Local
-`Eth.Genesis` and fork overrides are rejected because they change network rules.
+Process-local precedence is **explicit CLI values > selected deployment entry >
+role defaults**. Overrides apply only to the selected process. Defaults reuse
+`node.DefaultConfig` and, for shards, `ethconfig.Defaults`. Each process gets
+its own default data directory under `qkc/master` or `qkc/shard-<id>`,
+with `qkc.ipc`; shards add the `eth` RPC module. HTTP and WebSocket are disabled
+by default. No Ethereum bootstrap nodes or network preset are injected.
 
-Inspect and validate the examples from the repository root:
+Network rules come exclusively from the shared file. No network or EVM chain ID
+is guessed. A shard's effective `Eth.NetworkId` comes from `NetworkID`; a
+nonzero deployment `Eth.NetworkId` or explicit `--networkid` must match it.
+`--networkid=0`, local `Eth.Genesis`, and local fork overrides are rejected.
+Master rejects `Eth` configuration and shard execution flags.
+
+Validate each process in the three-process example from the repository root:
 
 ```sh
-go run ./cmd/geth checkqkcconfig --config qkc/config/examples/node.toml
-go run ./cmd/geth checkqkcconfig --config qkc/config/examples/node.toml --http=false --maxpeers 0
-go run ./cmd/geth checkqkcconfig --qkc.network qkc/config/examples/network.toml --datadir ./qkc-data
+go run ./cmd/geth checkqkcconfig --config qkc/config/examples/cluster.toml --qkc.role master
+go run ./cmd/geth checkqkcconfig --config qkc/config/examples/cluster.toml --qkc.role shard --qkc.shard 0
+go run ./cmd/geth checkqkcconfig --config qkc/config/examples/cluster.toml --qkc.role shard --qkc.shard 1 --http=false
 ```
 
-`NetworkFile` is resolved relative to the local file; `--qkc.network` is relative
-to the working directory. Other relative paths retain geth's working-directory
-semantics. The check does not create data directories or start services.
-Genesis generation, database initialization, and cluster startup are subsequent
-parts of issue #28.
+`NetworkFile` is resolved relative to the deployment file. `--qkc.network`
+replaces that path and is relative to the working directory. Other relative
+paths retain geth's working-directory semantics. The check validates the entire
+deployment after applying selected-process overrides, without creating data
+directories or starting services. Genesis generation and database initialization
+are subsequent PRs in #28; runtime service assembly belongs to #22.
 
 `checkqkcconfig --help` lists supported overrides for data storage, sync mode,
 P2P listening and peer limits, HTTP/WS/IPC, and RPC caps. Unset flags preserve
@@ -66,6 +90,7 @@ already enabled endpoint's address. Ethereum network presets and other
 unsupported geth flags are rejected. HTTP and WS may share a port as in geth;
 port zero requests a dynamically assigned port.
 
-The package API is `LoadNode`, apply local CLI values, `LoadNetwork`, then
-`NodeConfig.Validate`. The last step validates the combined settings and binds
-`Eth.NetworkId` to the network ID.
+The package API is `LoadCluster`, optionally replace `ClusterConfig.NetworkFile`,
+`SelectNode`, apply explicit process-local CLI values, `LoadNetwork`, then
+`ClusterConfig.Validate`. Selection returns the chosen `NodeConfig` within the
+deployment. Validation binds each shard's `Eth.NetworkId` to the network ID.

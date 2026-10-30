@@ -1,0 +1,39 @@
+# NetworkFile is relative to this file. Other paths follow geth: relative to cwd.
+NetworkFile = "network.toml"
+
+[Master.Node]
+DataDir = "./qkc-data/master"
+IPCPath = "qkc.ipc"
+
+[Master.Node.P2P]
+ListenAddr = ":30303"
+MaxPeers = 25
+NoDiscovery = true
+
+[[ShardNodes]]
+ShardID = 0
+Address = "127.0.0.1:38000"
+
+[ShardNodes.Node]
+DataDir = "./qkc-data/shard-0"
+HTTPHost = "127.0.0.1"
+HTTPPort = 18545
+
+[ShardNodes.Eth]
+SyncMode = "full"
+DatabaseCache = 512
+RPCGasCap = 50000000
+
+[[ShardNodes]]
+ShardID = 1
+Address = "127.0.0.1:38001"
+
+[ShardNodes.Node]
+DataDir = "./qkc-data/shard-1"
+HTTPHost = "127.0.0.1"
+HTTPPort = 18546
+
+[ShardNodes.Eth]
+SyncMode = "full"
+DatabaseCache = 256
+RPCGasCap = 50000000

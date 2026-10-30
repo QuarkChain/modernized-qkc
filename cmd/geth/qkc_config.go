@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
@@ -27,13 +28,23 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-var qkcNetworkFileFlag = &cli.StringFlag{
-	Name:  "qkc.network",
-	Usage: "QKC network TOML file (overrides NetworkFile in the local configuration)",
-}
+var (
+	qkcNetworkFileFlag = &cli.StringFlag{
+		Name:  "qkc.network",
+		Usage: "QKC network TOML file (overrides NetworkFile in the deployment)",
+	}
+	qkcRoleFlag = &cli.StringFlag{
+		Name:  "qkc.role",
+		Usage: "Process role: master or shard",
+	}
+	qkcShardFlag = &cli.Uint64Flag{
+		Name:  "qkc.shard",
+		Usage: "Shard routing ID to select from the deployment (required for shard role)",
+	}
+)
 
 var qkcConfigFlags = []cli.Flag{
-	configFileFlag, qkcNetworkFileFlag, utils.NetworkIdFlag,
+	configFileFlag, qkcNetworkFileFlag, qkcRoleFlag, qkcShardFlag, utils.NetworkIdFlag,
 	utils.DataDirFlag, utils.DBEngineFlag, utils.SyncModeFlag, utils.StateSchemeFlag,
 	utils.ListenPortFlag, utils.MaxPeersFlag, utils.NoDiscoverFlag,
 	utils.HTTPEnabledFlag, utils.HTTPListenAddrFlag, utils.HTTPPortFlag, utils.HTTPApiFlag,
@@ -44,14 +55,14 @@ var qkcConfigFlags = []cli.Flag{
 
 var checkQKCConfigCommand = &cli.Command{
 	Name:   "checkqkcconfig",
-	Usage:  "Validate QKC network and local settings without starting the cluster",
+	Usage:  "Select and validate a QKC process configuration without starting services",
 	Flags:  qkcConfigFlags,
 	Action: checkQKCConfig,
 }
 
-func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, error) {
+func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, *qkcconfig.NetworkConfig, error) {
 	if ctx.NArg() != 0 {
-		return nil, fmt.Errorf("checkqkcconfig takes no positional arguments")
+		return nil, nil, fmt.Errorf("checkqkcconfig takes no positional arguments")
 	}
 	// The parent geth app also accepts Ethereum flags. Reject unsupported flags
 	// rather than silently ignoring a requested setting or network preset.
@@ -63,23 +74,42 @@ func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, error) {
 	}
 	for _, name := range ctx.FlagNames() {
 		if ctx.IsSet(name) && !allowed[name] {
-			return nil, fmt.Errorf("--%s is not supported by checkqkcconfig", name)
+			return nil, nil, fmt.Errorf("--%s is not supported by checkqkcconfig", name)
 		}
 	}
-	cfg, err := qkcconfig.LoadNode(ctx.String(configFileFlag.Name))
+	cluster, err := qkcconfig.LoadCluster(ctx.String(configFileFlag.Name))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if ctx.IsSet(qkcNetworkFileFlag.Name) {
-		cfg.NetworkFile = ctx.String(qkcNetworkFileFlag.Name)
+		cluster.NetworkFile = ctx.String(qkcNetworkFileFlag.Name)
 	}
-	if cfg.NetworkFile == "" {
-		return nil, fmt.Errorf("set NetworkFile in --config or supply --qkc.network")
+	if cluster.NetworkFile == "" {
+		return nil, nil, fmt.Errorf("set NetworkFile in --config or supply --qkc.network")
+	}
+	var shardID *uint32
+	if ctx.IsSet(qkcShardFlag.Name) {
+		id := ctx.Uint64(qkcShardFlag.Name)
+		if id >= math.MaxUint32 {
+			return nil, nil, fmt.Errorf("--qkc.shard must be a uint32 routing ID other than the reserved root ID")
+		}
+		value := uint32(id)
+		shardID = &value
+	}
+	cfg, err := cluster.SelectNode(ctx.String(qkcRoleFlag.Name), shardID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.Role == qkcconfig.RoleMaster {
+		for _, flag := range []cli.Flag{utils.SyncModeFlag, utils.StateSchemeFlag, utils.RPCGlobalGasCapFlag, utils.RPCGlobalEVMTimeoutFlag, utils.RPCGlobalTxFeeCapFlag} {
+			if ctx.IsSet(flag.Names()[0]) {
+				return nil, nil, fmt.Errorf("--%s requires shard role", flag.Names()[0])
+			}
+		}
 	}
 	if ctx.IsSet(utils.NetworkIdFlag.Name) {
-		cfg.Eth.NetworkId = ctx.Uint64(utils.NetworkIdFlag.Name)
-		if cfg.Eth.NetworkId == 0 {
-			return nil, fmt.Errorf("--networkid must match the positive NetworkID in the network file")
+		if cfg.Eth != nil {
+			cfg.Eth.NetworkId = ctx.Uint64(utils.NetworkIdFlag.Name)
 		}
 	}
 	if ctx.IsSet(utils.DataDirFlag.Name) {
@@ -90,7 +120,7 @@ func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, error) {
 	}
 	if ctx.IsSet(utils.SyncModeFlag.Name) {
 		if err := cfg.Eth.SyncMode.UnmarshalText([]byte(ctx.String(utils.SyncModeFlag.Name))); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if ctx.IsSet(utils.StateSchemeFlag.Name) {
@@ -120,7 +150,7 @@ func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, error) {
 	applyQKCEndpoint(ctx, utils.HTTPEnabledFlag.Name, utils.HTTPListenAddrFlag.Name, &cfg.Node.HTTPHost, node.DefaultHTTPHost)
 	applyQKCEndpoint(ctx, utils.WSEnabledFlag.Name, utils.WSListenAddrFlag.Name, &cfg.Node.WSHost, node.DefaultWSHost)
 	if ctx.IsSet(utils.IPCDisabledFlag.Name) && ctx.IsSet(utils.IPCPathFlag.Name) {
-		return nil, fmt.Errorf("--ipcdisable and --ipcpath are mutually exclusive")
+		return nil, nil, fmt.Errorf("--ipcdisable and --ipcpath are mutually exclusive")
 	}
 	if ctx.Bool(utils.IPCDisabledFlag.Name) {
 		cfg.Node.IPCPath = ""
@@ -139,12 +169,15 @@ func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, error) {
 	}
 	network, err := qkcconfig.LoadNetwork(cfg.NetworkFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := cfg.Validate(network); err != nil {
-		return nil, err
+	if ctx.IsSet(utils.NetworkIdFlag.Name) && ctx.Uint64(utils.NetworkIdFlag.Name) != uint64(network.NetworkID) {
+		return nil, nil, fmt.Errorf("--networkid must match the positive NetworkID %d in the network file", network.NetworkID)
 	}
-	return cfg, nil
+	if err := cluster.Validate(network); err != nil {
+		return nil, nil, err
+	}
+	return cfg, network, nil
 }
 
 // Explicit false disables an endpoint configured in TOML; an address alone
@@ -165,10 +198,19 @@ func applyQKCEndpoint(ctx *cli.Context, enabled, address string, host *string, d
 }
 
 func checkQKCConfig(ctx *cli.Context) error {
-	cfg, err := loadQKCConfig(ctx)
+	cfg, network, err := loadQKCConfig(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(ctx.App.Writer, "QuarkChain configuration is valid (network ID %d)\n", cfg.Eth.NetworkId)
+	identity := cfg.Role
+	if cfg.ShardID != nil {
+		for _, shard := range network.Shards {
+			if shard.QuarkChain.ShardID == *cfg.ShardID {
+				identity = fmt.Sprintf("shard %d, EVM chain ID %s", *cfg.ShardID, shard.ChainID)
+				break
+			}
+		}
+	}
+	_, err = fmt.Fprintf(ctx.App.Writer, "QuarkChain configuration is valid (%s, network ID %d)\n", identity, network.NetworkID)
 	return err
 }
