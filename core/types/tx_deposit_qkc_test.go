@@ -178,6 +178,58 @@ func TestDepositTxReceipt(t *testing.T) {
 	}
 }
 
+func TestDepositTxEffectiveGasTip(t *testing.T) {
+	for _, price := range []uint64{0, 10} {
+		tx := NewTx(&DepositTx{GasPrice: uint256.NewInt(price)})
+		want := new(big.Int).SetUint64(price)
+		for _, baseFee := range []*big.Int{nil, big.NewInt(0), big.NewInt(5), big.NewInt(10), big.NewInt(20)} {
+			if tip, err := tx.EffectiveGasTip(baseFee); err != nil || tip.Cmp(want) != 0 {
+				t.Errorf("price %d, base fee %v: tip %v, error %v; want %v, nil", price, baseFee, tip, err, want)
+			}
+			if tip := tx.EffectiveGasTipValue(baseFee); tip.Cmp(want) != 0 {
+				t.Errorf("price %d, base fee %v: tip value %v, want %v", price, baseFee, tip, want)
+			}
+			var base *uint256.Int
+			if baseFee != nil {
+				base = uint256.MustFromBig(baseFee)
+			}
+			for _, threshold := range []uint64{0, 9, 10, 11} {
+				wantCmp := want.Cmp(new(big.Int).SetUint64(threshold))
+				if cmp := tx.EffectiveGasTipIntCmp(uint256.NewInt(threshold), base); cmp != wantCmp {
+					t.Errorf("price %d, base fee %v, threshold %d: comparison %d, want %d", price, baseFee, threshold, cmp, wantCmp)
+				}
+			}
+		}
+	}
+}
+
+func TestDepositTxEffectiveGasTipCmp(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		price uint64
+		other TxData
+		want  int
+	}{
+		{"legacy", 10, &LegacyTx{GasPrice: big.NewInt(15)}, 1},
+		{"dynamic equal", 10, &DynamicFeeTx{GasFeeCap: big.NewInt(17), GasTipCap: big.NewInt(10)}, 0},
+		{"dynamic higher", 10, &DynamicFeeTx{GasFeeCap: big.NewInt(30), GasTipCap: big.NewInt(12)}, -1},
+		// A below-base-fee ordinary transaction triggers the big.Int fallback.
+		{"negative ordinary tip", 0, &LegacyTx{GasPrice: big.NewInt(5)}, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			deposit := NewTx(&DepositTx{GasPrice: uint256.NewInt(tt.price)})
+			other := NewTx(tt.other)
+			baseFee := uint256.NewInt(7)
+			if cmp := deposit.EffectiveGasTipCmp(other, baseFee); cmp != tt.want {
+				t.Errorf("comparison %d, want %d", cmp, tt.want)
+			}
+			if cmp := other.EffectiveGasTipCmp(deposit, baseFee); cmp != -tt.want {
+				t.Errorf("reverse comparison %d, want %d", cmp, -tt.want)
+			}
+		})
+	}
+}
+
 func TestDepositTxJSON(t *testing.T) {
 	tx := NewTx(&DepositTx{
 		Version:         DepositTxVersion,

@@ -2,7 +2,14 @@
 NetworkID = 2
 
 [Root.PoSW]
-Enabled = true
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = true
 WindowSize = 256
 StakePerBlock = "1000000000000000000000000000000"
 DiffDivider = 20
@@ -24,9 +31,16 @@ LondonBlock = "0"
 ShardID = 0
 # Omitted ShardIDs defaults to all shards in this network.
 
-# This shard's PoSW is disabled independently of the root chain.
+# This shard uses ordinary PoW without the root chain's staking discount.
 [Shards.QuarkChain.PoSW]
-Enabled = false
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0.5"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = false
 
 [[Shards]]
 ChainID = "100002"
@@ -45,7 +59,14 @@ LondonBlock = "0"
 ShardID = 1
 
 [Shards.QuarkChain.PoSW]
-Enabled = true
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0.5"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = true
 WindowSize = 128
 StakePerBlock = "500000000000000000000000000000"
 DiffDivider = 10

@@ -55,11 +55,14 @@ func TestNetworkExample(t *testing.T) {
 	if cfg.NetworkID != 2 || len(cfg.Shards) != 2 {
 		t.Fatalf("unexpected network: %+v", cfg)
 	}
-	if !cfg.Root.PoSW.Enabled || cfg.Shards[0].QuarkChain.PoSW.Enabled || !cfg.Shards[1].QuarkChain.PoSW.Enabled {
+	if !cfg.Root.PoSW.StakingEnabled || cfg.Shards[0].QuarkChain.PoSW.StakingEnabled || !cfg.Shards[1].QuarkChain.PoSW.StakingEnabled {
 		t.Fatal("root and shard PoSW configurations are not independent")
 	}
-	if cfg.Root.PoSW.StakePerBlock.Dec() != "1000000000000000000000000000000" {
+	if cfg.Root.PoSW.StakePerBlock.String() != "1000000000000000000000000000000" {
 		t.Fatal("large stake was not preserved")
+	}
+	if cfg.Root.PoSW.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 || cfg.Shards[0].QuarkChain.PoSW.RewardTaxRate.Cmp(big.NewRat(1, 2)) != 0 {
+		t.Fatal("consensus ratios were not parsed exactly")
 	}
 	for _, shard := range cfg.Shards {
 		if !slices.Equal(shard.QuarkChain.ShardIDs, []uint32{0, 1}) {
@@ -93,8 +96,13 @@ func TestNetworkValidation(t *testing.T) {
 		{"missing peer", func(c *NetworkConfig) { c.Shards[0].QuarkChain.ShardIDs = []uint32{0} }, "every network shard"},
 		{"unknown peer", func(c *NetworkConfig) { c.Shards[0].QuarkChain.ShardIDs = []uint32{0, 2} }, "unknown or duplicate"},
 		{"duplicate peer", func(c *NetworkConfig) { c.Shards[0].QuarkChain.ShardIDs = []uint32{0, 0} }, "unknown or duplicate"},
+		{"missing root posw", func(c *NetworkConfig) { c.Root.PoSW = nil }, "Root: posw:"},
+		{"missing shard posw", func(c *NetworkConfig) { c.Shards[0].QuarkChain.PoSW = nil }, "shard 0: posw:"},
+		{"invalid ordinary pow", func(c *NetworkConfig) { c.Shards[0].QuarkChain.PoSW.MinimumDifficulty = nil }, "shard 0: posw:"},
 		{"invalid root posw", func(c *NetworkConfig) { c.Root.PoSW.WindowSize = 0 }, "Root: posw:"},
 		{"invalid shard posw", func(c *NetworkConfig) { c.Shards[1].QuarkChain.PoSW.DiffDivider = 0 }, "shard 1: posw:"},
+		{"negative stake", func(c *NetworkConfig) { c.Root.PoSW.StakePerBlock.SetInt64(-1) }, "Root: posw:"},
+		{"overflow stake", func(c *NetworkConfig) { c.Root.PoSW.StakePerBlock.Lsh(big.NewInt(1), 256) }, "Root: posw:"},
 		{"invalid fork order", func(c *NetworkConfig) { c.Shards[0].HomesteadBlock.SetInt64(1) }, "unsupported fork ordering"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -108,21 +116,34 @@ func TestNetworkValidation(t *testing.T) {
 }
 
 func TestNetworkDefaults(t *testing.T) {
+	const pow = `AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+`
 	cfg, err := LoadNetwork(writeConfig(t, []byte(`NetworkID = 9
+[Root.PoSW]
+`+pow+`
 [[Shards]]
 ChainID = "10"
 [Shards.QuarkChain]
 ShardID = 1
+[Shards.QuarkChain.PoSW]
+`+pow+`
 [[Shards]]
 ChainID = "11"
 [Shards.QuarkChain]
 ShardID = 0
-`)))
+[Shards.QuarkChain.PoSW]
+`+pow)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Root.PoSW != nil || cfg.Shards[0].QuarkChain.PoSW != nil {
-		t.Fatal("PoSW should be disabled by omission")
+	if cfg.Root.PoSW.StakingEnabled || cfg.Shards[0].QuarkChain.PoSW.StakingEnabled || cfg.Shards[1].QuarkChain.PoSW.StakingEnabled {
+		t.Fatal("staking should be disabled by omission")
 	}
 	if !slices.Equal(cfg.Shards[0].QuarkChain.ShardIDs, []uint32{0, 1}) {
 		t.Fatal("derived shard IDs must be sorted")
@@ -148,8 +169,9 @@ func TestInvalidTOML(t *testing.T) {
 		{"local typo", false, "[Node]\nHttpPort = 1234"},
 		{"nested typo", false, "[Eth.Miner]\nUnknown = 1"},
 		{"invalid sync mode", false, "[Eth]\nSyncMode = \"invalid\""},
-		{"negative stake", true, "[Root.PoSW]\nStakePerBlock = \"-1\""},
-		{"overflow stake", true, "[Root.PoSW]\nStakePerBlock = \"115792089237316195423570985008687907853269984665640564039457584007913129639936\""},
+		{"obsolete posw flag", true, "[Root.PoSW]\nEnabled = true"},
+		{"invalid stake", true, "[Root.PoSW]\nStakePerBlock = \"invalid\""},
+		{"invalid ratio", true, "[Root.PoSW]\nDecayFactor = \"invalid\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := writeConfig(t, []byte(test.input))

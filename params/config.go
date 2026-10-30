@@ -1174,6 +1174,13 @@ func configBlockEqual(x, y *big.Int) bool {
 	return x.Cmp(y) == 0
 }
 
+func configRatEqual(x, y *big.Rat) bool {
+	if x == nil || y == nil {
+		return x == y
+	}
+	return x.Cmp(y) == 0
+}
+
 // isForkTimestampIncompatible returns true if a fork scheduled at timestamp s1
 // cannot be rescheduled to timestamp s2 because head is already past the fork.
 func isForkTimestampIncompatible(s1, s2 *uint64, head uint64) bool {

@@ -12,11 +12,21 @@ root rewards and staking. Shard IDs and EVM chain IDs must be unique; shard ID
 `Shards.QuarkChain.ShardIDs` defaults to all configured shard IDs in ascending
 order. An explicit list must contain every shard exactly once.
 
-`Root.PoSW` and each `Shards.QuarkChain.PoSW` use the existing `params.PoSWConfig`
-independently. Omission disables PoSW. Enabled PoSW requires positive
-`WindowSize`, `StakePerBlock`, and `DiffDivider`. Use a quoted decimal or hex
-uint256 value for `StakePerBlock`. PoSW does not control staking contract
-deployment; the deployment rules from #18 still apply.
+`Root.PoSW` and each `Shards.QuarkChain.PoSW` require an independent
+`params.PoSWConfig`. Each must specify positive `AdjustmentCutoff`,
+`AdjustmentFactor`, `MinimumDifficulty`, and `EpochInterval`, a nonnegative
+`CoinbaseAmount`, and `RewardTaxRate` and `DecayFactor` between zero and one.
+Use quoted decimal or hex integer strings for `MinimumDifficulty`,
+`CoinbaseAmount`, and `StakePerBlock`; these amounts must fit uint256. Use quoted
+decimal strings for the ratios, such as `"0.5"` and `"0.88"`.
+
+`StakingEnabled` defaults to false, selecting ordinary PoW without the staking
+discount; the other consensus parameters are still required. Enabling staking
+also requires positive `WindowSize`, `StakePerBlock`, and `DiffDivider`.
+`OriginalBlockNumber` continues reward and staking decay from an old chain's
+height, and `PoSWStakingDecayEnabled` explicitly enables stake requirement decay.
+These settings do not control staking contract deployment; the deployment rules
+from #18 still apply. The example uses zero block subsidies.
 
 The local TOML file references the shared file through `NetworkFile` and embeds
 geth's `node.Config` under `[Node]` and `ethconfig.Config` under `[Eth]`. These

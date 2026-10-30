@@ -16,10 +16,12 @@
 
 package wire
 
+import "github.com/ethereum/go-ethereum/common"
+
 // The go:generate directive below runs from this package directory; it cds to
 // the repository root so the generator paths are stable and can be copied
 // into documentation.
-//go:generate sh -c "cd ../.. && go run github.com/ferranbt/fastssz/sszgen --path qkc/wire/messages.go --output qkc/wire/messages_ssz.go"
+//go:generate sh -c "cd ../.. && go run github.com/ferranbt/fastssz/sszgen --path qkc/wire/messages.go --output qkc/wire/messages_ssz.go --include common/types.go"
 
 // =============================================================================
 // Wire-level constants
@@ -35,6 +37,13 @@ const SignatureLength = 65
 
 // UInt128Length is the byte length of a uint128.
 const UInt128Length = 16
+
+// UInt256Length is the byte length of a uint256; numeric fields use little-endian.
+const UInt256Length = 32
+
+// Data carries an already encoded object unchanged through SSZ: RLP for geth
+// objects, SSZ for QKC root objects.
+type Data []byte
 
 // =============================================================================
 // §1  Cluster initialisation
@@ -54,7 +63,7 @@ type PingRequest struct {
 	// ID and does not mean root.
 	ChainID    uint32
 	HasRootTip bool
-	RootTip    []byte `ssz-max:"4294967295"` // SSZ encoding of RootBlock when HasRootTip is true.
+	RootTip    Data `ssz-max:"4294967295"` // SSZ-encoded RootBlock when HasRootTip is true.
 }
 
 // PongResponse (ClusterOp.PONG, 0x82) is the chain's response to PING and
@@ -87,9 +96,58 @@ type ConnectToChainsResponse struct {
 type HelloCommand struct {
 	Version              uint32
 	NetworkID            uint32
-	PeerID               [HashLength]byte
+	PeerID               common.Hash
 	PeerIP               [UInt128Length]byte
 	PeerPort             uint16
-	RootBlockHeader      []byte `ssz-max:"4294967295"` // SSZ encoding of RootBlockHeader.
-	GenesisRootBlockHash [HashLength]byte
+	RootBlockHeader      Data `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeader.
+	GenesisRootBlockHash common.Hash
+}
+
+// AddMinorBlockHeaderRequest reports an accepted minor block to Master.
+// MinorBlockHeader carries an RLP-encoded geth header.
+type AddMinorBlockHeaderRequest struct {
+	MinorBlockHeader Data                `ssz-max:"4294967295"`
+	CoinbaseAmount   [UInt256Length]byte // Shard miner's total reward in QKC base units, including fees.
+}
+
+type AddMinorBlockHeaderResponse struct {
+	ErrorCode uint32
+}
+
+// AddXshardTxListRequest delivers one source block's deposits to a destination
+// shard, including empty lists for the inbox cursor. Each item is RLP(DepositTx),
+// without the 0x7e transaction prefix, in source log order.
+type AddXshardTxListRequest struct {
+	ChainID        uint32      // Destination QuarkChainConfig.ShardID.
+	MinorBlockHash common.Hash // Source block hash.
+	DepositTxList  []Data      `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
+}
+
+type AddXshardTxListResponse struct {
+	ErrorCode uint32
+}
+
+// AddRootBlockRequest sends a root block from Master to every chain. RootBlock
+// carries an SSZ-encoded QKC RootBlock.
+type AddRootBlockRequest struct {
+	RootBlock Data `ssz-max:"4294967295"`
+}
+
+type AddRootBlockResponse struct {
+	ErrorCode uint32
+}
+
+// GetRootChainStakesRequest asks a chain for the stakes recorded for Address
+// at MinorBlockHash.
+type GetRootChainStakesRequest struct {
+	Address        common.Address
+	MinorBlockHash common.Hash
+}
+
+// GetRootChainStakesResponse reports staking information. Stakes is a
+// little-endian uint256; Signer is a 20-byte address.
+type GetRootChainStakesResponse struct {
+	ErrorCode uint32
+	Stakes    [UInt256Length]byte
+	Signer    common.Address
 }

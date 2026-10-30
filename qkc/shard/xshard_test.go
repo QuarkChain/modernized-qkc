@@ -58,7 +58,7 @@ func TestXShardDeposits(t *testing.T) {
 		// impostor emits a SentMessage topic from another address.
 		impostor = common.HexToAddress("0x1111")
 	)
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 0, ShardIDs: []uint32{0, 1, 2}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(0, 0, 1, 2)
 	sendABI, err := abi.JSON(strings.NewReader(`[{"type": "function", "name": "send", "stateMutability": "payable", "outputs": [], "inputs": [
 		{"name": "dstShard", "type": "uint32"}, {"name": "to", "type": "address"}, {"name": "value", "type": "uint256"},
 		{"name": "gasLimit", "type": "uint64"}, {"name": "isMove", "type": "bool"}, {"name": "data", "type": "bytes"}]}]`))

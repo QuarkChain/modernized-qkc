@@ -1,4 +1,4 @@
-// Copyright 2026 The quarkchain Authors
+// Copyright 2026-2027 The quarkchain Authors
 // This file is part of the quarkchain library.
 //
 // The quarkchain library is free software: you can redistribute it and/or modify
@@ -44,10 +44,10 @@ func TestRootBlockStorage(t *testing.T) {
 		Nonce:           6,
 		Extra:           []byte("root"),
 	}
-	minorHeaders := types.MinorBlockHeaders{
-		{Number: big.NewInt(1), Difficulty: common.Big0, Extra: []byte("minor")},
+	shardHeaders := types.ShardBlockHeaders{
+		{Number: big.NewInt(1), Difficulty: common.Big0, Extra: []byte("shard")},
 	}
-	block := types.NewRootBlock(header, minorHeaders, []byte("tracking"))
+	block := types.NewRootBlock(header, shardHeaders, []byte("tracking"))
 	hash := block.Hash()
 
 	if HasRootBlock(db, hash) {
@@ -71,7 +71,7 @@ func TestRootBlockStorage(t *testing.T) {
 	if entry.Hash() != hash {
 		t.Fatalf("retrieved root block mismatch: have %x, want %x", entry.Hash(), hash)
 	}
-	if len(entry.MinorBlockHeaders()) != 1 || entry.MinorBlockHeaders()[0].Hash() != minorHeaders[0].Hash() {
+	if len(entry.ShardBlockHeaders()) != 1 || entry.ShardBlockHeaders()[0].Hash() != shardHeaders[0].Hash() {
 		t.Fatal("retrieved shard block headers mismatch")
 	}
 	if string(entry.TrackingData()) != "tracking" {
@@ -83,19 +83,6 @@ func TestRootBlockStorage(t *testing.T) {
 	}
 	if headerEntry.Hash() != hash {
 		t.Fatalf("retrieved root block header mismatch: have %x, want %x", headerEntry.Hash(), hash)
-	}
-}
-
-func TestRootHeadStorage(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-
-	if hash := ReadRootHeadHash(db); hash != (common.Hash{}) {
-		t.Fatalf("non existent root head returned: %x", hash)
-	}
-	want := common.Hash{0x01}
-	WriteRootHeadHash(db, want)
-	if hash := ReadRootHeadHash(db); hash != want {
-		t.Fatalf("root head mismatch: have %x, want %x", hash, want)
 	}
 }
 

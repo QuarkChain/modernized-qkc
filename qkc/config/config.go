@@ -45,7 +45,7 @@ type NetworkConfig struct {
 // RootConfig contains root-chain consensus settings. The root is not an EVM
 // chain and does not inherit a shard's chain ID or PoSW configuration.
 type RootConfig struct {
-	PoSW *params.PoSWConfig `toml:",omitempty"`
+	PoSW *params.PoSWConfig
 }
 
 // NodeConfig contains local settings for a node hosting the root and all shards.
@@ -93,7 +93,8 @@ func LoadNode(file string) (*NodeConfig, error) {
 }
 
 // LoadNetwork loads and validates an explicit network definition. Omitted shard
-// lists default to all configured shard IDs, sorted by ID. PoSW defaults to off.
+// lists default to all configured shard IDs, sorted by ID. Root and shard PoSW
+// configurations are required, including when staking is disabled.
 func LoadNetwork(file string) (*NetworkConfig, error) {
 	var cfg NetworkConfig
 	if file == "" {

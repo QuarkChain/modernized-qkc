@@ -139,6 +139,7 @@ type generateParams struct {
 	slotNum        *uint64           // The slot number (amsterdam field).
 	targetGasLimit *uint64           // The target gas limit requested by the CL (amsterdam field).
 	noTxs          bool              // Flag whether an empty block without any transaction is expected
+	qkc            *types.QKCExtra   // Shard fields; mandatory deposits are included even with noTxs
 
 	forceOverrides    bool // Flag whether we should overwrite extraData and transactions
 	overrideExtraData []byte
@@ -177,6 +178,20 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	}
 	// Also add size of withdrawals to work block size.
 	work.size += uint64(genParam.withdrawals.Size())
+
+	if genParam.qkc != nil {
+		parent := miner.chain.GetHeader(work.header.ParentHash, work.header.Number.Uint64()-1)
+		if parent == nil {
+			return &newPayloadResult{err: errors.New("missing parent")}
+		}
+		deposits, err := miner.chain.XShardDeposits(parent, genParam.qkc.PrevRootBlock)
+		if err != nil {
+			return &newPayloadResult{err: err}
+		}
+		if err := miner.commitXShardDeposits(ctx, work, deposits); err != nil {
+			return &newPayloadResult{err: err}
+		}
+	}
 
 	if !genParam.noTxs {
 		// If forceOverrides is true and overrideTxs is not empty, commit the override transactions
@@ -308,6 +323,9 @@ func (miner *Miner) prepareWork(ctx context.Context, genParams *generateParams, 
 	if genParams.forceOverrides {
 		header.Extra = genParams.overrideExtraData
 	}
+	if genParams.qkc != nil {
+		header.Extra = genParams.qkc.Encode()
+	}
 	// Set the randomness field from the beacon chain if it's available.
 	if genParams.random != (common.Hash{}) {
 		header.MixDigest = genParams.random
@@ -335,13 +353,20 @@ func (miner *Miner) prepareWork(ctx context.Context, genParams *generateParams, 
 		header.BlobGasUsed = new(uint64)
 		header.ExcessBlobGas = &excessBlobGas
 		header.ParentBeaconRoot = genParams.beaconRoot
+		if miner.chainConfig.QuarkChain != nil {
+			// Keep the geth header encoding without an Ethereum beacon dependency.
+			header.ParentBeaconRoot = new(common.Hash)
+		}
 	}
 	// Apply EIP-7843.
 	if miner.chainConfig.IsAmsterdam(header.Number, header.Time) {
-		if genParams.slotNum == nil {
+		header.SlotNumber = genParams.slotNum
+		if miner.chainConfig.QuarkChain != nil {
+			// QKC has no beacon slots; SLOTNUM consequently returns zero.
+			header.SlotNumber = new(uint64)
+		} else if genParams.slotNum == nil {
 			return nil, errors.New("no slot number set post-amsterdam")
 		}
-		header.SlotNumber = genParams.slotNum
 	}
 	// Could potentially happen if starting to mine in an odd state.
 	// Note genParams.coinbase can be different with header.Coinbase

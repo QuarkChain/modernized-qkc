@@ -18,9 +18,9 @@ package params
 
 import (
 	"errors"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/holiman/uint256"
 )
 
 var (
@@ -44,23 +44,165 @@ var PoSWStakingRuntimeCode = common.FromHex("0x60806040526004361061007b576000356
 // PoSWStakingRuntimeCodeHash pins the runtime used by pyquarkchain and goquarkchain.
 var PoSWStakingRuntimeCodeHash = common.HexToHash("0xee90e568da573f251d63256e843add8bd7a27cec1f4c2a06ef20380be68df0a3")
 
-// PoSWConfig configures proof of staked work. StakePerBlock is denominated in
-// the smallest unit of the native currency. Root and shard chains each own
-// their PoSW configuration; staking deployment is independent of this config.
+// PoSWConfig defines the difficulty, staking and subsidy rules for a root or shard chain.
+// Both use the same calculations with their own configuration values.
+// Amounts are in the smallest native currency unit. See posw_json.go for JSON formats.
+// Call Check before using the configuration for consensus calculations.
 type PoSWConfig struct {
-	Enabled       bool         `json:"enabled"`
-	WindowSize    uint64       `json:"windowSize"`
-	StakePerBlock *uint256.Int `json:"stakePerBlock"`
-	DiffDivider   uint64       `json:"diffDivider"`
+	// AdjustmentCutoff divides the child-parent timestamp delta, in seconds,
+	// when computing the base PoW difficulty adjustment.
+	AdjustmentCutoff uint64 `json:"adjustmentCutoff"`
+	// AdjustmentFactor divides the parent difficulty to obtain one adjustment step.
+	AdjustmentFactor uint64 `json:"adjustmentFactor"`
+	// MinimumDifficulty is the positive uint256 floor for base PoW difficulty,
+	// before staking discounts.
+	MinimumDifficulty *big.Int `json:"minimumDifficulty"`
+
+	// CoinbaseAmount is the original block subsidy, before epoch decay and reward
+	// tax. Zero disables the subsidy; transaction fees are accounted for separately.
+	CoinbaseAmount *big.Int `json:"coinbaseAmount"`
+	// RewardTaxRate is the fraction deducted from this chain's decayed subsidy.
+	// Shards share their subsidy with root at the configured rate; root uses 0
+	// because its base subsidy does not need to be shared with another chain.
+	// BlockRewardAt returns the remaining share. Check requires a finite decimal
+	// in [0, 1] with a reduced denominator no greater than 100.
+	RewardTaxRate *big.Rat `json:"rewardTaxRate"`
+	// EpochInterval is the number of blocks per reward and staking decay epoch.
+	EpochInterval uint64 `json:"epochInterval"`
+	// DecayFactor is the fraction retained each epoch, e.g. 0.88 retains 88%.
+	// Check requires a finite decimal in [0, 1] with a reduced denominator no greater than 100.
+	DecayFactor *big.Rat `json:"decayFactor"`
+	// OriginalBlockNumber is the old chain's stop height represented by genesis.
+	// It continues reward and staking epochs while new block numbers start at zero.
+	OriginalBlockNumber uint64 `json:"originalBlockNumber,omitempty"`
+
+	// StakingEnabled enables the stake-based difficulty discount.
+	StakingEnabled bool `json:"stakingEnabled"`
+	// WindowSize includes the candidate block. Eligibility counts this coinbase's
+	// blocks among the preceding WindowSize-1 ancestors, including ordinary PoW blocks.
+	WindowSize uint64 `json:"windowSize"`
+	// DiffDivider divides the base PoW difficulty when the candidate qualifies for staking.
+	DiffDivider uint64 `json:"diffDivider"`
+	// StakePerBlock is the original stake required per block of quota, before decay.
+	// The quota is capped at WindowSize and uses the value returned by StakePerBlockAt.
+	StakePerBlock *big.Int `json:"stakePerBlock"`
+	// PoSWStakingDecayEnabled applies the shared epoch decay to StakePerBlock.
+	// Enable explicitly for shard staking to continue mainnet's already-active
+	// decay; leave false for root. Reward decay is independent of this flag.
+	PoSWStakingDecayEnabled bool `json:"poswStakingDecayEnabled"`
 }
 
-// Check validates PoSW parameters. A nil config leaves PoSW disabled.
-func (c *PoSWConfig) Check() error {
-	if c == nil {
-		return nil
+// Equal compares all consensus parameters by value. Two nil configs are equal.
+func (c *PoSWConfig) Equal(other *PoSWConfig) bool {
+	if c == nil || other == nil {
+		return c == other
 	}
-	if c.Enabled && (c.WindowSize == 0 || c.DiffDivider == 0 || c.StakePerBlock == nil || c.StakePerBlock.IsZero()) {
-		return errors.New("posw: enabled PoSW requires positive windowSize, stakePerBlock and diffDivider")
+	return c.AdjustmentCutoff == other.AdjustmentCutoff &&
+		c.AdjustmentFactor == other.AdjustmentFactor &&
+		configBlockEqual(c.MinimumDifficulty, other.MinimumDifficulty) &&
+		configBlockEqual(c.CoinbaseAmount, other.CoinbaseAmount) &&
+		configRatEqual(c.RewardTaxRate, other.RewardTaxRate) &&
+		c.EpochInterval == other.EpochInterval &&
+		configRatEqual(c.DecayFactor, other.DecayFactor) &&
+		c.OriginalBlockNumber == other.OriginalBlockNumber &&
+		c.StakingEnabled == other.StakingEnabled &&
+		c.WindowSize == other.WindowSize &&
+		c.DiffDivider == other.DiffDivider &&
+		configBlockEqual(c.StakePerBlock, other.StakePerBlock) &&
+		c.PoSWStakingDecayEnabled == other.PoSWStakingDecayEnabled
+}
+
+// Check validates the required PoW and reward rules, and staking rules when enabled.
+// A nil config is invalid; PoW and reward parameters are required even with staking disabled.
+func (c *PoSWConfig) Check() error {
+	if c == nil || c.AdjustmentCutoff == 0 || c.AdjustmentFactor == 0 || c.MinimumDifficulty == nil || c.MinimumDifficulty.Sign() <= 0 {
+		return errors.New("posw: positive cutoff, factor and minimum difficulty are required")
+	}
+	if c.MinimumDifficulty.BitLen() > 256 {
+		return errors.New("posw: minimum difficulty must fit uint256")
+	}
+	if c.CoinbaseAmount == nil || c.CoinbaseAmount.Sign() < 0 || c.CoinbaseAmount.BitLen() > 256 || c.EpochInterval == 0 {
+		return errors.New("posw: a uint256 block subsidy and positive epoch interval are required")
+	}
+	if c.DecayFactor == nil || c.DecayFactor.Sign() < 0 || c.DecayFactor.Cmp(big.NewRat(1, 1)) > 0 {
+		return errors.New("posw: decay factor must be between zero and one")
+	}
+	// Match pyquarkchain's block_reward_decay_factor denominator limit.
+	if c.DecayFactor.Denom().Cmp(big.NewInt(100)) > 0 {
+		return errors.New("posw: reward decay factor denominator must not exceed 100")
+	}
+	if _, exact := c.DecayFactor.FloatPrec(); !exact {
+		return errors.New("posw: decay factor must have a finite decimal representation")
+	}
+	if c.RewardTaxRate == nil || c.RewardTaxRate.Sign() < 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) > 0 {
+		return errors.New("posw: reward tax rate must be between zero and one")
+	}
+	// Match pyquarkchain's reward_tax_rate denominator limit.
+	if c.RewardTaxRate.Denom().Cmp(big.NewInt(100)) > 0 {
+		return errors.New("posw: reward tax rate denominator must not exceed 100")
+	}
+	if _, exact := c.RewardTaxRate.FloatPrec(); !exact {
+		return errors.New("posw: reward tax rate must have a finite decimal representation")
+	}
+	if c.StakePerBlock != nil && (c.StakePerBlock.Sign() < 0 || c.StakePerBlock.BitLen() > 256) {
+		return errors.New("posw: stakePerBlock must fit uint256")
+	}
+	if c.StakingEnabled && (c.WindowSize == 0 || c.DiffDivider == 0 || c.StakePerBlock == nil || c.StakePerBlock.Sign() == 0) {
+		return errors.New("posw: staking requires positive windowSize, stakePerBlock and diffDivider")
 	}
 	return nil
+}
+
+// BlockRewardAt returns this chain's subsidy after epoch decay and reward tax.
+// Root and shard chains use the same formula with their own configuration values.
+// Transaction fees and shard taxes received by root are accounted for separately.
+// Pass the height without adding OriginalBlockNumber; the offset is applied internally.
+// Like pyquarkchain, floor the decayed subsidy before applying the reward tax,
+// then floor the remaining share. Genesis has no subsidy. The result is a new integer.
+func (c *PoSWConfig) BlockRewardAt(number *big.Int) *big.Int {
+	if number.Sign() == 0 {
+		return new(big.Int)
+	}
+	// Calculate the base subsidy after epoch decay, rounded down.
+	reward := c.decayByEpoch(c.CoinbaseAmount, number)
+	// Keep the share remaining after tax.
+	// Shards share their decayed subsidy with root at the configured rate;
+	// root uses 0 because its subsidy does not need to be shared with another chain.
+	localRate := new(big.Rat).Sub(big.NewRat(1, 1), c.RewardTaxRate)
+	reward.Mul(reward, localRate.Num())
+	// Round down again after applying the remaining share.
+	return reward.Div(reward, localRate.Denom())
+}
+
+// StakePerBlockAt returns the effective stake requirement at a new chain block
+// number. Root uses a fixed value; shards enable decay. The result is a new integer.
+// Pass the height without adding OriginalBlockNumber. An unset StakePerBlock
+// returns zero, which Check permits only when staking is disabled.
+func (c *PoSWConfig) StakePerBlockAt(number *big.Int) *big.Int {
+	if c.StakePerBlock == nil {
+		return new(big.Int)
+	}
+	if !c.PoSWStakingDecayEnabled {
+		// Return a copy of the fixed stake requirement when decay is disabled.
+		return new(big.Int).Set(c.StakePerBlock)
+	}
+	// Apply epoch decay to the configured stake requirement, rounded down.
+	stake := c.decayByEpoch(c.StakePerBlock, number)
+	// Match pyquarkchain: use the original requirement if decay rounds to zero.
+	if stake.Sign() == 0 {
+		stake.Set(c.StakePerBlock)
+	}
+	return stake
+}
+
+// decayByEpoch computes floor(value * DecayFactor^epoch), where
+// epoch = floor((number + OriginalBlockNumber) / EpochInterval).
+// It rounds only after exponentiation and does not modify its inputs.
+func (c *PoSWConfig) decayByEpoch(value, number *big.Int) *big.Int {
+	height := new(big.Int).Add(number, new(big.Int).SetUint64(c.OriginalBlockNumber))
+	epoch := height.Div(height, new(big.Int).SetUint64(c.EpochInterval))
+	numerator := new(big.Int).Exp(c.DecayFactor.Num(), epoch, nil)
+	denominator := new(big.Int).Exp(c.DecayFactor.Denom(), epoch, nil)
+	result := new(big.Int).Mul(value, numerator)
+	return result.Div(result, denominator)
 }

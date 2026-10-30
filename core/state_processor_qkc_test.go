@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"math/big"
 	"testing"
 
@@ -25,12 +26,47 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/types/bal"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
+
+func TestBeaconRootQKC(t *testing.T) {
+	for _, qkc := range []bool{false, true} {
+		for _, root := range []common.Hash{{}, {1}} {
+			config := *params.MergedTestChainConfig
+			config.AmsterdamTime = new(uint64)
+			if qkc {
+				config.QuarkChain = &params.QuarkChainConfig{}
+			}
+			statedb, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+			if err != nil {
+				t.Fatal(err)
+			}
+			statedb.SetCode(params.BeaconRootsAddress, params.BeaconRootsCode, tracing.CodeChangeGenesis)
+			header := &types.Header{Number: big.NewInt(1), Time: 1, Difficulty: new(big.Int)}
+			evm := vm.NewEVM(NewEVMBlockContext(header, nil, &header.Coinbase), statedb, &config, vm.Config{})
+			accessList := bal.NewConstructionBlockAccessList()
+			ProcessBeaconBlockRoot(root, evm, accessList)
+			evm.Release()
+			want := common.BigToHash(big.NewInt(1))
+			if qkc {
+				want = common.Hash{}
+				if len(accessList.Accounts) != 0 {
+					t.Fatal("QKC beacon call changed the BAL")
+				}
+			}
+			if got := statedb.GetState(params.BeaconRootsAddress, common.BigToHash(big.NewInt(1))); got != want {
+				t.Fatalf("qkc=%v root=%x: stored timestamp %x, want %x", qkc, root, got, want)
+			}
+		}
+	}
+}
 
 func TestQKCDisablesParallelExecution(t *testing.T) {
 	config := *params.MergedTestChainConfig
@@ -84,11 +120,12 @@ func TestDepositAfterTransaction(t *testing.T) {
 		sender = crypto.PubkeyToAddress(key.PublicKey)
 		to     = common.HexToAddress("0xe0a")
 	)
-	config.QuarkChain = &params.QuarkChainConfig{ShardID: 1, ShardIDs: []uint32{0, 1}}
+	config.QuarkChain = params.NewTestQuarkChainConfig(1, 0, 1)
 	gspec := &Genesis{
 		Config: &config,
 		Alloc:  withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),
 	}
+	maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(config.QuarkChain.ShardID))
 	signer := types.LatestSigner(gspec.Config)
 	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *BlockGen) {
 		b.AddTx(types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
