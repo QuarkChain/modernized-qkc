@@ -231,9 +231,10 @@ func (c *ClusterConfig) Validate(network *NetworkConfig) error {
 	return nil
 }
 
-// LoadNetwork loads and validates an explicit network definition. Omitted shard
-// lists default to all configured shard IDs, sorted by ID. Root and shard PoSW
-// configurations are required, including when staking is disabled.
+// LoadNetwork loads and validates a network definition, deriving each shard's
+// ShardIDs list as 0..N-1 from the number of shard entries. ShardIDs must not be
+// supplied in TOML. Root and shard PoSW configurations are required, including
+// when staking is disabled.
 func LoadNetwork(file string) (*NetworkConfig, error) {
 	var cfg NetworkConfig
 	if file == "" {
@@ -242,17 +243,18 @@ func LoadNetwork(file string) (*NetworkConfig, error) {
 	if err := load(file, &cfg); err != nil {
 		return nil, err
 	}
-	ids := make([]uint32, 0, len(cfg.Shards))
-	for _, shard := range cfg.Shards {
-		if shard.QuarkChain != nil {
-			ids = append(ids, shard.QuarkChain.ShardID)
-		}
+	ids := make([]uint32, len(cfg.Shards))
+	for i := range ids {
+		ids[i] = uint32(i)
 	}
-	slices.Sort(ids)
-	for _, shard := range cfg.Shards {
-		if shard.QuarkChain != nil && shard.QuarkChain.ShardIDs == nil {
-			shard.QuarkChain.ShardIDs = slices.Clone(ids)
+	for i, shard := range cfg.Shards {
+		if shard.QuarkChain == nil {
+			continue
 		}
+		if shard.QuarkChain.ShardIDs != nil {
+			return nil, fmt.Errorf("%s: Shards[%d].QuarkChain.ShardIDs is derived; omit it from the network file", file, i)
+		}
+		shard.QuarkChain.ShardIDs = slices.Clone(ids)
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
@@ -310,6 +312,11 @@ func (c *NetworkConfig) Validate() error {
 	}
 	if !ids[params.RootCoinbaseShardID] {
 		return errors.New("network must include shard 0 for root rewards and staking")
+	}
+	for id := range c.Shards {
+		if !ids[uint32(id)] {
+			return fmt.Errorf("shard IDs must cover 0..%d; missing shard %d", len(c.Shards)-1, id)
+		}
 	}
 	for _, shard := range c.Shards {
 		qkc := shard.QuarkChain

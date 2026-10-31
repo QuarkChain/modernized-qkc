@@ -88,6 +88,7 @@ func TestNetworkValidation(t *testing.T) {
 		{"duplicate shard", func(c *NetworkConfig) { c.Shards[1].QuarkChain.ShardID = 0 }, "duplicate shard ID"},
 		{"reserved shard", func(c *NetworkConfig) { c.Shards[1].QuarkChain.ShardID = math.MaxUint32 }, "reserved for the root"},
 		{"missing shard zero", func(c *NetworkConfig) { c.Shards = c.Shards[1:] }, "include shard 0"},
+		{"shard id gap", func(c *NetworkConfig) { c.Shards[1].QuarkChain.ShardID = 2 }, "shard IDs must cover 0..1; missing shard 1"},
 		{"missing chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = nil }, "positive uint256"},
 		{"zero chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = new(big.Int) }, "positive uint256"},
 		{"negative chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = big.NewInt(-1) }, "positive uint256"},
@@ -112,6 +113,36 @@ func TestNetworkValidation(t *testing.T) {
 				t.Fatalf("have %v, want error containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestNetworkDerivedShardIDs(t *testing.T) {
+	input, err := os.ReadFile("examples/network.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A single shard derives [0] without an explicit count or topology list.
+	single := strings.Join(strings.SplitN(string(input), "\n[[Shards]]", 3)[:2], "\n[[Shards]]")
+	cfg, err := LoadNetwork(writeConfig(t, []byte(single)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shards) != 1 || !slices.Equal(cfg.Shards[0].QuarkChain.ShardIDs, []uint32{0}) {
+		t.Fatal("single-shard topology was not derived from the shard count")
+	}
+	for _, list := range []string{"[]", "[0, 1]"} {
+		t.Run(list, func(t *testing.T) {
+			content := strings.Replace(string(input), "ShardID = 0", "ShardID = 0\nShardIDs = "+list, 1)
+			file := writeConfig(t, []byte(content))
+			if _, err := LoadNetwork(file); err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "ShardIDs is derived") {
+				t.Fatalf("explicit ShardIDs accepted or error lacks context: %v", err)
+			}
+		})
+	}
+	// Contiguity is checked when loading files as well as for in-memory configs.
+	content := strings.Replace(string(input), "ShardID = 1", "ShardID = 2", 1)
+	if _, err := LoadNetwork(writeConfig(t, []byte(content))); err == nil || !strings.Contains(err.Error(), "shard IDs must cover 0..1") {
+		t.Fatalf("noncontiguous shard IDs accepted: %v", err)
 	}
 }
 
@@ -240,8 +271,11 @@ func TestClusterExample(t *testing.T) {
 		if master.ShardEndpoints[*entry.ShardID] != entry.Address {
 			t.Fatal("master endpoints were not derived from deployment entries")
 		}
-		if entry.Eth.NetworkId != uint64(network.NetworkID) || entry.Eth.SyncMode != ethconfig.FullSync || entry.Node.HTTPPort != 18545+i {
+		if entry.Eth.NetworkId != uint64(network.NetworkID) || entry.Node.HTTPPort != 18545+i {
 			t.Fatal("per-shard settings were not preserved")
+		}
+		if entry.Eth.SyncMode != ethconfig.Defaults.SyncMode || entry.Eth.RPCGasCap != ethconfig.Defaults.RPCGasCap {
+			t.Fatal("omitted execution settings did not inherit geth defaults")
 		}
 	}
 	cfg.ShardNodes[0].Eth.DatabaseCache = 0

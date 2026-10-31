@@ -1,4 +1,6 @@
 # Shared network definitions. EVM ChainID values identify individual shards.
+# The shard count comes from the [[Shards]] entries; IDs must cover 0..N-1.
+# This example has two shards, so each internal ShardIDs list is generated as [0, 1].
 NetworkID = 2
 
 [Root.PoSW]
@@ -29,7 +31,6 @@ LondonBlock = "0"
 
 [Shards.QuarkChain]
 ShardID = 0
-# Omitted ShardIDs defaults to all shards in this network.
 
 # This shard uses ordinary PoW without the root chain's staking discount.
 [Shards.QuarkChain.PoSW]

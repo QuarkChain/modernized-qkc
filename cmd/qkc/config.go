@@ -19,16 +19,18 @@ package main
 import (
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/node"
 	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/urfave/cli/v2"
 )
 
 var (
+	configFileFlag = &cli.StringFlag{
+		Name:  "config",
+		Usage: "QKC deployment TOML file",
+	}
 	qkcNetworkFileFlag = &cli.StringFlag{
 		Name:  "qkc.network",
 		Usage: "QKC network TOML file (overrides NetworkFile in the deployment)",
@@ -54,7 +56,7 @@ var qkcConfigFlags = []cli.Flag{
 }
 
 var checkQKCConfigCommand = &cli.Command{
-	Name:   "checkqkcconfig",
+	Name:   "checkconfig",
 	Usage:  "Select and validate a QKC process configuration without starting services",
 	Flags:  qkcConfigFlags,
 	Action: checkQKCConfig,
@@ -62,20 +64,7 @@ var checkQKCConfigCommand = &cli.Command{
 
 func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, *qkcconfig.NetworkConfig, error) {
 	if ctx.NArg() != 0 {
-		return nil, nil, fmt.Errorf("checkqkcconfig takes no positional arguments")
-	}
-	// The parent geth app also accepts Ethereum flags. Reject unsupported flags
-	// rather than silently ignoring a requested setting or network preset.
-	allowed := make(map[string]bool)
-	for _, flag := range slices.Concat(qkcConfigFlags, debug.Flags) {
-		for _, name := range flag.Names() {
-			allowed[name] = true
-		}
-	}
-	for _, name := range ctx.FlagNames() {
-		if ctx.IsSet(name) && !allowed[name] {
-			return nil, nil, fmt.Errorf("--%s is not supported by checkqkcconfig", name)
-		}
+		return nil, nil, fmt.Errorf("checkconfig takes no positional arguments")
 	}
 	cluster, err := qkcconfig.LoadCluster(ctx.String(configFileFlag.Name))
 	if err != nil {

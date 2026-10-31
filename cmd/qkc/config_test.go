@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,13 +38,13 @@ func readQKCFlags(args ...string) (*qkcconfig.NodeConfig, error) {
 	defer func() { *utils.DataDirFlag = savedDataDirFlag }()
 	var cfg *qkcconfig.NodeConfig
 	app := &cli.App{
-		Flags: append(slices.Clone(checkQKCConfigCommand.Flags), utils.MainnetFlag, utils.CacheFlag),
+		Flags: checkQKCConfigCommand.Flags,
 		Action: func(ctx *cli.Context) (err error) {
 			cfg, _, err = loadQKCConfig(ctx)
 			return err
 		},
 	}
-	err := app.Run(append([]string{"geth"}, args...))
+	err := app.Run(append([]string{"qkc"}, args...))
 	return cfg, err
 }
 
@@ -54,10 +53,10 @@ func TestQKCConfigPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Node.P2P.MaxPeers != 0 || cfg.Eth.DatabaseCache != 512 || cfg.Eth.SyncMode != ethconfig.FullSync || cfg.Node.HTTPHost != "127.0.0.1" {
+	if cfg.Node.P2P.MaxPeers != 0 || cfg.Eth.DatabaseCache != 512 || cfg.Node.HTTPHost != "127.0.0.1" {
 		t.Fatal("unset CLI flags replaced configured values")
 	}
-	if cfg.Eth.TrieCleanCache != ethconfig.Defaults.TrieCleanCache || cfg.Eth.NetworkId != 2 {
+	if cfg.Eth.TrieCleanCache != ethconfig.Defaults.TrieCleanCache || cfg.Eth.SyncMode != ethconfig.Defaults.SyncMode || cfg.Eth.RPCGasCap != ethconfig.Defaults.RPCGasCap || cfg.Eth.NetworkId != 2 {
 		t.Fatal("defaults or network ID resolved incorrectly")
 	}
 	if cfg.NetworkFile != filepath.Clean(qkcExampleNetwork) {
@@ -66,14 +65,14 @@ func TestQKCConfigPrecedence(t *testing.T) {
 
 	cfg, err = readQKCFlags("--config", qkcExampleCluster, "--qkc.role", "shard", "--qkc.shard", "0",
 		"--http=false", "--ws", "--ws.addr", "127.0.0.2", "--ws.port", "0",
-		"--datadir", "./cli-data", "--syncmode", "snap", "--rpc.gascap", "0", "--rpc.evmtimeout", "2s", "--rpc.txfeecap", "0")
+		"--datadir", "./cli-data", "--syncmode", "full", "--rpc.gascap", "0", "--rpc.evmtimeout", "2s", "--rpc.txfeecap", "0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Node.HTTPHost != "" || cfg.Node.WSHost != "127.0.0.2" || cfg.Node.WSPort != 0 {
 		t.Fatal("explicit zero or false CLI values did not override local TOML")
 	}
-	if cfg.Node.DataDir != "cli-data" || cfg.Eth.SyncMode != ethconfig.SnapSync || cfg.Eth.RPCGasCap != 0 || cfg.Eth.RPCTxFeeCap != 0 || cfg.Eth.RPCEVMTimeout != 2*time.Second {
+	if cfg.Node.DataDir != "cli-data" || cfg.Eth.SyncMode != ethconfig.FullSync || cfg.Eth.RPCGasCap != 0 || cfg.Eth.RPCTxFeeCap != 0 || cfg.Eth.RPCEVMTimeout != 2*time.Second {
 		t.Fatalf("explicit CLI values were not applied: datadir=%q sync=%v gascap=%d feecap=%v timeout=%v", cfg.Node.DataDir, cfg.Eth.SyncMode, cfg.Eth.RPCGasCap, cfg.Eth.RPCTxFeeCap, cfg.Eth.RPCEVMTimeout)
 	}
 
@@ -137,8 +136,8 @@ func TestQKCConfigInvalidFlags(t *testing.T) {
 	}{
 		{[]string{"--networkid", "100001"}, "must match the positive NetworkID"},
 		{[]string{"--networkid", "0"}, "must match the positive NetworkID"},
-		{[]string{"--mainnet"}, "--mainnet is not supported"},
-		{[]string{"--cache", "100"}, "--cache is not supported"},
+		{[]string{"--mainnet"}, "flag provided but not defined: -mainnet"},
+		{[]string{"--cache", "100"}, "flag provided but not defined: -cache"},
 		{[]string{"--ipcdisable", "--ipcpath", "qkc.ipc"}, "mutually exclusive"},
 		{[]string{"--maxpeers", "-1"}, "external P2P must be disabled"},
 		{[]string{"--http.port", "65536"}, "HTTPPort must be between"},
@@ -200,8 +199,9 @@ func TestCheckQKCConfig(t *testing.T) {
 	} {
 		var out bytes.Buffer
 		datadir := filepath.Join(t.TempDir(), "unused")
-		app := &cli.App{Writer: &out, Commands: []*cli.Command{checkQKCConfigCommand}}
-		args := append([]string{"geth", "checkqkcconfig", "--config", qkcExampleCluster, "--datadir", datadir}, test.args...)
+		app := newApp()
+		app.Writer = &out
+		args := append([]string{"qkc", "checkconfig", "--config", qkcExampleCluster, "--datadir", datadir}, test.args...)
 		if err := app.Run(args); err != nil {
 			t.Fatal(err)
 		}

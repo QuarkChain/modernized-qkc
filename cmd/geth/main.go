@@ -245,7 +245,6 @@ func init() {
 		licenseCommand,
 		// See config.go
 		dumpConfigCommand,
-		checkQKCConfigCommand,
 		// see dbcmd.go
 		dbCommand,
 		// See cmd/utils/flags_legacy.go
