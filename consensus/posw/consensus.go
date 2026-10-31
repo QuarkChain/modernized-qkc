@@ -291,7 +291,7 @@ func (p *PoSW) SealHash(header *types.Header) common.Hash {
 // Seal is reserved for the shard mining implementation.
 func (p *PoSW) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
 	// TODO(Lun): Implement shard mining and sealing.
-	panic("not implemented yet")
+	return errors.New("posw: sealing not implemented")
 }
 
 // Close releases cached verification data. In-flight verification retains its
