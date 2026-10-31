@@ -292,7 +292,7 @@ func TestNodeDefaults(t *testing.T) {
 		t.Fatal("geth defaults were not preserved")
 	}
 	for _, cfg := range []NodeConfig{master, shard} {
-		if cfg.Node.IPCPath != "qkc.ipc" || cfg.Node.HTTPHost != "" || cfg.Node.WSHost != "" {
+		if cfg.Node.HTTPHost != "" || cfg.Node.WSHost != "" {
 			t.Fatal("unexpected endpoint defaults")
 		}
 		if len(cfg.Node.P2P.BootstrapNodes) != 0 || len(cfg.Node.P2P.BootstrapNodesV5) != 0 {
@@ -304,6 +304,20 @@ func TestNodeDefaults(t *testing.T) {
 	}
 	if (master.Node.DataDir != "" && master.Node.DataDir == shard.Node.DataDir) || master.Node.Name == shard.Node.Name {
 		t.Fatal("process defaults share a data directory or instance name")
+	}
+	otherID := uint32(1)
+	for _, ephemeral := range []bool{false, true} {
+		endpoints := make(map[string]bool)
+		for _, cfg := range []NodeConfig{master, shard, DefaultNodeConfig(&otherID)} {
+			if ephemeral {
+				cfg.Node.DataDir = ""
+			}
+			endpoint := cfg.Node.IPCEndpoint()
+			if endpoint == "" || endpoints[endpoint] {
+				t.Fatalf("default IPC endpoints must be nonempty and distinct (ephemeral=%t): %q", ephemeral, endpoint)
+			}
+			endpoints[endpoint] = true
+		}
 	}
 }
 
@@ -388,6 +402,16 @@ func TestClusterValidation(t *testing.T) {
 		{"duplicate shard", func(c *ClusterConfig) { *c.ShardNodes[1].ShardID = 0 }, "duplicate deployed shard"},
 		{"unknown shard", func(c *ClusterConfig) { *c.ShardNodes[1].ShardID = 100002 }, "not in the network"},
 		{"duplicate address", func(c *ClusterConfig) { c.ShardNodes[1].Address = c.ShardNodes[0].Address }, "duplicate internal address"},
+		{"equivalent IPv6 addresses", func(c *ClusterConfig) {
+			c.ShardNodes[0].Address = "[::1]:38000"
+			c.ShardNodes[1].Address = "[0:0:0:0:0:0:0:1]:38000"
+		}, "duplicate internal address"},
+		{"IPv4 mapped address", func(c *ClusterConfig) {
+			c.ShardNodes[1].Address = "[::ffff:127.0.0.1]:38000"
+		}, "duplicate internal address"},
+		{"equivalent port numbers", func(c *ClusterConfig) {
+			c.ShardNodes[1].Address = "127.0.0.1:038000"
+		}, "duplicate internal address"},
 		{"shared datadir", func(c *ClusterConfig) { c.ShardNodes[1].Node.DataDir = c.Master.Node.DataDir }, "data directory is shared"},
 		{"master shard id", func(c *ClusterConfig) { c.Master.ShardID = new(uint32) }, "Master must not specify ShardID"},
 		{"master execution", func(c *ClusterConfig) { c.Master.Eth = &ethconfig.Config{} }, "master cannot configure Eth"},
@@ -405,6 +429,79 @@ func TestClusterValidation(t *testing.T) {
 	cfg.Master.Node.DataDir, cfg.ShardNodes[0].Node.DataDir, cfg.ShardNodes[1].Node.DataDir = "", "", ""
 	if err := cfg.Validate(exampleNetwork(t)); err != nil {
 		t.Fatalf("ephemeral data directories should be supported: %v", err)
+	}
+}
+
+func TestClusterRPCEndpoints(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		change   func(*ClusterConfig)
+		conflict bool
+	}{
+		{"duplicate HTTP", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, true},
+		{"master and shard HTTP", func(c *ClusterConfig) {
+			c.Master.Node.HTTPHost = c.ShardNodes[0].Node.HTTPHost
+			c.Master.Node.HTTPPort = c.ShardNodes[0].Node.HTTPPort
+		}, true},
+		{"HTTP and WS across processes", func(c *ClusterConfig) {
+			c.ShardNodes[1].Node.WSHost = c.ShardNodes[0].Node.HTTPHost
+			c.ShardNodes[1].Node.WSPort = c.ShardNodes[0].Node.HTTPPort
+		}, true},
+		{"duplicate WS", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.WSHost, c.ShardNodes[1].Node.WSHost = "localhost", "localhost"
+		}, true},
+		{"equivalent IPv6", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPHost = "::1"
+			c.ShardNodes[1].Node.HTTPHost = "0:0:0:0:0:0:0:1"
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, true},
+		{"hostname case", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPHost, c.ShardNodes[1].Node.HTTPHost = "LOCALHOST", "localhost"
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, true},
+		{"wildcard first", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPHost = "0.0.0.0"
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, true},
+		{"wildcard second", func(c *ClusterConfig) {
+			c.ShardNodes[1].Node.HTTPHost = "::"
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, true},
+		{"dynamic ports", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPPort, c.ShardNodes[1].Node.HTTPPort = 0, 0
+		}, false},
+		{"disabled HTTP", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPHost = ""
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, false},
+		{"same port on different hosts", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPHost = "127.0.0.2"
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+		}, false},
+		{"HTTP and WS in one process", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.WSHost = c.ShardNodes[0].Node.HTTPHost
+			c.ShardNodes[0].Node.WSPort = c.ShardNodes[0].Node.HTTPPort
+		}, false},
+		{"shared listener uses WS host", func(c *ClusterConfig) {
+			c.ShardNodes[0].Node.HTTPPort = c.ShardNodes[1].Node.HTTPPort
+			c.ShardNodes[0].Node.WSHost = "127.0.0.2"
+			c.ShardNodes[0].Node.WSPort = c.ShardNodes[0].Node.HTTPPort
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := exampleCluster(t)
+			test.change(cfg)
+			err := cfg.Validate(exampleNetwork(t))
+			if test.conflict {
+				if err == nil || !strings.Contains(err.Error(), "RPC endpoints conflict") {
+					t.Fatalf("want RPC endpoint conflict, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

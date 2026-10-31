@@ -117,6 +117,7 @@ func TestQKCEndpointOverrides(t *testing.T) {
 		{[]string{"--http.addr", "127.0.0.2"}, "127.0.0.2", ""},
 		{[]string{"--ws.addr", "127.0.0.2"}, "127.0.0.1", ""},
 		{[]string{"--http=false", "--http.addr", "127.0.0.2"}, "", ""},
+		{[]string{"--http=false", "--http.port", "18546"}, "", ""},
 		{[]string{"--ws"}, "127.0.0.1", "localhost"},
 	} {
 		cfg, err := readQKCFlags(append([]string{"--config", qkcExampleCluster, "--qkc.role", "shard", "--qkc.shard", "0"}, test.args...)...)
@@ -141,6 +142,7 @@ func TestQKCConfigInvalidFlags(t *testing.T) {
 		{[]string{"--ipcdisable", "--ipcpath", "qkc.ipc"}, "mutually exclusive"},
 		{[]string{"--maxpeers", "-1"}, "external P2P must be disabled"},
 		{[]string{"--http.port", "65536"}, "HTTPPort must be between"},
+		{[]string{"--http.port", "18546"}, "RPC endpoints conflict"},
 		{[]string{"--port", "30304"}, "external P2P must be disabled"},
 		{[]string{"--db.engine", "unknown"}, "invalid Node.DBEngine"},
 		{[]string{"--syncmode", "unknown"}, "unknown sync mode"},

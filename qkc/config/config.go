@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -110,7 +111,7 @@ func DefaultNodeConfig(shardID *uint32) NodeConfig {
 	if cfg.Node.DataDir != "" {
 		cfg.Node.DataDir = filepath.Join(cfg.Node.DataDir, "qkc", name)
 	}
-	cfg.Node.IPCPath = "qkc.ipc"
+	cfg.Node.IPCPath = cfg.Node.Name + ".ipc"
 	return cfg
 }
 
@@ -184,7 +185,8 @@ func (c *ClusterConfig) SelectNode(role string, shardID *uint32) (*NodeConfig, e
 }
 
 // Validate checks the complete deployment after overrides. Every network shard
-// has one process, with a distinct internal endpoint and persistent data directory.
+// has one process, with distinct internal endpoints, RPC listeners and configured
+// data directories.
 func (c *ClusterConfig) Validate(network *NetworkConfig) error {
 	if err := network.Validate(); err != nil {
 		return err
@@ -196,6 +198,7 @@ func (c *ClusterConfig) Validate(network *NetworkConfig) error {
 		return fmt.Errorf("Master: %w", err)
 	}
 	ids, addresses, dirs := make(map[uint32]bool), make(map[string]bool), make(map[string]bool)
+	rpcEndpoints := make(map[int][]string)
 	for i, cfg := range append([]NodeConfig{c.Master}, c.ShardNodes...) {
 		if i > 0 {
 			if cfg.ShardID == nil {
@@ -208,11 +211,40 @@ func (c *ClusterConfig) Validate(network *NetworkConfig) error {
 			if err := cfg.Validate(network); err != nil {
 				return fmt.Errorf("ShardNodes[%d]: %w", i-1, err)
 			}
-			address := strings.ToLower(cfg.Address)
+			// NodeConfig.Validate has already checked the address and port.
+			host, port, _ := net.SplitHostPort(cfg.Address)
+			value, _ := strconv.ParseUint(port, 10, 16)
+			address := net.JoinHostPort(canonicalHost(host), strconv.FormatUint(value, 10))
 			if addresses[address] {
 				return fmt.Errorf("duplicate internal address %q", cfg.Address)
 			}
 			addresses[address] = true
+		}
+		endpoints := []struct {
+			host string
+			port int
+		}{
+			{cfg.Node.HTTPHost, cfg.Node.HTTPPort},
+			{cfg.Node.WSHost, cfg.Node.WSPort},
+		}
+		if cfg.Node.WSHost != "" && cfg.Node.HTTPPort == cfg.Node.WSPort {
+			// Geth shares the listener and uses WSHost when HTTP and WS ports match.
+			endpoints = endpoints[1:]
+		}
+		for _, endpoint := range endpoints {
+			if endpoint.host == "" || endpoint.port == 0 {
+				continue // Disabled endpoints and dynamically assigned ports cannot conflict here.
+			}
+			host := canonicalHost(endpoint.host)
+			ip, _ := netip.ParseAddr(host)
+			for _, other := range rpcEndpoints[endpoint.port] {
+				otherIP, _ := netip.ParseAddr(other)
+				if host == other || ip.IsUnspecified() || otherIP.IsUnspecified() {
+					port := strconv.Itoa(endpoint.port)
+					return fmt.Errorf("RPC endpoints conflict between processes: %s and %s", net.JoinHostPort(host, port), net.JoinHostPort(other, port))
+				}
+			}
+			rpcEndpoints[endpoint.port] = append(rpcEndpoints[endpoint.port], host)
 		}
 		if cfg.Node.DataDir != "" {
 			dir, err := filepath.Abs(cfg.Node.DataDir)
@@ -229,6 +261,14 @@ func (c *ClusterConfig) Validate(network *NetworkConfig) error {
 		return errors.New("deployment must contain every network shard")
 	}
 	return nil
+}
+
+// canonicalHost normalizes IP literals and hostname case without resolving DNS.
+func canonicalHost(host string) string {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.Unmap().String()
+	}
+	return strings.ToLower(host)
 }
 
 // LoadNetwork loads and validates a network definition, deriving each shard's

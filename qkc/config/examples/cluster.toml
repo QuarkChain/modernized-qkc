@@ -5,7 +5,7 @@ NetworkFile = "network.toml"
 # Field definitions: node.Config in node/config.go (path relative to repository root).
 [Master.Node]
 DataDir = "./qkc-data/master"
-IPCPath = "qkc.ipc"
+IPCPath = "qkc-master.ipc"
 
 [Master.Node.P2P]
 ListenAddr = ":30303"

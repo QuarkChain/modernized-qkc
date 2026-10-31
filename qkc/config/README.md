@@ -160,7 +160,8 @@ Defaults reuse [node.DefaultConfig](../../node/defaults.go) and, for shards,
 
 - Separate data directories under geth's default data directory: `qkc/master`
   and `qkc/shard-<id>`.
-- IPC filename `qkc.ipc` for each process.
+- IPC filenames `qkc-master.ipc` and `qkc-shard-<id>.ipc`, so processes keep
+  separate endpoints even with empty data directories or Windows named pipes.
 - Shard RPC module lists include `eth`.
 - External P2P disabled for shards. No Ethereum bootstrap nodes or Ethereum
   network preset are injected.
