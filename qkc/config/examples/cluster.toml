@@ -1,0 +1,48 @@
+# Single-machine deployment example; adjust endpoints and paths for your setup.
+# NetworkFile is relative to this file. Other paths follow geth: relative to cwd.
+NetworkFile = "network.toml"
+
+# Field definitions: node.Config in node/config.go (path relative to repository root).
+[Master.Node]
+DataDir = "./qkc-data/master"
+IPCPath = "qkc.ipc"
+
+[Master.Node.P2P]
+ListenAddr = ":30303"
+# Example peer limit; discovery is disabled for this single-cluster setup.
+MaxPeers = 25
+NoDiscovery = true
+
+[[ShardNodes]]
+ShardID = 0
+Address = "127.0.0.1:38000"
+
+# Field definitions: node.Config in node/config.go (path relative to repository root).
+[ShardNodes.Node]
+DataDir = "./qkc-data/shard-0"
+HTTPHost = "127.0.0.1"
+HTTPPort = 18545
+
+# Demonstrates how each shard can override geth runtime settings.
+# This section is optional; omitted settings inherit geth defaults.
+# Field definitions: ethconfig.Config in eth/ethconfig/config.go (repository root).
+[ShardNodes.Eth]
+# Example database-cache budget in MiB, not a QKC default or total memory limit.
+DatabaseCache = 512
+
+[[ShardNodes]]
+ShardID = 1
+Address = "127.0.0.1:38001"
+
+# Field definitions: node.Config in node/config.go (path relative to repository root).
+[ShardNodes.Node]
+DataDir = "./qkc-data/shard-1"
+HTTPHost = "127.0.0.1"
+HTTPPort = 18546
+
+# Demonstrates how each shard can override geth runtime settings.
+# This section is optional; omitted settings inherit geth defaults.
+# Field definitions: ethconfig.Config in eth/ethconfig/config.go (repository root).
+[ShardNodes.Eth]
+# A different example budget (MiB) to demonstrate independent shard overrides.
+DatabaseCache = 256

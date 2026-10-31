@@ -1,0 +1,73 @@
+# Shared network definitions. EVM ChainID values identify individual shards.
+# The shard count comes from the [[Shards]] entries; IDs must cover 0..N-1.
+# This example has two shards, so each internal ShardIDs list is generated as [0, 1].
+NetworkID = 2
+
+[Root.PoSW]
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = true
+WindowSize = 256
+StakePerBlock = "1000000000000000000000000000000"
+DiffDivider = 20
+
+[[Shards]]
+ChainID = "100001"
+HomesteadBlock = "0"
+EIP150Block = "0"
+EIP155Block = "0"
+EIP158Block = "0"
+ByzantiumBlock = "0"
+ConstantinopleBlock = "0"
+PetersburgBlock = "0"
+IstanbulBlock = "0"
+BerlinBlock = "0"
+LondonBlock = "0"
+
+[Shards.QuarkChain]
+ShardID = 0
+
+# This shard uses ordinary PoW without the root chain's staking discount.
+[Shards.QuarkChain.PoSW]
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0.5"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = false
+
+[[Shards]]
+ChainID = "100002"
+HomesteadBlock = "0"
+EIP150Block = "0"
+EIP155Block = "0"
+EIP158Block = "0"
+ByzantiumBlock = "0"
+ConstantinopleBlock = "0"
+PetersburgBlock = "0"
+IstanbulBlock = "0"
+BerlinBlock = "0"
+LondonBlock = "0"
+
+[Shards.QuarkChain]
+ShardID = 1
+
+[Shards.QuarkChain.PoSW]
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0.5"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = true
+WindowSize = 128
+StakePerBlock = "500000000000000000000000000000"
+DiffDivider = 10

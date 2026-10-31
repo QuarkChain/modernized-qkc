@@ -1,0 +1,462 @@
+// Copyright 2026-2027 The quarkchain Authors
+// This file is part of the quarkchain library.
+//
+// The quarkchain library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The quarkchain library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
+
+package config
+
+import (
+	"errors"
+	"math"
+	"math/big"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/node"
+	"github.com/naoina/toml"
+)
+
+func exampleNetwork(t *testing.T) *NetworkConfig {
+	t.Helper()
+	cfg, err := LoadNetwork("examples/network.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func writeConfig(t *testing.T, content []byte) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(file, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestNetworkExample(t *testing.T) {
+	cfg := exampleNetwork(t)
+	if cfg.NetworkID != 2 || len(cfg.Shards) != 2 {
+		t.Fatalf("unexpected network: %+v", cfg)
+	}
+	if !cfg.Root.PoSW.StakingEnabled || cfg.Shards[0].QuarkChain.PoSW.StakingEnabled || !cfg.Shards[1].QuarkChain.PoSW.StakingEnabled {
+		t.Fatal("root and shard PoSW configurations are not independent")
+	}
+	if cfg.Root.PoSW.StakePerBlock.String() != "1000000000000000000000000000000" {
+		t.Fatal("large stake was not preserved")
+	}
+	if cfg.Root.PoSW.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 || cfg.Shards[0].QuarkChain.PoSW.RewardTaxRate.Cmp(big.NewRat(1, 2)) != 0 {
+		t.Fatal("consensus ratios were not parsed exactly")
+	}
+	for _, shard := range cfg.Shards {
+		if !slices.Equal(shard.QuarkChain.ShardIDs, []uint32{0, 1}) {
+			t.Fatalf("unexpected shard topology: %v", shard.QuarkChain.ShardIDs)
+		}
+	}
+	// Equal numeric values do not conflate the network and EVM identifiers.
+	cfg.Shards[0].ChainID.SetUint64(uint64(cfg.NetworkID))
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNetworkValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*NetworkConfig)
+		want   string
+	}{
+		{"zero network", func(c *NetworkConfig) { c.NetworkID = 0 }, "NetworkID must be positive"},
+		{"no shards", func(c *NetworkConfig) { c.Shards = nil }, "at least one shard"},
+		{"no quarkchain", func(c *NetworkConfig) { c.Shards[0].QuarkChain = nil }, "QuarkChain configuration is required"},
+		{"duplicate shard", func(c *NetworkConfig) { c.Shards[1].QuarkChain.ShardID = 0 }, "duplicate shard ID"},
+		{"reserved shard", func(c *NetworkConfig) { c.Shards[1].QuarkChain.ShardID = math.MaxUint32 }, "reserved for the root"},
+		{"missing shard zero", func(c *NetworkConfig) { c.Shards = c.Shards[1:] }, "include shard 0"},
+		{"shard id gap", func(c *NetworkConfig) { c.Shards[1].QuarkChain.ShardID = 2 }, "shard IDs must cover 0..1; missing shard 1"},
+		{"missing chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = nil }, "positive uint256"},
+		{"zero chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = new(big.Int) }, "positive uint256"},
+		{"negative chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = big.NewInt(-1) }, "positive uint256"},
+		{"overflow chain id", func(c *NetworkConfig) { c.Shards[0].ChainID = new(big.Int).Lsh(big.NewInt(1), 256) }, "positive uint256"},
+		{"duplicate chain id", func(c *NetworkConfig) { c.Shards[1].ChainID = c.Shards[0].ChainID }, "duplicate EVM ChainID"},
+		{"missing peer", func(c *NetworkConfig) { c.Shards[0].QuarkChain.ShardIDs = []uint32{0} }, "every network shard"},
+		{"unknown peer", func(c *NetworkConfig) { c.Shards[0].QuarkChain.ShardIDs = []uint32{0, 2} }, "unknown or duplicate"},
+		{"duplicate peer", func(c *NetworkConfig) { c.Shards[0].QuarkChain.ShardIDs = []uint32{0, 0} }, "unknown or duplicate"},
+		{"missing root posw", func(c *NetworkConfig) { c.Root.PoSW = nil }, "Root: posw:"},
+		{"missing shard posw", func(c *NetworkConfig) { c.Shards[0].QuarkChain.PoSW = nil }, "shard 0: posw:"},
+		{"invalid ordinary pow", func(c *NetworkConfig) { c.Shards[0].QuarkChain.PoSW.MinimumDifficulty = nil }, "shard 0: posw:"},
+		{"invalid root posw", func(c *NetworkConfig) { c.Root.PoSW.WindowSize = 0 }, "Root: posw:"},
+		{"invalid shard posw", func(c *NetworkConfig) { c.Shards[1].QuarkChain.PoSW.DiffDivider = 0 }, "shard 1: posw:"},
+		{"negative stake", func(c *NetworkConfig) { c.Root.PoSW.StakePerBlock.SetInt64(-1) }, "Root: posw:"},
+		{"overflow stake", func(c *NetworkConfig) { c.Root.PoSW.StakePerBlock.Lsh(big.NewInt(1), 256) }, "Root: posw:"},
+		{"invalid fork order", func(c *NetworkConfig) { c.Shards[0].HomesteadBlock.SetInt64(1) }, "unsupported fork ordering"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := exampleNetwork(t)
+			test.change(cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("have %v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestNetworkDerivedShardIDs(t *testing.T) {
+	input, err := os.ReadFile("examples/network.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A single shard derives [0] without an explicit count or topology list.
+	single := strings.Join(strings.SplitN(string(input), "\n[[Shards]]", 3)[:2], "\n[[Shards]]")
+	cfg, err := LoadNetwork(writeConfig(t, []byte(single)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shards) != 1 || !slices.Equal(cfg.Shards[0].QuarkChain.ShardIDs, []uint32{0}) {
+		t.Fatal("single-shard topology was not derived from the shard count")
+	}
+	for _, list := range []string{"[]", "[0, 1]"} {
+		t.Run(list, func(t *testing.T) {
+			content := strings.Replace(string(input), "ShardID = 0", "ShardID = 0\nShardIDs = "+list, 1)
+			file := writeConfig(t, []byte(content))
+			if _, err := LoadNetwork(file); err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "ShardIDs is derived") {
+				t.Fatalf("explicit ShardIDs accepted or error lacks context: %v", err)
+			}
+		})
+	}
+	// Contiguity is checked when loading files as well as for in-memory configs.
+	content := strings.Replace(string(input), "ShardID = 1", "ShardID = 2", 1)
+	if _, err := LoadNetwork(writeConfig(t, []byte(content))); err == nil || !strings.Contains(err.Error(), "shard IDs must cover 0..1") {
+		t.Fatalf("noncontiguous shard IDs accepted: %v", err)
+	}
+}
+
+func TestNetworkDefaults(t *testing.T) {
+	const pow = `AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1"
+CoinbaseAmount = "0"
+RewardTaxRate = "0"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+`
+	cfg, err := LoadNetwork(writeConfig(t, []byte(`NetworkID = 9
+[Root.PoSW]
+`+pow+`
+[[Shards]]
+ChainID = "10"
+[Shards.QuarkChain]
+ShardID = 1
+[Shards.QuarkChain.PoSW]
+`+pow+`
+[[Shards]]
+ChainID = "11"
+[Shards.QuarkChain]
+ShardID = 0
+[Shards.QuarkChain.PoSW]
+`+pow)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Root.PoSW.StakingEnabled || cfg.Shards[0].QuarkChain.PoSW.StakingEnabled || cfg.Shards[1].QuarkChain.PoSW.StakingEnabled {
+		t.Fatal("staking should be disabled by omission")
+	}
+	if !slices.Equal(cfg.Shards[0].QuarkChain.ShardIDs, []uint32{0, 1}) {
+		t.Fatal("derived shard IDs must be sorted")
+	}
+	cfg.Shards[0].QuarkChain.ShardIDs[0] = 7
+	if cfg.Shards[1].QuarkChain.ShardIDs[0] != 0 {
+		t.Fatal("derived topology slices alias each other")
+	}
+}
+
+func TestInvalidTOML(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		network bool
+		input   string
+	}{
+		{"wrong case", true, "networkID = 2"},
+		{"network id overflow", true, "NetworkID = 4294967296"},
+		{"negative network id", true, "NetworkID = -1"},
+		{"duplicate key", true, "NetworkID = 2\nNetworkID = 3"},
+		{"local network field", true, "[Node]\nDataDir = \"data\""},
+		{"network local field", false, "[Root]\nPoSW = {}"},
+		{"local typo", false, "[Master.Node]\nHttpPort = 1234"},
+		{"nested typo", false, "[[ShardNodes]]\nShardID = 0\n[ShardNodes.Eth.Miner]\nUnknown = 1"},
+		{"invalid sync mode", false, "[[ShardNodes]]\nShardID = 0\n[ShardNodes.Eth]\nSyncMode = \"invalid\""},
+		{"derived role", false, "[Master]\nRole = \"master\""},
+		{"duplicate endpoint map", false, "[Master.ShardEndpoints]\n0 = \"127.0.0.1:38000\""},
+		{"shard id overflow", false, "[[ShardNodes]]\nShardID = 4294967296"},
+		{"obsolete posw flag", true, "[Root.PoSW]\nEnabled = true"},
+		{"invalid stake", true, "[Root.PoSW]\nStakePerBlock = \"invalid\""},
+		{"invalid ratio", true, "[Root.PoSW]\nDecayFactor = \"invalid\""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := writeConfig(t, []byte(test.input))
+			var err error
+			if test.network {
+				_, err = LoadNetwork(file)
+			} else {
+				_, err = LoadCluster(file)
+			}
+			if err == nil || !strings.Contains(err.Error(), file) {
+				t.Fatalf("want an error identifying the file, got %v", err)
+			}
+			var lineError *toml.LineError
+			if !errors.As(err, &lineError) || lineError.Line < 1 {
+				t.Fatalf("want a TOML error identifying the line, got %v", err)
+			}
+		})
+	}
+	if _, err := LoadNetwork(""); err == nil {
+		t.Fatal("missing network file accepted")
+	}
+	if _, err := LoadCluster(""); err == nil {
+		t.Fatal("missing deployment path accepted")
+	}
+	if _, err := LoadCluster(filepath.Join(t.TempDir(), "missing.toml")); err == nil {
+		t.Fatal("missing local file accepted")
+	}
+}
+
+func exampleCluster(t *testing.T) *ClusterConfig {
+	t.Helper()
+	cfg, err := LoadCluster("examples/cluster.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestClusterExample(t *testing.T) {
+	cfg := exampleCluster(t)
+	if cfg.NetworkFile != filepath.Join("examples", "network.toml") {
+		t.Fatalf("network path resolved incorrectly: %s", cfg.NetworkFile)
+	}
+	network := exampleNetwork(t)
+	if err := cfg.Validate(network); err != nil {
+		t.Fatal(err)
+	}
+	master, err := cfg.SelectNode(RoleMaster, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if master != &cfg.Master || master.Eth != nil || master.Node.P2P.MaxPeers != 25 || len(master.ShardEndpoints) != 2 {
+		t.Fatalf("unexpected master configuration: %+v", master)
+	}
+	for i, entry := range cfg.ShardNodes {
+		selected, err := cfg.SelectNode(RoleShard, entry.ShardID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selected != &cfg.ShardNodes[i] || selected.NetworkFile != cfg.NetworkFile || selected.ShardEndpoints != nil {
+			t.Fatal("process selection did not return the shard's own configuration")
+		}
+		if master.ShardEndpoints[*entry.ShardID] != entry.Address {
+			t.Fatal("master endpoints were not derived from deployment entries")
+		}
+		if entry.Eth.NetworkId != uint64(network.NetworkID) || entry.Node.HTTPPort != 18545+i {
+			t.Fatal("per-shard settings were not preserved")
+		}
+		if entry.Eth.SyncMode != ethconfig.Defaults.SyncMode || entry.Eth.RPCGasCap != ethconfig.Defaults.RPCGasCap {
+			t.Fatal("omitted execution settings did not inherit geth defaults")
+		}
+	}
+	cfg.ShardNodes[0].Eth.DatabaseCache = 0
+	if cfg.ShardNodes[1].Eth.DatabaseCache != 256 {
+		t.Fatal("selected shard settings changed another shard")
+	}
+}
+
+func TestNodeDefaults(t *testing.T) {
+	master := DefaultNodeConfig(nil)
+	id := uint32(0)
+	shard := DefaultNodeConfig(&id)
+	if master.Eth != nil || master.Node.P2P.MaxPeers != node.DefaultConfig.P2P.MaxPeers || shard.Eth.DatabaseCache != ethconfig.Defaults.DatabaseCache {
+		t.Fatal("geth defaults were not preserved")
+	}
+	for _, cfg := range []NodeConfig{master, shard} {
+		if cfg.Node.IPCPath != "qkc.ipc" || cfg.Node.HTTPHost != "" || cfg.Node.WSHost != "" {
+			t.Fatal("unexpected endpoint defaults")
+		}
+		if len(cfg.Node.P2P.BootstrapNodes) != 0 || len(cfg.Node.P2P.BootstrapNodesV5) != 0 {
+			t.Fatal("an implicit network was selected")
+		}
+	}
+	if shard.Eth.NetworkId != 0 || shard.Node.P2P.ListenAddr != "" || shard.Node.P2P.MaxPeers != 0 || !shard.Node.P2P.NoDiscovery || !shard.Node.P2P.NoDial {
+		t.Fatal("shard external P2P was not disabled")
+	}
+	if (master.Node.DataDir != "" && master.Node.DataDir == shard.Node.DataDir) || master.Node.Name == shard.Node.Name {
+		t.Fatal("process defaults share a data directory or instance name")
+	}
+}
+
+func TestClusterDefaultOverrides(t *testing.T) {
+	cfg, err := LoadCluster(writeConfig(t, []byte(`[Master.Node.P2P]
+MaxPeers = 0
+DiscoveryV4 = false
+[[ShardNodes]]
+ShardID = 0
+Address = "127.0.0.1:38000"
+[ShardNodes.Eth]
+DatabaseCache = 0
+[ShardNodes.Eth.Miner]
+GasPrice = "123"
+[ShardNodes.Eth.GPO]
+MaxPrice = "456"
+IgnorePrice = "7"
+[[ShardNodes]]
+ShardID = 1
+Address = "127.0.0.1:38001"
+`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(exampleNetwork(t)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Master.Node.P2P.MaxPeers != 0 || cfg.Master.Node.P2P.DiscoveryV4 || cfg.ShardNodes[0].Eth.DatabaseCache != 0 {
+		t.Fatal("explicit zero or false was replaced by defaults")
+	}
+	first, second := cfg.ShardNodes[0].Eth, cfg.ShardNodes[1].Eth
+	if first.Miner.GasPrice.Int64() != 123 || first.GPO.MaxPrice.Int64() != 456 || first.GPO.IgnorePrice.Int64() != 7 {
+		t.Fatal("explicit big integer overrides were not applied")
+	}
+	if second.DatabaseCache != ethconfig.Defaults.DatabaseCache || second.Miner.GasPrice.Cmp(ethconfig.Defaults.Miner.GasPrice) != 0 || second.GPO.MaxPrice.Cmp(ethconfig.Defaults.GPO.MaxPrice) != 0 || second.GPO.IgnorePrice.Cmp(ethconfig.Defaults.GPO.IgnorePrice) != 0 {
+		t.Fatal("shard overrides affected another shard or its defaults")
+	}
+	second.Miner.GasPrice.SetInt64(999)
+	second.GPO.MaxPrice.SetInt64(999)
+	second.GPO.IgnorePrice.SetInt64(999)
+	if ethconfig.Defaults.Miner.GasPrice.Int64() == 999 || ethconfig.Defaults.GPO.MaxPrice.Int64() == 999 || ethconfig.Defaults.GPO.IgnorePrice.Int64() == 999 {
+		t.Fatal("mutable geth defaults are shared with a shard")
+	}
+	// Omitting the entire Master table still supplies its defaults.
+	cfg, err = LoadCluster(writeConfig(t, []byte("[[ShardNodes]]\nShardID = 0\nAddress = \"localhost:38000\"\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Master.Role != RoleMaster || cfg.Master.Node.P2P.MaxPeers != node.DefaultConfig.P2P.MaxPeers {
+		t.Fatal("omitted master lost its defaults")
+	}
+}
+
+func TestProcessSelection(t *testing.T) {
+	zero, unknown, chainID := uint32(0), uint32(7), uint32(100001)
+	for _, test := range []struct {
+		role string
+		id   *uint32
+		want string
+	}{
+		{"", nil, "set --qkc.role"},
+		{"slave", nil, "set --qkc.role"},
+		{RoleMaster, &zero, "master cannot select"},
+		{RoleShard, nil, "requires a shard ID"},
+		{RoleShard, &unknown, "not in the deployment"},
+		{RoleShard, &chainID, "not in the deployment"},
+	} {
+		if _, err := exampleCluster(t).SelectNode(test.role, test.id); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("have %v, want error containing %q", err, test.want)
+		}
+	}
+}
+
+func TestClusterValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*ClusterConfig)
+		want   string
+	}{
+		{"missing shard", func(c *ClusterConfig) { c.ShardNodes = c.ShardNodes[:1] }, "every network shard"},
+		{"missing id", func(c *ClusterConfig) { c.ShardNodes[0].ShardID = nil }, "ShardID is required"},
+		{"duplicate shard", func(c *ClusterConfig) { *c.ShardNodes[1].ShardID = 0 }, "duplicate deployed shard"},
+		{"unknown shard", func(c *ClusterConfig) { *c.ShardNodes[1].ShardID = 100002 }, "not in the network"},
+		{"duplicate address", func(c *ClusterConfig) { c.ShardNodes[1].Address = c.ShardNodes[0].Address }, "duplicate internal address"},
+		{"shared datadir", func(c *ClusterConfig) { c.ShardNodes[1].Node.DataDir = c.Master.Node.DataDir }, "data directory is shared"},
+		{"master shard id", func(c *ClusterConfig) { c.Master.ShardID = new(uint32) }, "Master must not specify ShardID"},
+		{"master execution", func(c *ClusterConfig) { c.Master.Eth = &ethconfig.Config{} }, "master cannot configure Eth"},
+		{"master address", func(c *ClusterConfig) { c.Master.Address = "localhost:38002" }, "master cannot configure Eth"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := exampleCluster(t)
+			test.change(cfg)
+			if err := cfg.Validate(exampleNetwork(t)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("have %v, want error containing %q", err, test.want)
+			}
+		})
+	}
+	cfg := exampleCluster(t)
+	cfg.Master.Node.DataDir, cfg.ShardNodes[0].Node.DataDir, cfg.ShardNodes[1].Node.DataDir = "", "", ""
+	if err := cfg.Validate(exampleNetwork(t)); err != nil {
+		t.Fatalf("ephemeral data directories should be supported: %v", err)
+	}
+}
+
+func TestNodeValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		master bool
+		change func(*NodeConfig)
+		want   string
+	}{
+		{"network mismatch", false, func(c *NodeConfig) { c.Eth.NetworkId = 100001 }, "conflicts with NetworkID"},
+		{"local genesis", false, func(c *NodeConfig) { c.Eth.Genesis = &core.Genesis{} }, "Eth.Genesis"},
+		{"local fork", false, func(c *NodeConfig) { c.Eth.OverrideOsaka = new(uint64) }, "local fork overrides"},
+		{"database engine", true, func(c *NodeConfig) { c.Node.DBEngine = "unknown" }, "Node.DBEngine"},
+		{"state scheme", false, func(c *NodeConfig) { c.Eth.StateScheme = "unknown" }, "Eth.StateScheme"},
+		{"negative peers", true, func(c *NodeConfig) { c.Node.P2P.MaxPeers = -1 }, "MaxPeers"},
+		{"negative cache", false, func(c *NodeConfig) { c.Eth.DatabaseCache = -1 }, "DatabaseCache"},
+		{"http port", false, func(c *NodeConfig) { c.Node.HTTPPort = 65536 }, "HTTPPort"},
+		{"ws port", false, func(c *NodeConfig) { c.Node.WSPort = -1 }, "WSPort"},
+		{"auth port", true, func(c *NodeConfig) { c.Node.AuthPort = -1 }, "AuthPort"},
+		{"listen address", true, func(c *NodeConfig) { c.Node.P2P.ListenAddr = "invalid" }, "ListenAddr"},
+		{"listen port", true, func(c *NodeConfig) { c.Node.P2P.ListenAddr = ":65536" }, "invalid port"},
+		{"shard external peers", false, func(c *NodeConfig) { c.Node.P2P.MaxPeers = 1 }, "external P2P must be disabled"},
+		{"shard external listen", false, func(c *NodeConfig) { c.Node.P2P.ListenAddr = ":30304" }, "external P2P must be disabled"},
+		{"shard external discovery", false, func(c *NodeConfig) { c.Node.P2P.NoDiscovery = false }, "external P2P must be disabled"},
+		{"missing address", false, func(c *NodeConfig) { c.Address = "" }, "invalid internal Address"},
+		{"wildcard host", false, func(c *NodeConfig) { c.Address = "0.0.0.0:38000" }, "concrete host"},
+		{"wildcard ipv6", false, func(c *NodeConfig) { c.Address = "[0:0:0:0:0:0:0:0]:38000" }, "concrete host"},
+		{"missing host", false, func(c *NodeConfig) { c.Address = ":38000" }, "concrete host"},
+		{"zero internal port", false, func(c *NodeConfig) { c.Address = "localhost:0" }, "concrete host"},
+		{"overflow internal port", false, func(c *NodeConfig) { c.Address = "localhost:65536" }, "concrete host"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cluster := exampleCluster(t)
+			cfg := &cluster.ShardNodes[0]
+			if test.master {
+				cfg = &cluster.Master
+			}
+			test.change(cfg)
+			if err := cfg.Validate(exampleNetwork(t)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("have %v, want error containing %q", err, test.want)
+			}
+		})
+	}
+	cfg := DefaultNodeConfig(nil)
+	cfg.Node.HTTPPort, cfg.Node.WSPort, cfg.Node.AuthPort = 0, 0, 0
+	if err := cfg.Validate(exampleNetwork(t)); err != nil {
+		t.Fatalf("port zero must be valid: %v", err)
+	}
+	cluster := exampleCluster(t)
+	cluster.ShardNodes[0].Address = "[::1]:38000"
+	if err := cluster.Validate(exampleNetwork(t)); err != nil {
+		t.Fatalf("IPv6 internal endpoints must be valid: %v", err)
+	}
+}

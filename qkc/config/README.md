@@ -1,0 +1,215 @@
+# QKC configuration
+
+A QKC deployment uses two TOML files:
+
+| File | What it configures | Example |
+| --- | --- | --- |
+| `network.toml` | Shared network rules: network ID, shards, EVM chain IDs, forks, and consensus parameters. | [network.toml](examples/network.toml) |
+| `cluster.toml` | Process settings: one Master and one process per shard, with their addresses, data directories, and RPC settings. | [cluster.toml](examples/cluster.toml) |
+
+`cluster.toml` points to the shared network file through `NetworkFile`. Each
+process selects its own entry from the deployment. CLI flags can override that
+process's settings; network rules remain in the shared file.
+
+## Validate the example deployment
+
+The example defines one Master and two shards. From the repository root, check
+the configuration for each process:
+
+```sh
+# Master
+go run ./cmd/qkc checkconfig \
+  --config qkc/config/examples/cluster.toml --qkc.role master
+
+# Shard 0
+go run ./cmd/qkc checkconfig \
+  --config qkc/config/examples/cluster.toml --qkc.role shard --qkc.shard 0
+
+# Shard 1, with its configured HTTP endpoint disabled
+go run ./cmd/qkc checkconfig \
+  --config qkc/config/examples/cluster.toml --qkc.role shard --qkc.shard 1 --http=false
+```
+
+Each command applies overrides to the selected process, then validates the
+**entire deployment**. It does not create data directories, initialize databases,
+or start services. Genesis generation and node startup are outside the scope of
+`checkconfig`.
+
+To build the standalone CLI, run `make qkc`. You can then replace
+`go run ./cmd/qkc` with `build/bin/qkc` in these example commands. Run
+`go run ./cmd/qkc checkconfig --help` for the supported flags.
+
+## Configure network rules in `network.toml`
+
+The network file defines the root chain's consensus settings and each shard's
+EVM chain ID, forks, and consensus settings. All processes share these rules.
+
+### Network ID, shard ID, and EVM chain ID
+
+These IDs serve different purposes:
+
+| Field | Purpose | Requirement |
+| --- | --- | --- |
+| `NetworkID` | Identifies the P2P network. | Positive `uint32`. |
+| `Shards.QuarkChain.ShardID` | Routes traffic to a shard within the network. | IDs must cover `0..N-1` exactly once, where `N` is the number of `[[Shards]]` entries. `4294967295` is reserved for root-chain traffic. |
+| `Shards.ChainID` | Protects EVM transactions against replay across chains. | Positive `uint256`, unique among the network's shards. |
+
+A network ID may have the same numeric value as an EVM chain ID. Shard 0 is
+required for root rewards and staking.
+
+The shard count is derived from the `[[Shards]]` entries. Their order in the file
+does not matter, but routing IDs must cover `0..N-1` without gaps or duplicates.
+The loader generates each shard's internal `ShardIDs` list as `[0, ..., N-1]`,
+including itself. For the two-shard example, both lists are `[0, 1]`.
+Do not set `ShardIDs` in the TOML file; explicit lists are rejected.
+
+### PoSW and staking
+
+Configure `Root.PoSW` and every `Shards.QuarkChain.PoSW` independently. Shards do
+not inherit the root chain's consensus settings. PoSW controls mining difficulty,
+block subsidies, and the optional staking discount. Each section requires:
+
+| Field | Meaning and unit | Valid values |
+| --- | --- | --- |
+| `AdjustmentCutoff` | Time scale, in seconds, for the PoW difficulty adjustment. | Greater than zero. |
+| `AdjustmentFactor` | Divides the parent difficulty to determine the size of one adjustment step. | Greater than zero. |
+| `MinimumDifficulty` | Minimum PoW difficulty before staking discounts. | Greater than zero. |
+| `CoinbaseAmount` | Initial block subsidy, before decay and reward tax. | Zero or greater; zero disables the subsidy. |
+| `RewardTaxRate` | Fraction of the decayed subsidy shared with root; use `"0"` for the root chain. | From `0` to `1`, inclusive. |
+| `EpochInterval` | Number of blocks in one reward and staking decay period (epoch). | Greater than zero. |
+| `DecayFactor` | Fraction retained each epoch; `"0.88"` retains 88%. | From `0` to `1`, inclusive. |
+
+Amounts (`CoinbaseAmount` and `StakePerBlock`) use the smallest native currency
+unit. The example uses zero block subsidies. Both ratios use quoted decimal
+strings whose reduced denominator must not exceed 100; for example, `"0.88"`
+is the fraction `22/25`.
+
+`StakingEnabled` defaults to `false`, which selects ordinary PoW without a
+staking discount. The parameters above are still required. To enable the
+discount, set `StakingEnabled = true` and supply positive values for:
+
+| Field | Meaning and unit |
+| --- | --- |
+| `WindowSize` | Number of blocks in the staking window, including the candidate block. |
+| `StakePerBlock` | Initial stake required for one block of staking quota, before decay. |
+| `DiffDivider` | Divides the PoW difficulty when a block qualifies for the staking discount. |
+
+For chain migrations, `OriginalBlockNumber` carries over the old chain's height
+when calculating reward and staking epochs, even though new block numbers start
+at zero. Set `PoSWStakingDecayEnabled = true` to apply the same `EpochInterval`
+and `DecayFactor` to `StakePerBlock`; otherwise the stake requirement stays fixed.
+These settings do not deploy the staking contract. See
+[PoSWConfig](../../params/posw.go) for the full field definitions.
+
+## Configure processes in `cluster.toml`
+
+The deployment must contain each network shard exactly once. Master and shards
+have different responsibilities:
+
+- **Master** connects to the external P2P network. Configure its process settings
+  under `[Master.Node]` and external devp2p under `[Master.Node.P2P]`.
+- **Each shard** has a `[[ShardNodes]]` entry. Set `ShardID` to its routing ID and
+  `Address` to its internal TCP endpoint. Put process settings under
+  `[ShardNodes.Node]` and execution settings under `[ShardNodes.Eth]`.
+
+For field definitions, see [node.Config](../../node/config.go) for the `Node`
+sections and [ethconfig.Config](../../eth/ethconfig/config.go) for shard `Eth`
+sections.
+
+The example's `DatabaseCache` values illustrate independent per-shard overrides,
+in MiB. Omitted execution settings inherit geth defaults.
+
+### Select a process
+
+Use `--qkc.role master` to select Master. Use
+`--qkc.role shard --qkc.shard <id>` to select a shard. The shard selector is
+required even for shard 0, and it uses the **routing ID**, not the EVM chain ID.
+For example, the sample's shard 0 has EVM chain ID `100001`, but you select it
+with `--qkc.shard 0`.
+
+### Addresses, storage, and RPC
+
+Each shard's `Address` is used both to listen for internal connections and by
+other processes to reach it. Use a distinct `host:port` endpoint, such as
+`127.0.0.1:38000`, with a concrete host and a port from 1 to 65535.
+
+Give each process its own data directory; configured directories must be distinct.
+HTTP, WebSocket, and IPC settings are also independent for each process.
+
+### Relative paths
+
+- `NetworkFile = "network.toml"` resolves relative to `cluster.toml`.
+- `--qkc.network <file>` replaces `NetworkFile`; a relative override resolves from
+  the command's working directory.
+- Other paths retain geth's path handling. In particular, a relative `DataDir`
+  resolves from the working directory. On Unix, a bare IPC filename such as
+  `qkc.ipc` resolves within the process's `DataDir`.
+
+## Override process settings
+
+For process settings, the priority is (highest first):
+
+1. Explicit CLI flags.
+2. Values in `cluster.toml` for the selected Master or Shard process.
+3. Defaults for the selected role.
+
+### Defaults
+
+Defaults reuse [node.DefaultConfig](../../node/defaults.go) and, for shards,
+[ethconfig.Defaults](../../eth/ethconfig/config.go), with these QKC settings:
+
+- Separate data directories under geth's default data directory: `qkc/master`
+  and `qkc/shard-<id>`.
+- IPC filename `qkc.ipc` for each process.
+- Shard RPC module lists include `eth`.
+- External P2P disabled for shards. No Ethereum bootstrap nodes or Ethereum
+  network preset are injected.
+
+HTTP and WebSocket inherit geth's disabled defaults. The example explicitly
+enables HTTP for both shards; configure each process's RPC endpoints as needed.
+
+### Supported overrides and limits
+
+`checkconfig --help` lists the supported flags for storage, sync mode, P2P,
+HTTP/WS/IPC, and RPC limits. Ethereum network presets and unsupported geth flags
+are rejected. Master also rejects shard execution flags, such as `--syncmode`.
+
+For HTTP and WebSocket, use `--http` or `--ws` to enable an endpoint and
+`--http=false` or `--ws=false` to disable one. An address flag such as
+`--http.addr` only changes an already enabled endpoint; by itself it does not
+enable a disabled endpoint.
+
+Network rules cannot be overridden per process:
+
+- A shard's effective `Eth.NetworkId` comes from the shared `NetworkID`.
+  A nonzero `Eth.NetworkId` in the deployment, or an explicit `--networkid`, must
+  match it. `--networkid=0` is rejected.
+- Local `Eth.Genesis` and fork overrides are rejected. Define forks in the
+  shared network file.
+
+## Use the Go package
+
+To load the same configuration from Go, follow this sequence:
+
+1. Call `LoadCluster` with the deployment file.
+2. Optionally replace `ClusterConfig.NetworkFile`.
+3. Call `SelectNode` with the role and, for a shard, its routing ID.
+4. Apply explicit process overrides to the returned `NodeConfig`.
+5. Call `LoadNetwork` with the selected network file.
+6. Call `ClusterConfig.Validate` to validate the entire deployment.
+
+`SelectNode` returns the chosen entry within the deployment, so edits to it are
+included in validation. Validation also binds each shard's `Eth.NetworkId` to
+the shared network ID.
+
+## TOML format
+
+Both files follow geth's conventions:
+
+- Field names are case-sensitive Go field names. Unknown fields and duplicate
+  keys are errors.
+- EVM chain IDs and fork block numbers use quoted big-integer values, such as
+  `ChainID = "100001"` and `LondonBlock = "0"`.
+- `MinimumDifficulty`, `CoinbaseAmount`, and `StakePerBlock` use quoted decimal
+  or hex integer strings and must fit `uint256`.
+- Ratios use quoted decimal strings, such as `RewardTaxRate = "0.5"`.
