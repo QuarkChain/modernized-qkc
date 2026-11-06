@@ -53,7 +53,7 @@ var qkcConfigFlags = []cli.Flag{
 
 var checkQKCConfigCommand = &cli.Command{
 	Name:   "checkconfig",
-	Usage:  "Validate QKC deployment settings without reading genesis files or starting services",
+	Usage:  "Select and validate a QKC process configuration without starting services",
 	Flags:  qkcConfigFlags,
 	Action: checkQKCConfig,
 }
@@ -174,6 +174,9 @@ func checkQKCConfig(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := cluster.LoadGenesis(); err != nil {
+		return err
+	}
 	if err := cluster.Validate(); err != nil {
 		return err
 	}
@@ -181,6 +184,6 @@ func checkQKCConfig(ctx *cli.Context) error {
 	if cfg.ChainID != nil {
 		identity = fmt.Sprintf("%s, chain ID %v", cfg.Role, cfg.ChainID)
 	}
-	_, err = fmt.Fprintf(ctx.App.Writer, "QuarkChain deployment configuration is valid (%s, network ID %d)\n", identity, cluster.NetworkID)
+	_, err = fmt.Fprintf(ctx.App.Writer, "QuarkChain configuration is valid (%s, network ID %d)\n", identity, cluster.NetworkID)
 	return err
 }

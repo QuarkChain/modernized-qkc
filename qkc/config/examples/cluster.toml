@@ -1,9 +1,10 @@
 # Single-machine deployment example; adjust endpoints and paths for your setup.
-# Runtime paths follow geth: relative to the working directory.
+# GenesisFile paths are relative to this file. Other paths follow geth: relative to cwd.
 NetworkID = 2
 
 # Example reward recipient; replace it with your own mining address.
 [Master]
+GenesisFile = "genesis/root.json"
 CoinbaseAddress = "0x1111111111111111111111111111111111111111"
 
 # Field definitions: node.Config in node/config.go (path relative to repository root).
@@ -19,6 +20,7 @@ NoDiscovery = true
 
 [[Slaves]]
 ChainID = "100001"
+GenesisFile = "genesis/shard-100001.json"
 # Internal QKC TCP endpoint for Master and other shards.
 PrivateHost = "127.0.0.1"
 PrivatePort = 38000
@@ -40,6 +42,7 @@ DatabaseCache = 512
 
 [[Slaves]]
 ChainID = "100002"
+GenesisFile = "genesis/shard-100002.json"
 # Internal QKC TCP endpoint for Master and other shards.
 PrivateHost = "127.0.0.1"
 PrivatePort = 38001
