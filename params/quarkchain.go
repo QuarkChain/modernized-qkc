@@ -73,8 +73,8 @@ type QuarkChainConfig struct {
 	PoSW          *PoSWConfig   `json:"posw"` // Required consensus configuration for this shard.
 	// MaxBlocksPerRootBlock caps the number of blocks of this shard a root
 	// block can confirm, as max_blocks_per_shard_in_one_root_block in
-	// pyquarkchain. Zero means no cap.
-	MaxBlocksPerRootBlock uint64 `json:"maxBlocksPerRootBlock,omitempty"`
+	// pyquarkchain. Required and must be greater than zero.
+	MaxBlocksPerRootBlock uint64 `json:"maxBlocksPerRootBlock"`
 }
 
 // Equal compares all shard configuration fields by value. Two nil configs are equal.
@@ -139,6 +139,9 @@ func (c *ChainConfig) CheckQuarkChain() error {
 		if err := q.ConsensusType.Check(); err != nil {
 			return err
 		}
+	}
+	if q.MaxBlocksPerRootBlock == 0 {
+		return fmt.Errorf("maxBlocksPerRootBlock must be greater than zero")
 	}
 	return q.PoSW.Check()
 }
