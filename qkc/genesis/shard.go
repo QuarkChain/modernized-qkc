@@ -66,8 +66,10 @@ func prepareShard(g *core.Genesis) error {
 	if g.Nonce != 0 || g.Difficulty == nil || g.Difficulty.Sign() != 0 {
 		return errors.New("QKC genesis difficulty and nonce must be zero; PoW difficulty is encoded in mixHash")
 	}
-	if g.GasLimit < params.MinGasLimit || g.GasLimit > params.MaxGasLimit {
-		return fmt.Errorf("gasLimit must be between %d and %d", params.MinGasLimit, params.MaxGasLimit)
+	// QKC fixes the gas limit at genesis, so every block must fit a deposit.
+	minGasLimit := max(params.MinGasLimit, params.XShardSendGas*params.XShardGasLimitDivisor)
+	if g.GasLimit < minGasLimit || g.GasLimit > params.MaxGasLimit {
+		return fmt.Errorf("gasLimit must be between %d and %d", minGasLimit, params.MaxGasLimit)
 	}
 	if g.BaseFee != nil && (!cfg.IsLondon(common.Big0) || g.BaseFee.Sign() < 0 || g.BaseFee.BitLen() > 256) {
 		return errors.New("baseFeePerGas requires London and a nonnegative uint256 value")

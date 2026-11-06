@@ -76,6 +76,42 @@ func TestShardGenesisInvalid(t *testing.T) {
 	}
 }
 
+func TestShardGenesisGasLimit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		gasLimit uint64
+		wantErr  bool
+	}{
+		{"below deposit budget", 17999, true},
+		{"exact deposit budget", 18000, false},
+		{"odd gas limit", 18001, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := exampleInputs(t)
+			g := readShard(t, c.Slaves[0].GenesisFile)
+			g.GasLimit, g.ExtraData = test.gasLimit, nil
+			writeJSON(t, c.Slaves[0].GenesisFile, g)
+			bundle, err := Load(c)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "gasLimit must be between") {
+					t.Fatalf("have %v, want invalid gasLimit", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			extra, err := bundle.Shards[0].Block.Header().QKCExtra()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bundle.Shards[0].Block.GasLimit() != test.gasLimit || extra.XShardGasLimit != params.XShardSendGas {
+				t.Fatalf("unexpected genesis gas limits: block %d, cross-shard %d", bundle.Shards[0].Block.GasLimit(), extra.XShardGasLimit)
+			}
+		})
+	}
+}
+
 func TestShardGenesisExtra(t *testing.T) {
 	for _, test := range []struct {
 		name   string
