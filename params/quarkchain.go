@@ -114,6 +114,9 @@ func (c *ChainConfig) CheckQuarkChain() error {
 	if c.QuarkChain == nil {
 		return nil
 	}
+	if c.DepositContractAddress != (common.Address{}) {
+		return fmt.Errorf("QuarkChain DepositContractAddress must be zero")
+	}
 	validID := func(id *big.Int) bool { return id != nil && id.Sign() > 0 && id.BitLen() <= 256 }
 	if !validID(c.ChainID) {
 		return fmt.Errorf("invalid QuarkChain chain ID: %v", c.ChainID)

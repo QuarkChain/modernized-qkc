@@ -225,6 +225,17 @@ func TestQuarkChainMaxBlocksPerRootBlock(t *testing.T) {
 	}
 }
 
+func TestQuarkChainDepositContractAddress(t *testing.T) {
+	config := NewTestQuarkChainConfig(10001, 10001, 10002)
+	require.NoError(t, config.CheckConfigForkOrder())
+
+	config.DepositContractAddress[19] = 1
+	require.ErrorContains(t, config.CheckConfigForkOrder(), "DepositContractAddress must be zero")
+
+	config.QuarkChain = nil
+	require.NoError(t, config.CheckConfigForkOrder())
+}
+
 func TestConfigRules(t *testing.T) {
 	c := &ChainConfig{
 		LondonBlock:  new(big.Int),

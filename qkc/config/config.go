@@ -290,46 +290,23 @@ func (c *NodeConfig) PrivateEndpoint() string {
 }
 
 // Validate checks the complete deployment after genesis loading and overrides.
-// It does not load files. Every network shard has one process, with distinct TCP
-// listeners, IPC endpoints and configured data directories.
+// It does not load files. Genesis rules and process settings are checked separately.
 func (c *ClusterConfig) Validate() error {
 	if c.NetworkID == 0 {
 		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
 	}
-	if c.Master.Role != RoleMaster || c.Master.ChainID != nil {
-		return errors.New("Master must not specify ChainID")
+	if err := c.ValidateGenesis(); err != nil {
+		return err
 	}
-	if err := c.Master.Validate(c.NetworkID); err != nil {
+	if err := c.Master.validateRuntime(c.NetworkID); err != nil {
 		return fmt.Errorf("Master: %w", err)
 	}
-	if len(c.Slaves) == 0 {
-		return errors.New("deployment must define at least one shard")
-	}
-	var first *params.ChainConfig
-	ids, dirs, ipcEndpoints := make(map[string]bool), make(map[string]bool), make(map[string]bool)
+	dirs, ipcEndpoints := make(map[string]bool), make(map[string]bool)
 	tcpEndpoints := make(map[uint64][]*net.TCPAddr)
 	for i, cfg := range append([]NodeConfig{c.Master}, c.Slaves...) {
 		if i > 0 {
-			if cfg.ChainID == nil {
-				return fmt.Errorf("Slaves[%d]: ChainID is required", i-1)
-			}
-			if ids[cfg.ChainID.String()] {
-				return fmt.Errorf("duplicate deployed chain ID %v", cfg.ChainID)
-			}
-			ids[cfg.ChainID.String()] = true
-			if err := cfg.Validate(c.NetworkID); err != nil {
+			if err := cfg.validateRuntime(c.NetworkID); err != nil {
 				return fmt.Errorf("Slaves[%d]: %w", i-1, err)
-			}
-			chain := cfg.Eth.Genesis.Config
-			if first == nil {
-				first = chain
-			} else {
-				if !slices.EqualFunc(first.QuarkChain.ChainIDs, chain.QuarkChain.ChainIDs, func(a, b *big.Int) bool { return a.Cmp(b) == 0 }) {
-					return fmt.Errorf("chain %v: genesis chain IDs must match in order across shards", chain.ChainID)
-				}
-				if err := checkSharedForks(first, chain); err != nil {
-					return err
-				}
 			}
 		}
 		endpoints := []string{cfg.PrivateEndpoint(), cfg.Node.P2P.ListenAddr, cfg.Node.WSEndpoint()}
@@ -341,7 +318,7 @@ func (c *ClusterConfig) Validate() error {
 			if address == "" {
 				continue // Disabled listener.
 			}
-			// NodeConfig.Validate has already checked the address and port.
+			// Runtime validation has already checked the address and port.
 			host, port, _ := net.SplitHostPort(address)
 			value, _ := strconv.ParseUint(port, 10, 16)
 			if value == 0 {
@@ -383,6 +360,50 @@ func (c *ClusterConfig) Validate() error {
 				return fmt.Errorf("process IPC endpoint is shared: %s", endpoint)
 			}
 			ipcEndpoints[path] = true
+		}
+	}
+	return nil
+}
+
+// ValidateGenesis checks loaded genesis configurations and network membership.
+// It does not load files, modify configurations, or inspect process settings.
+func (c *ClusterConfig) ValidateGenesis() error {
+	if c.Master.Role != RoleMaster || c.Master.ChainID != nil {
+		return errors.New("Master must not specify ChainID")
+	}
+	if err := c.Master.ValidateGenesis(); err != nil {
+		return fmt.Errorf("Master: %w", err)
+	}
+	if len(c.Slaves) == 0 {
+		return errors.New("deployment must define at least one shard")
+	}
+	var first *params.ChainConfig
+	ids := make(map[string]bool, len(c.Slaves))
+	for i, cfg := range c.Slaves {
+		if cfg.Role != RoleSlave {
+			return fmt.Errorf("Slaves[%d]: invalid process role %q", i, cfg.Role)
+		}
+		if cfg.ChainID == nil {
+			return fmt.Errorf("Slaves[%d]: ChainID is required", i)
+		}
+		id := cfg.ChainID.String()
+		if ids[id] {
+			return fmt.Errorf("duplicate deployed chain ID %v", cfg.ChainID)
+		}
+		if err := cfg.ValidateGenesis(); err != nil {
+			return fmt.Errorf("Slaves[%d]: %w", i, err)
+		}
+		ids[id] = true
+		chain := cfg.Eth.Genesis.Config
+		if first == nil {
+			first = chain
+		} else {
+			if !slices.EqualFunc(first.QuarkChain.ChainIDs, chain.QuarkChain.ChainIDs, func(a, b *big.Int) bool { return a.Cmp(b) == 0 }) {
+				return fmt.Errorf("chain %v: genesis chain IDs must match in order across shards", chain.ChainID)
+			}
+			if err := checkSharedForks(first, chain); err != nil {
+				return err
+			}
 		}
 	}
 	if len(ids) != len(first.QuarkChain.ChainIDs) {
@@ -444,17 +465,23 @@ func load(file string, cfg interface{}) error {
 	return nil
 }
 
-// Validate checks a process and its genesis configuration. Only shard execution
+// Validate checks loaded genesis rules and process settings. Only shard execution
 // settings bind Eth.NetworkId to the deployment's NetworkID.
 func (c *NodeConfig) Validate(networkID uint64) error {
 	if networkID == 0 {
 		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
 	}
+	if err := c.ValidateGenesis(); err != nil {
+		return err
+	}
+	return c.validateRuntime(networkID)
+}
+
+// ValidateGenesis checks this process's loaded chain identity and consensus rules.
+// It does not load files, modify configurations, or inspect runtime settings.
+func (c *NodeConfig) ValidateGenesis() error {
 	switch c.Role {
 	case RoleMaster:
-		if c.Eth != nil || c.ChainID != nil || c.PrivateHost != "" || c.PrivatePort != 0 {
-			return errors.New("master cannot configure Eth, ChainID, PrivateHost or PrivatePort")
-		}
 		if c.Root == nil {
 			return errors.New("root Genesis config is required; set GenesisFile")
 		}
@@ -491,6 +518,28 @@ func (c *NodeConfig) Validate(networkID uint64) error {
 			return err
 		}
 		if err := chain.CheckConfigForkOrder(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("invalid process role %q", c.Role)
+	}
+	return nil
+}
+
+func (c *NodeConfig) validateRuntime(networkID uint64) error {
+	if networkID == 0 {
+		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
+	}
+	switch c.Role {
+	case RoleMaster:
+		if c.Eth != nil || c.ChainID != nil || c.PrivateHost != "" || c.PrivatePort != 0 {
+			return errors.New("master cannot configure Eth, ChainID, PrivateHost or PrivatePort")
+		}
+	case RoleSlave:
+		if c.ChainID == nil || c.Eth == nil {
+			return errors.New("slave requires ChainID and execution settings")
+		}
+		if err := checkShardChainID(c.ChainID); err != nil {
 			return err
 		}
 		ip, err := netip.ParseAddr(c.PrivateHost)

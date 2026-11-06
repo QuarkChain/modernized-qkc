@@ -134,6 +134,7 @@ func TestGenesisValidation(t *testing.T) {
 		{"missing genesis", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis = nil }, "Genesis config"},
 		{"missing chain config", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config = nil }, "config"},
 		{"missing quarkchain", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain = nil }, "QuarkChain"},
+		{"beacon deposit contract", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.DepositContractAddress[19] = 1 }, "DepositContractAddress must be zero"},
 		{"missing shard consensus", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.ConsensusType = "" }, "invalid ConsensusType"},
 		{"invalid shard consensus", func(c *ClusterConfig) { c.Slaves[1].Eth.Genesis.Config.QuarkChain.ConsensusType = "ethash" }, "invalid ConsensusType"},
 		{"unsupported shard consensus", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.ConsensusType = "POW_DOUBLESHA256" }, "invalid ConsensusType"},
@@ -151,6 +152,44 @@ func TestGenesisValidation(t *testing.T) {
 				t.Fatalf("have %v, want error containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestGenesisValidationIgnoresRuntimeSettings(t *testing.T) {
+	cfg := exampleCluster(t)
+	cfg.NetworkID = 0
+	cfg.Master.Node.HTTPPort = -1
+	for _, slave := range cfg.Slaves {
+		slave.Eth.NetworkId = 99
+	}
+	cfg.Slaves[0].PrivateHost = ""
+	cfg.Slaves[0].PrivatePort = 0
+	cfg.Slaves[1].Node.DataDir = cfg.Slaves[0].Node.DataDir
+	before, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateGenesis(); err != nil {
+		t.Fatalf("genesis validation depended on runtime settings: %v", err)
+	}
+	for _, node := range append([]NodeConfig{cfg.Master}, cfg.Slaves...) {
+		if err := node.ValidateGenesis(); err != nil {
+			t.Fatalf("local genesis validation depended on runtime settings: %v", err)
+		}
+	}
+	after, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("genesis validation modified the caller's configuration")
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("full validation accepted invalid deployment settings")
+	}
+	cfg.Slaves[1].Eth.Genesis.Config.QuarkChain.ChainIDs = []*big.Int{big.NewInt(100002), big.NewInt(100001)}
+	if err := cfg.ValidateGenesis(); err == nil || !strings.Contains(err.Error(), "match in order") {
+		t.Fatalf("genesis-only validation missed inconsistent membership: %v", err)
 	}
 }
 
