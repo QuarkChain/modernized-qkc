@@ -17,12 +17,12 @@
         100002
       ],
       "consensusType": "POW_ETHASH",
+      "rewardTaxRate": 0.5,
       "posw": {
         "adjustmentCutoff": 7,
         "adjustmentFactor": 512,
         "minimumDifficulty": 1,
         "coinbaseAmount": 0,
-        "rewardTaxRate": 0.5,
         "epochInterval": 3153600,
         "decayFactor": 0.88,
         "stakingEnabled": false

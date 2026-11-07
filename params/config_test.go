@@ -17,6 +17,7 @@
 package params
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"reflect"
@@ -132,6 +133,8 @@ func TestQuarkChainConfigEqual(t *testing.T) {
 		{"chainIds", func(c *QuarkChainConfig) { c.ChainIDs[1] = big.NewInt(10003) }, false},
 		{"posw", func(c *QuarkChainConfig) { c.PoSW.CoinbaseAmount.SetInt64(100) }, false},
 		{"missing posw", func(c *QuarkChainConfig) { c.PoSW = nil }, false},
+		{"rewardTaxRate", func(c *QuarkChainConfig) { c.RewardTaxRate.SetFrac64(1, 4) }, false},
+		{"missing rewardTaxRate", func(c *QuarkChainConfig) { c.RewardTaxRate = nil }, false},
 		{"maxBlocksPerRootBlock", func(c *QuarkChainConfig) { c.MaxBlocksPerRootBlock = 12 }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -145,6 +148,46 @@ func TestQuarkChainConfigEqual(t *testing.T) {
 	var missing *QuarkChainConfig
 	if !missing.Equal(nil) || missing.Equal(&QuarkChainConfig{}) || (&QuarkChainConfig{}).Equal(missing) {
 		t.Fatal("Equal did not distinguish nil and non-nil configurations")
+	}
+	// Values, rather than pointer identity or rational representation, determine equality.
+	stored, next := validQuarkChainConfig(), validQuarkChainConfig()
+	stored.RewardTaxRate = new(big.Rat)
+	next.RewardTaxRate, _ = new(big.Rat).SetString("0.00")
+	if !stored.Equal(next) {
+		t.Fatal("equal consensus values compared unequal")
+	}
+}
+
+// TestQuarkChainConfigTaxValidation checks the tax at initialization alongside
+// PoSW parameters; missing and endpoint rates must be rejected before root
+// reward reconstruction can divide by zero.
+func TestQuarkChainConfigTaxValidation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		tax  *big.Rat
+	}{
+		{"missing", nil},
+		{"negative", big.NewRat(-1, 2)},
+		{"zero", new(big.Rat)},
+		{"one", big.NewRat(1, 1)},
+		{"above one", big.NewRat(3, 2)},
+		{"denominator", big.NewRat(1, 1000)},
+		{"repeating decimal", big.NewRat(1, 3)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := NewTestQuarkChainConfig(10001)
+			config.QuarkChain.RewardTaxRate = test.tax
+			if config.CheckConfigForkOrder() == nil {
+				t.Fatal("invalid tax accepted during initialization")
+			}
+		})
+	}
+	for _, tax := range []*big.Rat{big.NewRat(1, 100), big.NewRat(1, 8), big.NewRat(1, 2), big.NewRat(99, 100)} {
+		config := NewTestQuarkChainConfig(10001)
+		config.QuarkChain.RewardTaxRate = tax
+		if err := config.CheckConfigForkOrder(); err != nil {
+			t.Fatalf("valid tax %s rejected: %v", tax, err)
+		}
 	}
 }
 
@@ -163,12 +206,47 @@ func TestQuarkChainConsensusType(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			config := NewTestQuarkChainConfig(10001)
 			config.QuarkChain.ConsensusType = test.value
+			if err := config.QuarkChain.Check(); (err != nil) != test.wantErr {
+				t.Fatalf("QuarkChain.Check() error = %v, want error = %v", err, test.wantErr)
+			}
 			err := config.CheckConfigForkOrder()
 			if (err != nil) != test.wantErr {
 				t.Fatalf("CheckConfigForkOrder() error = %v, want error = %v", err, test.wantErr)
 			}
 		})
 	}
+}
+
+func TestQuarkChainConfigJSON(t *testing.T) {
+	for _, input := range []string{`0.125`, `"0.125"`, `1.25e-1`} {
+		t.Run(input, func(t *testing.T) {
+			config := validQuarkChainConfig()
+			require.NoError(t, json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), config))
+			require.Equal(t, 0, config.RewardTaxRate.Cmp(big.NewRat(1, 8)))
+			encoded, err := json.Marshal(config)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), `"rewardTaxRate":0.125`)
+			var decoded QuarkChainConfig
+			require.NoError(t, json.Unmarshal(encoded, &decoded))
+			require.True(t, config.Equal(&decoded), "JSON round trip changed consensus configuration")
+		})
+	}
+	for _, input := range []string{`{}`, `{"rewardTaxRate":null}`} {
+		config := validQuarkChainConfig()
+		require.NoError(t, json.Unmarshal([]byte(input), config))
+		require.Equal(t, 0, config.RewardTaxRate.Cmp(big.NewRat(1, 2)))
+		var empty QuarkChainConfig
+		require.NoError(t, json.Unmarshal([]byte(input), &empty))
+		require.Nil(t, empty.RewardTaxRate)
+	}
+	for _, input := range []string{`"1/2"`, `"invalid"`, `true`} {
+		var config QuarkChainConfig
+		require.Error(t, json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), &config))
+	}
+	config := validQuarkChainConfig()
+	config.RewardTaxRate = big.NewRat(1, 3)
+	_, err := json.Marshal(config)
+	require.ErrorContains(t, err, "finite decimal")
 }
 
 func TestQuarkChainIDs(t *testing.T) {

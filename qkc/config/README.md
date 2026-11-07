@@ -94,13 +94,15 @@ Both require difficulty and subsidy rules even when staking is disabled:
 | `adjustmentFactor` | Divides parent difficulty to determine one adjustment step. | Greater than zero. |
 | `minimumDifficulty` | Minimum PoW difficulty before staking discounts. | Positive `uint256`. |
 | `coinbaseAmount` | Initial block subsidy before decay and reward tax. | `uint256`; zero disables the subsidy. |
-| `rewardTaxRate` | Fraction of decayed subsidy shared with root. | Zero for root; from zero to one for shards. |
 | `epochInterval` | Blocks per reward and staking decay epoch. | Greater than zero. |
 | `decayFactor` | Fraction retained per epoch; `0.88` retains 88%. | From zero to one. |
 
 Amounts use the smallest native currency unit. The example has zero subsidies.
-Both ratios must have a finite decimal representation and a reduced denominator
-no greater than 100.
+For shards, `config.quarkchain.rewardTaxRate` sets the fraction of the decayed
+subsidy and each transaction fee shared with root. It must be greater than zero
+and less than one. Root has no reward tax. Both `rewardTaxRate` and `decayFactor`
+must have a finite decimal representation and a reduced denominator no greater
+than 100.
 
 `stakingEnabled` defaults to `false`. To enable the discount, provide positive
 `windowSize`, `stakePerBlock`, and `diffDivider`. `windowSize` includes the candidate
