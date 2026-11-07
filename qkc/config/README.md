@@ -113,11 +113,14 @@ For migrations, `originalBlockNumber` carries the old chain height into epoch
 calculations. Enable `poswStakingDecayEnabled` to apply the same epoch and decay
 factor to `stakePerBlock`. See [PoSWConfig](../../params/posw.go) for all fields.
 
-QKC Genesis allocations must include the canonical shard staking contract on
-every shard and the root staking contract on the first `chainIds` shard. This
-applies even when the local staking discount is disabled. The example allocations
-contain the runtime code pinned in `params.PoSWStakingRuntimeCode`; the loader does
-not insert it. The examples also contain the QKC header extra data and encode
+Native QKC Genesis allocations must include the canonical shard staking contract
+on every shard and the root staking contract on the first `chainIds` shard, even
+when the local staking discount is disabled. The example allocations contain the
+runtime code pinned in `params.PoSWStakingRuntimeCode`. The configuration loader
+preserves allocations as supplied. The [Genesis constructor](../genesis) can add
+required system-contract code before constructing blocks; it preserves supplied
+balances, nonces and storage, and rejects conflicting code. The examples also
+contain the QKC header extra data and encode
 PoW difficulty in `mixHash`, with native `difficulty` and `nonce` set to zero.
 
 ## Configure processes in `cluster.toml`
@@ -210,6 +213,12 @@ against a stored chain configuration. Node startup remains a separate operation.
 For read-only consensus checks without process settings, use
 `NodeConfig.ValidateGenesis()` or `ClusterConfig.ValidateGenesis()` on loaded
 configurations. These do not inspect network IDs, endpoints or data directories.
+
+To construct blocks in memory, call `genesis.Load(cluster)` from
+[qkc/genesis](../genesis). It reads the referenced files, validates their rules,
+and returns root and shard Genesis blocks in the shared `chainIds` order, along
+with their full consensus configurations. It leaves the caller's settings and
+input files unchanged. Persistent database initialization remains a separate step.
 
 ## File formats
 
