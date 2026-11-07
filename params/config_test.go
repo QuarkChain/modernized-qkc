@@ -17,6 +17,7 @@
 package params
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"reflect"
@@ -127,6 +128,7 @@ func TestQuarkChainConfigEqual(t *testing.T) {
 		want   bool
 	}{
 		{"unchanged", func(c *QuarkChainConfig) {}, true},
+		{"consensusType", func(c *QuarkChainConfig) { c.ConsensusType = ConsensusSimulate }, false},
 		{"chainIds order", func(c *QuarkChainConfig) { c.ChainIDs[0], c.ChainIDs[1] = c.ChainIDs[1], c.ChainIDs[0] }, false},
 		{"chainIds", func(c *QuarkChainConfig) { c.ChainIDs[1] = big.NewInt(10003) }, false},
 		{"posw", func(c *QuarkChainConfig) { c.PoSW.CoinbaseAmount.SetInt64(100) }, false},
@@ -189,6 +191,64 @@ func TestQuarkChainConfigTaxValidation(t *testing.T) {
 	}
 }
 
+func TestQuarkChainConsensusType(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   ConsensusType
+		wantErr bool
+	}{
+		{"legacy empty", "", false},
+		{"ethash", ConsensusEthash, false},
+		{"simulate", ConsensusSimulate, false},
+		{"none", "NONE", true},
+		{"unknown", "unknown", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := NewTestQuarkChainConfig(10001)
+			config.QuarkChain.ConsensusType = test.value
+			if err := config.QuarkChain.Check(); (err != nil) != test.wantErr {
+				t.Fatalf("QuarkChain.Check() error = %v, want error = %v", err, test.wantErr)
+			}
+			err := config.CheckConfigForkOrder()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("CheckConfigForkOrder() error = %v, want error = %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestQuarkChainConfigJSON(t *testing.T) {
+	for _, input := range []string{`0.125`, `"0.125"`, `1.25e-1`} {
+		t.Run(input, func(t *testing.T) {
+			config := validQuarkChainConfig()
+			require.NoError(t, json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), config))
+			require.Equal(t, 0, config.RewardTaxRate.Cmp(big.NewRat(1, 8)))
+			encoded, err := json.Marshal(config)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), `"rewardTaxRate":0.125`)
+			var decoded QuarkChainConfig
+			require.NoError(t, json.Unmarshal(encoded, &decoded))
+			require.True(t, config.Equal(&decoded), "JSON round trip changed consensus configuration")
+		})
+	}
+	for _, input := range []string{`{}`, `{"rewardTaxRate":null}`} {
+		config := validQuarkChainConfig()
+		require.NoError(t, json.Unmarshal([]byte(input), config))
+		require.Equal(t, 0, config.RewardTaxRate.Cmp(big.NewRat(1, 2)))
+		var empty QuarkChainConfig
+		require.NoError(t, json.Unmarshal([]byte(input), &empty))
+		require.Nil(t, empty.RewardTaxRate)
+	}
+	for _, input := range []string{`"1/2"`, `"invalid"`, `true`} {
+		var config QuarkChainConfig
+		require.Error(t, json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), &config))
+	}
+	config := validQuarkChainConfig()
+	config.RewardTaxRate = big.NewRat(1, 3)
+	_, err := json.Marshal(config)
+	require.ErrorContains(t, err, "finite decimal")
+}
+
 func TestQuarkChainIDs(t *testing.T) {
 	large := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(10001))
 	config := NewTestQuarkChainConfig(10001, 10001, 10002)
@@ -241,6 +301,17 @@ func TestQuarkChainMaxBlocksPerRootBlock(t *testing.T) {
 			t.Fatalf("maxBlocksPerRootBlock %d: %v", limit, err)
 		}
 	}
+}
+
+func TestQuarkChainDepositContractAddress(t *testing.T) {
+	config := NewTestQuarkChainConfig(10001, 10001, 10002)
+	require.NoError(t, config.CheckConfigForkOrder())
+
+	config.DepositContractAddress[19] = 1
+	require.ErrorContains(t, config.CheckConfigForkOrder(), "DepositContractAddress must be zero")
+
+	config.QuarkChain = nil
+	require.NoError(t, config.CheckConfigForkOrder())
 }
 
 func TestConfigRules(t *testing.T) {

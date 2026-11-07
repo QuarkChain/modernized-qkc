@@ -1,0 +1,23 @@
+{
+  "config": {
+    "consensusType": "POW_ETHASH",
+    "posw": {
+      "adjustmentCutoff": 7,
+      "adjustmentFactor": 512,
+      "minimumDifficulty": 1,
+      "coinbaseAmount": 0,
+      "epochInterval": 3153600,
+      "decayFactor": 0.88,
+      "stakingEnabled": true,
+      "windowSize": 256,
+      "stakePerBlock": 1000000000000000000000000000000,
+      "diffDivider": 20
+    }
+  },
+  "timestamp": "0x0",
+  "difficulty": "0x1",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "extraData": "0x",
+  "nonce": "0x0",
+  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+}

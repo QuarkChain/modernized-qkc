@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -36,15 +37,20 @@ const qkcExampleCluster = "../../qkc/config/examples/cluster.toml"
 
 func copyQKCExample(t *testing.T) string {
 	t.Helper()
-	content, err := os.ReadFile(qkcExampleCluster)
-	if err != nil {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "genesis"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(t.TempDir(), "cluster.toml")
-	if err := os.WriteFile(file, content, 0600); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"cluster.toml", "genesis/root.json", "genesis/shard-100001.json", "genesis/shard-100002.json"} {
+		content, err := os.ReadFile(filepath.Join(filepath.Dir(qkcExampleCluster), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return file
+	return filepath.Join(dir, "cluster.toml")
 }
 
 func readQKCFlags(args ...string) (*qkcconfig.NodeConfig, error) {
@@ -57,6 +63,9 @@ func readQKCFlags(args ...string) (*qkcconfig.NodeConfig, error) {
 			var cluster *qkcconfig.ClusterConfig
 			cfg, cluster, err = loadQKCConfig(ctx)
 			if err != nil {
+				return err
+			}
+			if err := cluster.LoadGenesis(); err != nil {
 				return err
 			}
 			return cluster.Validate()
@@ -83,8 +92,11 @@ func TestQKCConfigPrecedence(t *testing.T) {
 	if cfg.Eth.TrieCleanCache != ethconfig.Defaults.TrieCleanCache || cfg.Eth.SyncMode != ethconfig.Defaults.SyncMode || cfg.Eth.RPCGasCap != ethconfig.Defaults.RPCGasCap || cfg.Eth.NetworkId != 2 {
 		t.Fatal("defaults or network ID resolved incorrectly")
 	}
-	if cfg.Eth.Genesis != nil {
-		t.Fatal("deployment configuration loaded a genesis")
+	if want := filepath.Join(filepath.Dir(qkcExampleCluster), "genesis/shard-100001.json"); cfg.GenesisFile != want {
+		t.Fatalf("genesis file = %s, want %s", cfg.GenesisFile, want)
+	}
+	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config.ChainID.Cmp(cfg.ChainID) != 0 {
+		t.Fatal("selected shard genesis was not loaded")
 	}
 
 	cfg, err = readQKCFlags("--config", qkcExampleCluster, "--qkc.role", "slave", "--qkc.chain", "100001",
@@ -118,6 +130,31 @@ func TestQKCConfigPrecedence(t *testing.T) {
 func TestQKCLargeChainIDSelection(t *testing.T) {
 	const chainID = "18446744073709551617" // Greater than uint64.
 	clusterFile := copyQKCExample(t)
+	cluster, err := qkcconfig.LoadCluster(clusterFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.LoadGenesis(); err != nil {
+		t.Fatal(err)
+	}
+	for _, slave := range cluster.Slaves {
+		config := slave.Eth.Genesis.Config
+		if config.ChainID.Cmp(big.NewInt(100001)) == 0 {
+			config.ChainID.SetString(chainID, 10)
+		}
+		for _, id := range config.QuarkChain.ChainIDs {
+			if id.Cmp(big.NewInt(100001)) == 0 {
+				id.SetString(chainID, 10)
+			}
+		}
+		content, err := json.Marshal(slave.Eth.Genesis)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(slave.GenesisFile, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	content, err := os.ReadFile(clusterFile)
 	if err != nil {
 		t.Fatal(err)
@@ -192,40 +229,50 @@ func TestQKCUint64NetworkID(t *testing.T) {
 	}
 }
 
-func TestCheckQKCConfigDoesNotReadGenesis(t *testing.T) {
+func TestQKCSelectedGenesisIgnoresBrokenPeer(t *testing.T) {
 	savedDataDirFlag := *utils.DataDirFlag
 	t.Cleanup(func() { *utils.DataDirFlag = savedDataDirFlag })
-	file := copyQKCExample(t)
-	content, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content = bytes.Replace(content, []byte("[Master]"), []byte("[Master]\nGenesisFile = \"missing-root.json\""), 1)
-	content = bytes.ReplaceAll(content, []byte("[[Slaves]]"), []byte("[[Slaves]]\nGenesisFile = \"missing-shard.json\""))
-	if err := os.WriteFile(file, content, 0600); err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
-		args    []string
-		genesis string
+		name      string
+		breakFile func(string) error
 	}{
-		{[]string{"--qkc.role", "master"}, "missing-root.json"},
-		{[]string{"--qkc.role", "slave", "--qkc.chain", "100001"}, "missing-shard.json"},
+		{"missing", os.Remove},
+		{"corrupt", func(file string) error { return os.WriteFile(file, []byte("{"), 0600) }},
 	} {
-		args := append([]string{"--config", file}, test.args...)
-		cfg, err := readQKCFlags(args...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := filepath.Join(filepath.Dir(file), test.genesis); cfg.GenesisFile != want {
-			t.Fatalf("genesis path = %s, want %s", cfg.GenesisFile, want)
-		}
-		app := newApp()
-		var out bytes.Buffer
-		app.Writer = &out
-		if err := app.Run(append([]string{"qkc", "checkconfig"}, args...)); err != nil {
-			t.Fatalf("deployment check read a missing genesis: %v", err)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			file := copyQKCExample(t)
+			if err := test.breakFile(filepath.Join(filepath.Dir(file), "genesis/shard-100002.json")); err != nil {
+				t.Fatal(err)
+			}
+			var cfg *qkcconfig.NodeConfig
+			var cluster *qkcconfig.ClusterConfig
+			app := &cli.App{
+				Flags: checkQKCConfigCommand.Flags,
+				Action: func(ctx *cli.Context) (err error) {
+					cfg, cluster, err = loadQKCConfig(ctx)
+					return err
+				},
+			}
+			args := []string{"--config", file, "--qkc.role", "slave", "--qkc.chain", "100001"}
+			if err := app.Run(append([]string{"qkc"}, args...)); err != nil {
+				t.Fatalf("selecting a process read a peer's genesis: %v", err)
+			}
+			if cfg.Eth.Genesis != nil || cluster.Slaves[1].Eth.Genesis != nil {
+				t.Fatal("loading process settings also loaded genesis")
+			}
+			if err := cfg.LoadGenesis(); err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(cluster.NetworkID); err != nil {
+				t.Fatalf("selected process depends on a peer's genesis: %v", err)
+			}
+			check := newApp()
+			var out bytes.Buffer
+			check.Writer = &out
+			if err := check.Run(append([]string{"qkc", "checkconfig"}, args...)); err == nil || !strings.Contains(err.Error(), "shard-100002.json") {
+				t.Fatalf("checkconfig did not reject the broken peer genesis: %v", err)
+			}
+		})
 	}
 }
 
@@ -349,7 +396,7 @@ func TestCheckQKCConfig(t *testing.T) {
 		if _, err := os.Stat(datadir); !os.IsNotExist(err) {
 			t.Fatalf("configuration check created the data directory: %v", err)
 		}
-		if want := "QuarkChain deployment configuration is valid (" + test.want + ", network ID 2)\n"; out.String() != want {
+		if want := "QuarkChain configuration is valid (" + test.want + ", network ID 2)\n"; out.String() != want {
 			t.Fatalf("unexpected validation output: %s", &out)
 		}
 	}

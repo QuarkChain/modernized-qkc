@@ -44,19 +44,37 @@ const (
 	XShardGasLimitDivisor uint64 = 2
 )
 
+// ConsensusType identifies the PoW algorithm selected for a QKC root or shard chain.
+type ConsensusType string
+
+const (
+	ConsensusEthash   ConsensusType = "POW_ETHASH"
+	ConsensusSimulate ConsensusType = "POW_SIMULATE"
+)
+
+// Check rejects unknown algorithms and NONE, since every configured chain is active.
+func (c ConsensusType) Check() error {
+	switch c {
+	case ConsensusEthash, ConsensusSimulate:
+		return nil
+	default:
+		return fmt.Errorf("invalid ConsensusType %q: want POW_ETHASH, POW_SIMULATE", c)
+	}
+}
+
 // QuarkChainConfig is the configuration of a QuarkChain shard chain. Its
 // presence in the chain config enables the QuarkChain specific features.
 type QuarkChainConfig struct {
 	// ChainIDs lists the EVM chain IDs of all shards, this one included.
 	// The first chain receives root rewards and hosts the root staking contract.
+	// Every shard genesis carries the same ordered list, independently of deployment order.
 	ChainIDs []*big.Int `json:"chainIds"`
 
-	PoSW *PoSWConfig `json:"posw"` // Required consensus configuration for this shard.
+	ConsensusType ConsensusType `json:"consensusType,omitempty"`
+	PoSW          *PoSWConfig   `json:"posw"` // Required consensus configuration for this shard.
 	// RewardTaxRate is the fraction of the decayed subsidy and each miner fee
 	// shared with root. Check requires a finite decimal in (0, 1) with a reduced
 	// denominator no greater than 100. AfterTax returns the retained share.
-	// TODO: Defer decimal JSON support to the upcoming config work; the config file
-	// format and how QuarkChainConfig is constructed are not yet decided.
 	RewardTaxRate *big.Rat `json:"rewardTaxRate"`
 	// MaxBlocksPerRootBlock caps the number of blocks of this shard a root
 	// block can confirm, as max_blocks_per_shard_in_one_root_block in
@@ -70,6 +88,7 @@ func (c *QuarkChainConfig) Equal(other *QuarkChainConfig) bool {
 		return c == other
 	}
 	return slices.EqualFunc(c.ChainIDs, other.ChainIDs, configBlockEqual) &&
+		c.ConsensusType == other.ConsensusType &&
 		c.PoSW.Equal(other.PoSW) &&
 		configRatEqual(c.RewardTaxRate, other.RewardTaxRate) &&
 		c.MaxBlocksPerRootBlock == other.MaxBlocksPerRootBlock
@@ -93,6 +112,11 @@ func (c *QuarkChainConfig) Check() error {
 			return fmt.Errorf("duplicate chain ID: %v", id)
 		}
 		seen[id.String()] = true
+	}
+	if c.ConsensusType != "" {
+		if err := c.ConsensusType.Check(); err != nil {
+			return err
+		}
 	}
 	// Python's root reward reconstruction divides by the tax rate and the retained share.
 	if c.RewardTaxRate == nil || c.RewardTaxRate.Sign() <= 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) >= 0 {
@@ -146,6 +170,9 @@ func (c *ChainConfig) IsRootCoinbaseChain() bool {
 func (c *ChainConfig) CheckQuarkChain() error {
 	if c.QuarkChain == nil {
 		return nil
+	}
+	if c.DepositContractAddress != (common.Address{}) {
+		return fmt.Errorf("QuarkChain DepositContractAddress must be zero")
 	}
 	if c.ChainID == nil || c.ChainID.Sign() <= 0 || c.ChainID.BitLen() > 256 {
 		return fmt.Errorf("invalid QuarkChain chain ID: %v", c.ChainID)

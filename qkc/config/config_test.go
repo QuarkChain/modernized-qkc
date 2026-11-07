@@ -18,6 +18,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -30,8 +31,10 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/naoina/toml"
 )
 
@@ -50,60 +53,407 @@ func exampleCluster(t *testing.T) *ClusterConfig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := cfg.LoadGenesis(); err != nil {
+		t.Fatal(err)
+	}
 	return cfg
 }
 
 func copyExampleCluster(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile("examples/cluster.toml")
-	if err != nil {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "genesis"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	return writeConfig(t, data)
-}
-
-func TestClusterGenesisPaths(t *testing.T) {
-	file := copyExampleCluster(t)
-	absolute := filepath.Join(t.TempDir(), "invalid-genesis.json")
-	if err := os.WriteFile(absolute, []byte("{"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := strings.Replace(string(data), "[Master]", "[Master]\nGenesisFile = \"genesis/missing-root.json\"", 1)
-	content = strings.Replace(content, "[[Slaves]]", fmt.Sprintf("[[Slaves]]\nGenesisFile = %q", absolute), 1)
-	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := LoadCluster(file)
-	if err != nil {
-		t.Fatalf("deployment loading read a genesis file: %v", err)
-	}
-	relative := filepath.Join(filepath.Dir(file), "genesis", "missing-root.json")
-	if cfg.Master.GenesisFile != relative || cfg.Slaves[0].GenesisFile != absolute || cfg.Slaves[1].GenesisFile != "" {
-		t.Fatalf("unexpected genesis paths: %q, %q, %q", cfg.Master.GenesisFile, cfg.Slaves[0].GenesisFile, cfg.Slaves[1].GenesisFile)
-	}
-	for range 2 {
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("deployment validation depended on genesis contents: %v", err)
-		}
-		selected, err := cfg.SelectNode(RoleSlave, big.NewInt(100001))
+	for _, file := range []string{"cluster.toml", "genesis/root.json", "genesis/shard-100001.json", "genesis/shard-100002.json"} {
+		data, err := os.ReadFile(filepath.Join("examples", file))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := selected.Validate(cfg.NetworkID); err != nil {
-			t.Fatalf("node validation depended on genesis contents: %v", err)
+		if err := os.WriteFile(filepath.Join(dir, file), data, 0600); err != nil {
+			t.Fatal(err)
 		}
-		if cfg.Master.GenesisFile != relative || cfg.Slaves[0].GenesisFile != absolute {
-			t.Fatal("validation resolved a genesis path again")
+	}
+	return filepath.Join(dir, "cluster.toml")
+}
+
+func TestGenesisConfiguration(t *testing.T) {
+	cfg := exampleCluster(t)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NetworkID != 2 || len(cfg.Slaves) != 2 {
+		t.Fatalf("unexpected deployment: %+v", cfg)
+	}
+	root := cfg.Master.Root
+	first, second := cfg.Slaves[0].Eth.Genesis.Config, cfg.Slaves[1].Eth.Genesis.Config
+	if root.ConsensusType != params.ConsensusEthash || first.QuarkChain.ConsensusType != params.ConsensusEthash || second.QuarkChain.ConsensusType != params.ConsensusSimulate {
+		t.Fatal("root and shard consensus algorithms were not preserved")
+	}
+	if !root.PoSW.StakingEnabled || first.QuarkChain.PoSW.StakingEnabled || !second.QuarkChain.PoSW.StakingEnabled {
+		t.Fatal("root and shard PoSW configurations are not independent")
+	}
+	if root.PoSW.StakePerBlock.String() != "1000000000000000000000000000000" {
+		t.Fatal("large stake was not preserved")
+	}
+	if root.PoSW.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 || first.QuarkChain.RewardTaxRate.Cmp(big.NewRat(1, 2)) != 0 {
+		t.Fatal("consensus ratios were not parsed exactly")
+	}
+	for _, slave := range cfg.Slaves {
+		chain := slave.Eth.Genesis.Config
+		if !reflect.DeepEqual(chain.QuarkChain.ChainIDs, []*big.Int{big.NewInt(100001), big.NewInt(100002)}) {
+			t.Fatalf("unexpected genesis topology: %v", chain.QuarkChain.ChainIDs)
 		}
-		for _, slave := range cfg.Slaves {
-			if slave.Eth.Genesis != nil {
-				t.Fatal("deployment processing loaded genesis")
+		if chain.QuarkChain.MaxBlocksPerRootBlock != 18 {
+			t.Fatal("configured shard confirmation limit was not preserved")
+		}
+	}
+	first.QuarkChain.ChainIDs[1].SetInt64(7)
+	if second.ChainID.Int64() != 100002 || second.QuarkChain.ChainIDs[1].Int64() != 100002 {
+		t.Fatal("genesis values alias another shard or its identity")
+	}
+}
+
+func TestGenesisValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*ClusterConfig)
+		want   string
+	}{
+		{"zero network", func(c *ClusterConfig) { c.NetworkID = 0 }, "NetworkID must be positive"},
+		{"missing root source", func(c *ClusterConfig) { c.Master.GenesisFile, c.Master.Root = "", nil }, "GenesisFile"},
+		{"missing shard source", func(c *ClusterConfig) { c.Slaves[0].GenesisFile, c.Slaves[0].Eth.Genesis = "", nil }, "GenesisFile"},
+		{"missing root config", func(c *ClusterConfig) { c.Master.Root = nil }, "config"},
+		{"missing root consensus", func(c *ClusterConfig) { c.Master.Root.ConsensusType = "" }, "invalid ConsensusType"},
+		{"invalid root consensus", func(c *ClusterConfig) { c.Master.Root.ConsensusType = "NONE" }, "invalid ConsensusType"},
+		{"unsupported root consensus", func(c *ClusterConfig) { c.Master.Root.ConsensusType = "POW_QKCHASH" }, "invalid ConsensusType"},
+		{"missing root posw", func(c *ClusterConfig) { c.Master.Root.PoSW = nil }, "posw:"},
+		{"invalid root staking", func(c *ClusterConfig) { c.Master.Root.PoSW.WindowSize = 0 }, "posw:"},
+		{"negative root stake", func(c *ClusterConfig) { c.Master.Root.PoSW.StakePerBlock.SetInt64(-1) }, "posw:"},
+		{"overflow root stake", func(c *ClusterConfig) { c.Master.Root.PoSW.StakePerBlock.Lsh(big.NewInt(1), 256) }, "posw:"},
+		{"missing genesis", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis = nil }, "Genesis config"},
+		{"missing chain config", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config = nil }, "config"},
+		{"missing quarkchain", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain = nil }, "QuarkChain"},
+		{"beacon deposit contract", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.DepositContractAddress[19] = 1 }, "DepositContractAddress must be zero"},
+		{"missing shard consensus", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.ConsensusType = "" }, "invalid ConsensusType"},
+		{"invalid shard consensus", func(c *ClusterConfig) { c.Slaves[1].Eth.Genesis.Config.QuarkChain.ConsensusType = "ethash" }, "invalid ConsensusType"},
+		{"unsupported shard consensus", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.ConsensusType = "POW_DOUBLESHA256" }, "invalid ConsensusType"},
+		{"missing shard posw", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.PoSW = nil }, "posw:"},
+		{"invalid ordinary pow", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.PoSW.MinimumDifficulty = nil }, "posw:"},
+		{"invalid shard staking", func(c *ClusterConfig) { c.Slaves[1].Eth.Genesis.Config.QuarkChain.PoSW.DiffDivider = 0 }, "posw:"},
+		{"invalid fork order", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.HomesteadBlock.SetInt64(1) }, "unsupported fork ordering"},
+		{"missing membership", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.ChainIDs = nil }, "chain IDs must not be empty"},
+		{"duplicate member", func(c *ClusterConfig) { c.Slaves[0].Eth.Genesis.Config.QuarkChain.ChainIDs[1] = big.NewInt(100001) }, "duplicate chain ID"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := exampleCluster(t)
+			test.change(cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("have %v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestGenesisValidationIgnoresRuntimeSettings(t *testing.T) {
+	cfg := exampleCluster(t)
+	cfg.NetworkID = 0
+	cfg.Master.Node.HTTPPort = -1
+	for _, slave := range cfg.Slaves {
+		slave.Eth.NetworkId = 99
+	}
+	cfg.Slaves[0].PrivateHost = ""
+	cfg.Slaves[0].PrivatePort = 0
+	cfg.Slaves[1].Node.DataDir = cfg.Slaves[0].Node.DataDir
+	before, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateGenesis(); err != nil {
+		t.Fatalf("genesis validation depended on runtime settings: %v", err)
+	}
+	for _, node := range append([]NodeConfig{cfg.Master}, cfg.Slaves...) {
+		if err := node.ValidateGenesis(); err != nil {
+			t.Fatalf("local genesis validation depended on runtime settings: %v", err)
+		}
+	}
+	after, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("genesis validation modified the caller's configuration")
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("full validation accepted invalid deployment settings")
+	}
+	cfg.Slaves[1].Eth.Genesis.Config.QuarkChain.ChainIDs = []*big.Int{big.NewInt(100002), big.NewInt(100001)}
+	if err := cfg.ValidateGenesis(); err == nil || !strings.Contains(err.Error(), "match in order") {
+		t.Fatalf("genesis-only validation missed inconsistent membership: %v", err)
+	}
+}
+
+func TestLoadClusterLeavesGenesisUnloaded(t *testing.T) {
+	cfg, err := LoadCluster("examples/cluster.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Master.Root != nil {
+		t.Fatal("deployment loading read root genesis")
+	}
+	for _, slave := range cfg.Slaves {
+		if slave.Eth.Genesis != nil {
+			t.Fatal("deployment loading read shard genesis")
+		}
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "Genesis config") {
+		t.Fatalf("validation should require explicitly loaded genesis: %v", err)
+	}
+	if cfg.Master.Root != nil || cfg.Slaves[0].Eth.Genesis != nil || cfg.Slaves[1].Eth.Genesis != nil {
+		t.Fatal("validation loaded genesis files")
+	}
+	for _, entry := range []*NodeConfig{&cfg.Master, &cfg.Slaves[0], &cfg.Slaves[1]} {
+		path := entry.GenesisFile
+		if filepath.Dir(path) != filepath.Join("examples", "genesis") {
+			t.Fatalf("genesis path not resolved relative to deployment: %s", path)
+		}
+		for range 2 {
+			if err := entry.LoadGenesis(); err != nil {
+				t.Fatal(err)
+			}
+			if entry.GenesisFile != path {
+				t.Fatalf("loading genesis resolved its path again: have %s, want %s", entry.GenesisFile, path)
 			}
 		}
+	}
+}
+
+func TestSelectedGenesisLoading(t *testing.T) {
+	for _, test := range []struct {
+		name, file, label string
+		missing           bool
+	}{
+		{"missing root", "root.json", "Master", true},
+		{"malformed root", "root.json", "Master", false},
+		{"missing peer", "shard-100002.json", "Slaves[1]", true},
+		{"malformed peer", "shard-100002.json", "Slaves[1]", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := copyExampleCluster(t)
+			broken := filepath.Join(filepath.Dir(file), "genesis", test.file)
+			if test.missing {
+				if err := os.Remove(broken); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(broken, []byte("{"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadCluster(file)
+			if err != nil {
+				t.Fatalf("deployment loading depended on an unselected genesis: %v", err)
+			}
+			selected, err := cfg.SelectNode(RoleSlave, big.NewInt(100001))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := selected.LoadGenesis(); err != nil {
+				t.Fatalf("selected genesis loading depended on another process: %v", err)
+			}
+			if err := selected.Validate(cfg.NetworkID); err != nil {
+				t.Fatalf("selected node validation depended on another process: %v", err)
+			}
+			if cfg.Master.Root != nil || cfg.Slaves[1].Eth.Genesis != nil {
+				t.Fatal("loading or validating one process read another process's genesis")
+			}
+			if err := cfg.LoadGenesis(); err == nil || !strings.Contains(err.Error(), broken) || !strings.Contains(err.Error(), test.label) {
+				t.Fatalf("whole-cluster loading should report the broken genesis and its owner: %v", err)
+			}
+		})
+	}
+}
+
+func TestGenesisLoading(t *testing.T) {
+	for _, test := range []struct {
+		name, file, content string
+	}{
+		{"invalid root JSON", "root.json", "{"},
+		{"invalid shard JSON", "shard-100001.json", "{"},
+		{"trailing root document", "root.json", "{} {}"},
+		{"trailing shard document", "shard-100001.json", "{} {}"},
+		{"missing shard fields", "shard-100001.json", "{}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := copyExampleCluster(t)
+			genesis := filepath.Join(filepath.Dir(file), "genesis", test.file)
+			if err := os.WriteFile(genesis, []byte(test.content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadCluster(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.LoadGenesis(); err == nil || !strings.Contains(err.Error(), genesis) {
+				t.Fatalf("invalid genesis accepted or error lacks its path: %v", err)
+			}
+		})
+	}
+	t.Run("missing referenced file", func(t *testing.T) {
+		file := copyExampleCluster(t)
+		genesis := filepath.Join(filepath.Dir(file), "genesis", "root.json")
+		if err := os.Remove(genesis); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadCluster(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cfg.LoadGenesis(); err == nil || !strings.Contains(err.Error(), genesis) {
+			t.Fatalf("missing genesis accepted or error lacks its path: %v", err)
+		}
+	})
+	t.Run("missing config is not supplied from elsewhere", func(t *testing.T) {
+		file := copyExampleCluster(t)
+		genesis := filepath.Join(filepath.Dir(file), "genesis", "shard-100001.json")
+		data, err := os.ReadFile(genesis)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(data, &spec); err != nil {
+			t.Fatal(err)
+		}
+		delete(spec, "config")
+		data, err = json.Marshal(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(genesis, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadCluster(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cfg.LoadGenesis(); err != nil {
+			t.Fatal(err)
+		}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "config") {
+			t.Fatalf("missing native genesis config was accepted: %v", err)
+		}
+	})
+}
+
+func TestGenesisRewardTaxRate(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		rate       *big.Rat
+		coinbase   int64
+		staking    bool
+		wantReward int64
+		wantError  string
+	}{
+		{"zero", new(big.Rat), 100, true, 0, "quarkchain: reward tax rate"},
+		{"small nonzero with zero subsidy", big.NewRat(1, 100), 0, true, 0, ""},
+		{"half with staking disabled", big.NewRat(1, 2), 100, false, 50, ""},
+		{"whole", big.NewRat(1, 1), 100, true, 0, "quarkchain: reward tax rate"},
+		{"missing", nil, 100, true, 0, "quarkchain: reward tax rate"},
+		{"negative", big.NewRat(-1, 2), 100, true, 0, "quarkchain: reward tax rate"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := exampleCluster(t)
+			cfg.Master.Root.PoSW.CoinbaseAmount.SetInt64(100)
+			shard := cfg.Slaves[1].Eth.Genesis.Config.QuarkChain
+			shard.RewardTaxRate = test.rate
+			shard.PoSW.CoinbaseAmount.SetInt64(test.coinbase)
+			shard.PoSW.StakingEnabled = test.staking
+			err := cfg.Validate()
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("have %v, want error containing %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reward := cfg.Master.Root.PoSW.BlockRewardAt(big.NewInt(1)); reward.Cmp(big.NewInt(100)) != 0 {
+				t.Fatalf("root reward = %v, want 100", reward)
+			}
+			want := big.NewInt(test.wantReward)
+			if reward := shard.AfterTax(shard.PoSW.BlockRewardAt(big.NewInt(1))); reward.Cmp(want) != 0 {
+				t.Fatalf("shard reward = %v, want %v", reward, want)
+			}
+		})
+	}
+}
+
+func TestGenesisSharedForks(t *testing.T) {
+	forks := []string{
+		"HomesteadBlock", "EIP150Block", "EIP155Block", "EIP158Block", "ByzantiumBlock",
+		"ConstantinopleBlock", "PetersburgBlock", "IstanbulBlock", "BerlinBlock", "LondonBlock",
+	}
+	for _, fork := range forks {
+		t.Run(fork, func(t *testing.T) {
+			cfg := exampleCluster(t)
+			// Spaced heights let one fork differ without breaking local fork order.
+			for _, slave := range cfg.Slaves {
+				for i, name := range forks {
+					reflect.ValueOf(slave.Eth.Genesis.Config).Elem().FieldByName(name).Set(reflect.ValueOf(big.NewInt(int64((i + 1) * 10))))
+				}
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("matching nonzero forks rejected: %v", err)
+			}
+			field := reflect.ValueOf(cfg.Slaves[1].Eth.Genesis.Config).Elem().FieldByName(fork).Interface().(*big.Int)
+			field.Add(field, big.NewInt(1))
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), fork) {
+				t.Fatalf("different %s heights accepted: %v", fork, err)
+			}
+		})
+	}
+	cfg := exampleCluster(t)
+	for _, slave := range cfg.Slaves {
+		slave.Eth.Genesis.Config.LondonBlock = nil
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("matching omitted forks rejected: %v", err)
+	}
+	cfg.Slaves[1].Eth.Genesis.Config.LondonBlock = new(big.Int)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "LondonBlock") {
+		t.Fatalf("omitted and zero forks were treated as equal: %v", err)
+	}
+}
+
+func TestGenesisRoutingOrder(t *testing.T) {
+	cfg := exampleCluster(t)
+	cfg.Slaves[0], cfg.Slaves[1] = cfg.Slaves[1], cfg.Slaves[0]
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("reordering deployment entries changed consensus: %v", err)
+	}
+	for _, slave := range cfg.Slaves {
+		chain := slave.Eth.Genesis.Config
+		if !reflect.DeepEqual(chain.QuarkChain.ChainIDs, []*big.Int{big.NewInt(100001), big.NewInt(100002)}) || chain.IsRootCoinbaseChain() != (chain.ChainID.Int64() == 100001) {
+			t.Fatal("genesis membership or reward recipient was derived from deployment order")
+		}
+	}
+	ids := cfg.Slaves[0].Eth.Genesis.Config.QuarkChain.ChainIDs
+	ids[0], ids[1] = ids[1], ids[0]
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("inconsistent ordered membership accepted")
+	}
+	ids = cfg.Slaves[1].Eth.Genesis.Config.QuarkChain.ChainIDs
+	ids[0], ids[1] = ids[1], ids[0]
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("consistent genesis-selected order rejected: %v", err)
+	}
+	if !cfg.Slaves[0].Eth.Genesis.Config.IsRootCoinbaseChain() {
+		t.Fatal("root reward chain did not follow genesis membership")
+	}
+	for _, slave := range cfg.Slaves {
+		slave.Eth.Genesis.Config.QuarkChain.ChainIDs = append(slave.Eth.Genesis.Config.QuarkChain.ChainIDs, big.NewInt(100003))
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("undeployed member accepted")
 	}
 }
 
@@ -130,7 +480,7 @@ func TestInvalidTOML(t *testing.T) {
 		{"nested typo", "[[Slaves]]\nChainID = \"100001\"\n[Slaves.Eth.Miner]\nUnknown = 1"},
 		{"invalid sync mode", "[[Slaves]]\nChainID = \"100001\"\n[Slaves.Eth]\nSyncMode = \"invalid\""},
 		{"derived role", "[Master]\nRole = \"master\""},
-		{"root consensus in master", "[Master.Root]\nConsensusType = \"POW_ETHASH\""},
+		{"derived root config", "[Master.Root]\nConsensusType = \"POW_ETHASH\""},
 		{"duplicate endpoint map", "[Master.ShardEndpoints]\n0 = \"127.0.0.1:38000\""},
 		{"invalid chain id text", "[[Slaves]]\nChainID = \"not-a-number\""},
 		{"inline genesis", "[[Slaves]]\nChainID = \"100001\"\n[Slaves.Eth.Genesis]\nGasLimit = 10000000"},
@@ -160,6 +510,9 @@ func TestInvalidTOML(t *testing.T) {
 
 func TestClusterExample(t *testing.T) {
 	cfg := exampleCluster(t)
+	if cfg.Master.GenesisFile != filepath.Join("examples", "genesis", "root.json") {
+		t.Fatalf("root genesis path resolved incorrectly: %s", cfg.Master.GenesisFile)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +535,7 @@ func TestClusterExample(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if selected != &cfg.Slaves[i] || selected.GenesisFile != "" || selected.ShardEndpoints != nil {
+		if selected != &cfg.Slaves[i] || selected.GenesisFile != filepath.Join("examples", "genesis", fmt.Sprintf("shard-%v.json", entry.ChainID)) || selected.ShardEndpoints != nil {
 			t.Fatal("process selection did not return the shard's own configuration")
 		}
 		if selected.CoinbaseAddress != addresses[i] {
@@ -231,6 +584,9 @@ func TestClusterNetworkID(t *testing.T) {
 			if cfg.NetworkID != test.id {
 				t.Fatalf("decoded NetworkID = %d, want %d", cfg.NetworkID, test.id)
 			}
+			if err := cfg.LoadGenesis(); err != nil {
+				t.Fatal(err)
+			}
 			err = cfg.Validate()
 			if test.id == 0 {
 				if err == nil || !strings.Contains(err.Error(), "NetworkID must be positive") {
@@ -261,15 +617,30 @@ func TestClusterLargeChainID(t *testing.T) {
 	if err := os.WriteFile(file, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"shard-100001.json", "shard-100002.json"} {
+		genesis := filepath.Join(filepath.Dir(file), "genesis", name)
+		data, err := os.ReadFile(genesis)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = bytes.ReplaceAll(data, []byte("100002"), []byte(id.String()))
+		if err := os.WriteFile(genesis, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cluster, err := LoadCluster(file)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.LoadGenesis(); err != nil {
 		t.Fatal(err)
 	}
 	if err := cluster.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cluster.Slaves[1].ChainID.Cmp(id) != 0 {
-		t.Fatal("large chain ID was not preserved in the deployment")
+	first, second := cluster.Slaves[0].Eth.Genesis.Config, cluster.Slaves[1].Eth.Genesis.Config
+	if second.ChainID.Cmp(id) != 0 || first.QuarkChain.ChainIDs[1].Cmp(id) != 0 {
+		t.Fatal("large chain ID was not preserved in execution and routing configuration")
 	}
 	selected, err := cluster.SelectNode(RoleSlave, new(big.Int).Set(id))
 	if err != nil || selected != &cluster.Slaves[1] {
@@ -278,6 +649,10 @@ func TestClusterLargeChainID(t *testing.T) {
 	master, err := cluster.SelectNode(RoleMaster, nil)
 	if err != nil || master.ShardEndpoints[id.String()] != "127.0.0.1:38001" {
 		t.Fatalf("large chain ID did not key the Master endpoint: %v", err)
+	}
+	first.QuarkChain.ChainIDs[1].SetInt64(7)
+	if second.QuarkChain.ChainIDs[1].Cmp(id) != 0 || second.ChainID.Cmp(id) != 0 {
+		t.Fatal("large genesis chain ID aliases another shard or its identity")
 	}
 }
 
@@ -349,6 +724,10 @@ func TestLargeChainIDDefaultIPC(t *testing.T) {
 	cluster.Slaves[1].ChainID = new(big.Int).Set(maxID)
 	cluster.Slaves[1].Node.DataDir = maxNode.Node.DataDir
 	cluster.Slaves[1].Node.IPCPath = maxNode.Node.IPCPath
+	cluster.Slaves[1].Eth.Genesis.Config.ChainID = new(big.Int).Set(maxID)
+	for i := range cluster.Slaves {
+		cluster.Slaves[i].Eth.Genesis.Config.QuarkChain.ChainIDs[1] = new(big.Int).Set(maxID)
+	}
 	if err := cluster.Validate(); err != nil {
 		t.Fatalf("maximum chain ID deployment should be valid with default IPC path: %v", err)
 	}
@@ -525,10 +904,11 @@ func TestClusterValidation(t *testing.T) {
 		change func(*ClusterConfig)
 		want   string
 	}{
-		{"zero network", func(c *ClusterConfig) { c.NetworkID = 0 }, "NetworkID must be positive"},
 		{"no shards", func(c *ClusterConfig) { c.Slaves = nil }, "at least one shard"},
+		{"missing shard", func(c *ClusterConfig) { c.Slaves = c.Slaves[:1] }, "every genesis chain ID"},
 		{"missing id", func(c *ClusterConfig) { c.Slaves[0].ChainID = nil }, "ChainID is required"},
 		{"duplicate shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = big.NewInt(100001) }, "duplicate deployed chain"},
+		{"unknown shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = big.NewInt(100003) }, "does not match deployed ChainID"},
 		{"zero shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = new(big.Int) }, "positive uint256"},
 		{"negative shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = big.NewInt(-1) }, "positive uint256"},
 		{"overflow shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = new(big.Int).Lsh(big.NewInt(1), 256) }, "positive uint256"},
@@ -791,6 +1171,7 @@ func TestNodeValidation(t *testing.T) {
 		want   string
 	}{
 		{"network mismatch", false, func(c *NodeConfig) { c.Eth.NetworkId = 100001 }, "conflicts with NetworkID"},
+		{"missing genesis config", false, func(c *NodeConfig) { c.Eth.Genesis = &core.Genesis{} }, "config"},
 		{"local fork", false, func(c *NodeConfig) { c.Eth.OverrideOsaka = new(uint64) }, "local fork overrides"},
 		{"database engine", true, func(c *NodeConfig) { c.Node.DBEngine = "unknown" }, "Node.DBEngine"},
 		{"state scheme", false, func(c *NodeConfig) { c.Eth.StateScheme = "unknown" }, "Eth.StateScheme"},
