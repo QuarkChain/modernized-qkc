@@ -96,7 +96,7 @@ func TestGenesisConfiguration(t *testing.T) {
 	if root.PoSW.StakePerBlock.String() != "1000000000000000000000000000000" {
 		t.Fatal("large stake was not preserved")
 	}
-	if root.PoSW.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 || first.QuarkChain.PoSW.RewardTaxRate.Cmp(big.NewRat(1, 2)) != 0 {
+	if root.PoSW.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 || first.QuarkChain.RewardTaxRate.Cmp(big.NewRat(1, 2)) != 0 {
 		t.Fatal("consensus ratios were not parsed exactly")
 	}
 	for _, slave := range cfg.Slaves {
@@ -343,26 +343,29 @@ func TestGenesisLoading(t *testing.T) {
 	})
 }
 
-func TestGenesisRootRewardTaxRate(t *testing.T) {
+func TestGenesisRewardTaxRate(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		rate      *big.Rat
-		coinbase  int64
-		staking   bool
-		wantError string
+		name       string
+		rate       *big.Rat
+		coinbase   int64
+		staking    bool
+		wantReward int64
+		wantError  string
 	}{
-		{"zero", new(big.Rat), 100, true, ""},
-		{"small nonzero with zero subsidy", big.NewRat(1, 100), 0, true, "RewardTaxRate must be zero"},
-		{"half with staking disabled", big.NewRat(1, 2), 100, false, "RewardTaxRate must be zero"},
-		{"whole", big.NewRat(1, 1), 100, true, "RewardTaxRate must be zero"},
-		{"missing", nil, 100, true, "posw: reward tax rate"},
-		{"negative", big.NewRat(-1, 2), 100, true, "posw: reward tax rate"},
+		{"zero", new(big.Rat), 100, true, 0, "quarkchain: reward tax rate"},
+		{"small nonzero with zero subsidy", big.NewRat(1, 100), 0, true, 0, ""},
+		{"half with staking disabled", big.NewRat(1, 2), 100, false, 50, ""},
+		{"whole", big.NewRat(1, 1), 100, true, 0, "quarkchain: reward tax rate"},
+		{"missing", nil, 100, true, 0, "quarkchain: reward tax rate"},
+		{"negative", big.NewRat(-1, 2), 100, true, 0, "quarkchain: reward tax rate"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := exampleCluster(t)
-			cfg.Master.Root.PoSW.RewardTaxRate = test.rate
-			cfg.Master.Root.PoSW.CoinbaseAmount.SetInt64(test.coinbase)
-			cfg.Master.Root.PoSW.StakingEnabled = test.staking
+			cfg.Master.Root.PoSW.CoinbaseAmount.SetInt64(100)
+			shard := cfg.Slaves[1].Eth.Genesis.Config.QuarkChain
+			shard.RewardTaxRate = test.rate
+			shard.PoSW.CoinbaseAmount.SetInt64(test.coinbase)
+			shard.PoSW.StakingEnabled = test.staking
 			err := cfg.Validate()
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
@@ -376,9 +379,9 @@ func TestGenesisRootRewardTaxRate(t *testing.T) {
 			if reward := cfg.Master.Root.PoSW.BlockRewardAt(big.NewInt(1)); reward.Cmp(big.NewInt(100)) != 0 {
 				t.Fatalf("root reward = %v, want 100", reward)
 			}
-			cfg.Slaves[0].Eth.Genesis.Config.QuarkChain.PoSW.CoinbaseAmount.SetInt64(100)
-			if reward := cfg.Slaves[0].Eth.Genesis.Config.QuarkChain.PoSW.BlockRewardAt(big.NewInt(1)); reward.Cmp(big.NewInt(50)) != 0 {
-				t.Fatalf("shard reward = %v, want 50", reward)
+			want := big.NewInt(test.wantReward)
+			if reward := shard.AfterTax(shard.PoSW.BlockRewardAt(big.NewInt(1))); reward.Cmp(want) != 0 {
+				t.Fatalf("shard reward = %v, want %v", reward, want)
 			}
 		})
 	}

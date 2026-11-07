@@ -6,7 +6,6 @@
       "adjustmentFactor": 512,
       "minimumDifficulty": 1,
       "coinbaseAmount": 0,
-      "rewardTaxRate": 0,
       "epochInterval": 3153600,
       "decayFactor": 0.88,
       "stakingEnabled": true,
