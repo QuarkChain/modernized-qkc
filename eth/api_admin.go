@@ -91,6 +91,9 @@ func hasAllBlocks(chain *core.BlockChain, bs []*types.Block) bool {
 
 // ImportChain imports a blockchain from a local file.
 func (api *AdminAPI) ImportChain(file string) (bool, error) {
+	if api.eth.BlockChain().Config().QuarkChain != nil {
+		return false, errors.New("QKC blocks must be imported through the shard")
+	}
 	// Make sure the can access the file to import
 	in, err := os.Open(file)
 	if err != nil {

@@ -61,7 +61,7 @@ var checkQKCConfigCommand = &cli.Command{
 // loadQKCConfig selects process settings and applies CLI overrides without reading genesis files.
 func loadQKCConfig(ctx *cli.Context) (*qkcconfig.NodeConfig, *qkcconfig.ClusterConfig, error) {
 	if ctx.NArg() != 0 {
-		return nil, nil, fmt.Errorf("checkconfig takes no positional arguments")
+		return nil, nil, fmt.Errorf("qkc takes no positional arguments")
 	}
 	cluster, err := qkcconfig.LoadCluster(ctx.String(configFileFlag.Name))
 	if err != nil {

@@ -143,6 +143,11 @@ func (miner *Miner) BuildPayload(ctx context.Context, args *BuildPayloadArgs, wi
 // getPending retrieves the pending block based on the current head block.
 // The result might be nil if pending generation is failed.
 func (miner *Miner) getPending() *newPayloadResult {
+	// QKC candidates need the shard's root reference and deposit cursor.
+	// Until pending RPC is wired to that builder, do not synthesize a PoS block.
+	if miner.chainConfig.QuarkChain != nil {
+		return nil
+	}
 	header := miner.chain.CurrentHeader()
 	miner.pendingMu.Lock()
 	defer miner.pendingMu.Unlock()

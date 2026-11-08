@@ -41,6 +41,44 @@ startup remain separate operations.
 To build the standalone CLI, run `make qkc`. Replace `go run ./cmd/qkc` with
 `build/bin/qkc` in the commands above. Run `checkconfig --help` for supported flags.
 
+## Start a standalone Slave
+
+```sh
+go run ./cmd/qkc \
+  --config qkc/config/examples/cluster.toml --qkc.role slave --qkc.chain 100001
+
+curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
+```
+
+Startup loads only the selected Slave's Genesis; root and peer Genesis files
+need not be present locally. Geth's `node.Node` and `eth.Ethereum` manage the
+database, blockchain, transaction pool, builder, APIs and lifecycle. Shard
+uses the same execution objects. HTTP, WebSocket and IPC use the native settings
+and API module lists, including `eth_chainId`, `eth_getBalance`, `eth_call`,
+log filters and subscriptions. SIGINT/SIGTERM uses geth's normal shutdown path.
+
+Standalone startup always uses geth's `FullSync` mode internally, overriding
+`Eth.SyncMode` / `--syncmode`, and ignores `Eth.EthDiscoveryURLs` and
+`Eth.SnapDiscoveryURLs`. Ethereum peer synchronization is disabled; snapshots
+remain optional with `Eth.StateScheme = "hash"` and `Eth.SnapshotCache = 0`.
+
+This entry point starts independently of Master. Cluster TCP listeners, Master
+handshake, root initialization and mining are not started in this stage; the
+configured private endpoint is reserved for later cluster integration. The
+Ethereum ETH/SNAP protocols and Beacon Engine API are not exposed. Transactions
+submitted through RPC are queued locally without block production or confirmation.
+`eth_syncing` reports geth synchronization progress, not Master connectivity or
+completion of root initialization. Pending block/state queries are unavailable,
+and `safe` / `finalized` have no QKC mapping yet. Direct chain import and manual
+head rewinds are rejected so that chain-head changes remain under Shard control.
+
+The CLI runs one Slave per process and exits on construction or startup errors.
+Normal shutdown is supported after `Node.Start` succeeds. As in geth,
+`Node.Close` before successful startup does not guarantee cleanup of execution
+service goroutines; this entry point does not support retrying startup within
+the same process.
+
 ## Configure consensus in Genesis JSON
 
 Each shard file carries its full native [core.Genesis](../../core/genesis.go).

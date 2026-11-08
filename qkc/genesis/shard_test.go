@@ -30,6 +30,35 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/config"
 )
 
+func TestBuildShard(t *testing.T) {
+	cluster := exampleInputs(t)
+	g := readShard(t, cluster.Slaves[0].GenesisFile)
+	g.ExtraData, g.Alloc = nil, nil
+	before, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := BuildShard(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(g)
+	if !bytes.Equal(before, after) {
+		t.Fatal("BuildShard modified its input")
+	}
+	if len(built.Genesis.Alloc) == 0 || len(built.Genesis.ExtraData) == 0 {
+		t.Fatal("QKC fields were not prepared")
+	}
+	if err := built.Block.Header().SanityCheckQKC(); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []*core.Genesis{nil, {}, {Config: &params.ChainConfig{}}} {
+		if _, err := BuildShard(invalid); err == nil {
+			t.Fatal("missing QKC config accepted")
+		}
+	}
+}
+
 func TestShardGenesisInvalid(t *testing.T) {
 	for _, test := range []struct {
 		name   string

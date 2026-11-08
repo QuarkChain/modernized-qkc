@@ -54,10 +54,9 @@ func (c *backendClusterClient) SendMinorBlockHeaderToMaster(ctx context.Context,
 	return c.report(ctx, header, amount)
 }
 
-// TestBackendLifecycle checks PoSW construction, separate root initialization,
-// and root-coinbase-chain-only stake queries. Stop and failed construction must leave the
-// caller's database usable, and Init must not propagate genesis again.
-func TestBackendLifecycle(t *testing.T) {
+// TestBackendBinding checks shared execution resources, separate root initialization
+// and root-coinbase-chain-only stake queries. Init must not propagate genesis.
+func TestBackendBinding(t *testing.T) {
 	for _, chainID := range []int64{10001, 10002} {
 		t.Run(big.NewInt(chainID).String(), func(t *testing.T) {
 			config := *params.NewTestQuarkChainConfig(chainID, 10001, 10002)
@@ -79,13 +78,20 @@ func TestBackendLifecycle(t *testing.T) {
 					return nil
 				},
 			}
-			s, err := New(&config, genesis, db, nil, client)
+			genesis.Config = &config
+			engine, err := posw.New(&config, genesis.ToBlock().Header())
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { s.Stop() })
-			if _, ok := s.engine.(*posw.PoSW); !ok || genesis.Config != nil {
-				t.Fatal("New must use PoSW without mutating the supplied genesis")
+			t.Cleanup(func() { engine.Close() })
+			chain, err := core.NewBlockChain(db, genesis, engine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(chain.Stop)
+			s := New(db, chain, nil, client)
+			if s.chain.chain != chain || s.chain.db != db {
+				t.Fatal("New must reuse the supplied chain and database")
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
@@ -116,27 +122,8 @@ func TestBackendLifecycle(t *testing.T) {
 			} else if err == nil {
 				t.Fatal("non-root-coinbase chain served root-chain stakes")
 			}
-			if err := s.Stop(); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Stop(); err != nil {
-				t.Fatal(err)
-			}
-			badGenesis := *genesis
-			badGenesis.GasLimit++
-			var mismatch *core.GenesisMismatchError
-			if failed, err := New(&config, &badGenesis, db, nil, client); failed != nil || !errors.As(err, &mismatch) {
-				t.Fatalf("mismatched genesis: backend %v, error %v", failed, err)
-			}
-			if err := db.Put([]byte("caller-owned"), []byte{1}); err != nil {
-				t.Fatalf("Stop or failed New closed the borrowed database: %v", err)
-			}
-			// Reconstruct from the same database; Init remains a separate step.
-			reopened, err := New(&config, genesis, db, nil, client)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reopened.Stop()
+			// Rebind to the same execution service; Init remains a separate step.
+			reopened := New(db, chain, nil, client)
 			if err := reopened.Init(root); err != nil {
 				t.Fatal(err)
 			}

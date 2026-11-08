@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"os"
 
+	_ "github.com/ethereum/go-ethereum/eth/tracers/js"
+	_ "github.com/ethereum/go-ethereum/eth/tracers/live"
+	_ "github.com/ethereum/go-ethereum/eth/tracers/native"
 	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/internal/flags"
 	"github.com/urfave/cli/v2"
@@ -29,7 +32,8 @@ import (
 func newApp() *cli.App {
 	app := flags.NewApp("the QuarkChain command line interface")
 	app.Name = "qkc"
-	app.Flags = debug.Flags
+	app.Flags = append(append([]cli.Flag{}, debug.Flags...), qkcConfigFlags...)
+	app.Action = runQKC
 	app.Commands = []*cli.Command{checkQKCConfigCommand}
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)

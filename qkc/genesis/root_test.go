@@ -52,8 +52,8 @@ func rootSeedConfig() config.RootConfig {
 		ConsensusType: params.ConsensusEthash,
 		PoSW: &params.PoSWConfig{
 			AdjustmentCutoff: 7, AdjustmentFactor: 512, MinimumDifficulty: big.NewInt(2),
-			CoinbaseAmount: new(big.Int), RewardTaxRate: new(big.Rat),
-			EpochInterval: 10, DecayFactor: big.NewRat(88, 100),
+			CoinbaseAmount: new(big.Int),
+			EpochInterval:  10, DecayFactor: big.NewRat(88, 100),
 		},
 	}
 }

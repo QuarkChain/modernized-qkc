@@ -28,6 +28,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/urfave/cli/v2"
@@ -51,6 +52,40 @@ func copyQKCExample(t *testing.T) string {
 		}
 	}
 	return filepath.Join(dir, "cluster.toml")
+}
+
+func TestStandaloneSlaveLocalGenesis(t *testing.T) {
+	file := copyQKCExample(t)
+	for _, name := range []string{"root.json", "shard-100002.json"} {
+		if err := os.Remove(filepath.Join(filepath.Dir(file), "genesis", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := newApp()
+	app.Before, app.After = nil, nil
+	app.Action = func(ctx *cli.Context) error {
+		stack, err := makeSlaveNode(ctx)
+		if err != nil {
+			return err
+		}
+		defer stack.Close()
+		if err := stack.Start(); err != nil {
+			return err
+		}
+		client := stack.Attach()
+		defer client.Close()
+		var id hexutil.Big
+		if err := client.CallContext(t.Context(), &id, "eth_chainId"); err != nil {
+			return err
+		}
+		if id.ToInt().Int64() != 100001 {
+			t.Fatalf("unexpected chain ID: %v", &id)
+		}
+		return nil
+	}
+	if err := app.Run([]string{"qkc", "--config", file, "--qkc.role", "slave", "--qkc.chain", "100001", "--datadir", t.TempDir(), "--http=false", "--ipcdisable"}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readQKCFlags(args ...string) (*qkcconfig.NodeConfig, error) {

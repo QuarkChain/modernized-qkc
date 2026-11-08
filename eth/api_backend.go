@@ -65,6 +65,9 @@ func (b *EthAPIBackend) CurrentBlock() *types.Header {
 }
 
 func (b *EthAPIBackend) SetHead(number uint64) error {
+	if b.ChainConfig().QuarkChain != nil {
+		return errors.New("QKC chain head is managed by shard root confirmations")
+	}
 	// Reject rewinding to a point before the snap-sync pivot. The earliest
 	// recoverable state is the pivot block, so a target below it would simply
 	// reset the chain to genesis, which is almost never the intent behind a

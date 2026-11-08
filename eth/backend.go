@@ -187,7 +187,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb)
+	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
 	}
@@ -459,6 +459,10 @@ func (s *Ethereum) EngineMaxReorgDepth() uint64        { return s.config.EngineM
 // Protocols returns all the currently configured
 // network protocols to start.
 func (s *Ethereum) Protocols() []p2p.Protocol {
+	// QKC slaves communicate through the cluster, not Ethereum's wire protocols.
+	if s.blockchain.Config().QuarkChain != nil {
+		return nil
+	}
 	protos := eth.MakeProtocols((*ethHandler)(s.handler), s.networkID, s.discmix)
 	if s.config.SnapshotCache > 0 {
 		protos = append(protos, snap.MakeProtocols((*snapHandler)(s.handler), s.config.SnapV2)...)

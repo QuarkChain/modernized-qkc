@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,6 +30,23 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
 )
+
+// BuildShard prepares one shard's genesis without reading other chains' files
+// or modifying spec. The returned specification can initialize a geth service.
+func BuildShard(spec *core.Genesis) (*Shard, error) {
+	if spec == nil || spec.Config == nil || spec.Config.QuarkChain == nil {
+		return nil, errors.New("shard genesis requires QuarkChain configuration")
+	}
+	if err := spec.Config.QuarkChain.ConsensusType.Check(); err != nil {
+		return nil, err
+	}
+	if err := spec.Config.CheckConfigForkOrder(); err != nil {
+		return nil, err
+	}
+	copy := *spec
+	copy.Alloc = maps.Clone(spec.Alloc)
+	return buildShard(&copy)
+}
 
 // buildShard derives QKC genesis fields and commits the validated native
 // specification in memory. Its consensus configuration comes from the JSON file.

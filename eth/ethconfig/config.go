@@ -26,8 +26,10 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
@@ -231,9 +233,23 @@ type Config struct {
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.
+// QKC uses PoSW and takes its fixed gas limit from the stored or supplied genesis.
 // Clique is allowed for now to live standalone, but ethash is forbidden and can
 // only exist on already merged networks.
-func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database) (consensus.Engine, error) {
+func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, genesis *core.Genesis) (consensus.Engine, error) {
+	if config.QuarkChain != nil {
+		header := rawdb.ReadHeader(db, rawdb.ReadCanonicalHash(db, 0), 0)
+		if header == nil && genesis != nil {
+			header = genesis.ToBlock().Header()
+		}
+		if err := config.QuarkChain.ConsensusType.Check(); err != nil {
+			return nil, err
+		}
+		if config.QuarkChain.ConsensusType == params.ConsensusSimulate {
+			return posw.NewSimulate(config, header)
+		}
+		return posw.New(config, header)
+	}
 	if config.TerminalTotalDifficulty == nil {
 		log.Error("Geth only supports PoS networks. Please transition legacy networks using Geth v1.13.x.")
 		return nil, errors.New("'terminalTotalDifficulty' is not set in genesis block")
