@@ -169,11 +169,11 @@ func TestGenesisValidationIgnoresRuntimeSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.ValidateGenesis(); err != nil {
+	if err := cfg.ValidateGenesisConfig(); err != nil {
 		t.Fatalf("genesis validation depended on runtime settings: %v", err)
 	}
 	for _, node := range append([]NodeConfig{cfg.Master}, cfg.Slaves...) {
-		if err := node.ValidateGenesis(); err != nil {
+		if err := node.ValidateGenesisConfig(); err != nil {
 			t.Fatalf("local genesis validation depended on runtime settings: %v", err)
 		}
 	}
@@ -188,7 +188,7 @@ func TestGenesisValidationIgnoresRuntimeSettings(t *testing.T) {
 		t.Fatal("full validation accepted invalid deployment settings")
 	}
 	cfg.Slaves[1].Eth.Genesis.Config.QuarkChain.ChainIDs = []*big.Int{big.NewInt(100002), big.NewInt(100001)}
-	if err := cfg.ValidateGenesis(); err == nil || !strings.Contains(err.Error(), "match in order") {
+	if err := cfg.ValidateGenesisConfig(); err == nil || !strings.Contains(err.Error(), "match in order") {
 		t.Fatalf("genesis-only validation missed inconsistent membership: %v", err)
 	}
 }

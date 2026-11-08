@@ -207,9 +207,10 @@ the deployment network ID. The Master exposes its loaded consensus settings in
 These checks do not replace native Genesis initialization or compatibility checks
 against a stored chain configuration. Node startup remains a separate operation.
 
-For read-only consensus checks without process settings, use
-`NodeConfig.ValidateGenesis()` or `ClusterConfig.ValidateGenesis()` on loaded
-configurations. These do not inspect network IDs, endpoints or data directories.
+For read-only consensus configuration checks without process settings, use
+`NodeConfig.ValidateGenesisConfig()` or `ClusterConfig.ValidateGenesisConfig()` on loaded
+configurations. These do not validate genesis block fields or allocations, or
+inspect network IDs, endpoints or data directories.
 
 ## File formats
 
