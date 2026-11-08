@@ -41,6 +41,79 @@ startup remain separate operations.
 To build the standalone CLI, run `make qkc`. Replace `go run ./cmd/qkc` with
 `build/bin/qkc` in the commands above. Run `checkconfig --help` for supported flags.
 
+## Initialize databases
+
+Initializing one Slave follows geth's `init` flow. From the repository root:
+
+```sh
+go run ./cmd/qkc init --config qkc/config/examples/cluster.toml \
+  --qkc.role slave --qkc.chain 100001
+```
+
+This reads only the selected Slave's Genesis JSON, checks its QKC rules and
+process settings, locks its data directory, and calls `core.SetupGenesisBlock`.
+The native geth code persists the genesis block, allocation state, chain
+configuration, and indices. Root and other shard Genesis files are not needed
+for this operation. It writes no root checkpoint, confirmation, or additional
+QKC initialization metadata into the shard database.
+
+Master needs all shard genesis headers to construct root genesis (R0):
+
+```sh
+go run ./cmd/qkc init --config qkc/config/examples/cluster.toml --qkc.role master
+```
+
+Master initialization validates the complete deployment and all Genesis files,
+then stores R0, its hash, and the root consensus configuration together in one
+atomic database batch. Root has no EVM state. A Slave receives its root checkpoint
+and confirmation data later through the Master handshake and `ShardChain.Init`.
+
+As a convenience, initialize the entire deployment with one command:
+
+```sh
+go run ./cmd/qkc init --config qkc/config/examples/cluster.toml
+```
+
+This validates all inputs, then initializes Master and each Slave independently.
+If a later process fails, earlier databases remain initialized; rerun the command
+after resolving the error. Run `checkconfig` to check cross-shard consistency
+when initializing Slaves separately.
+
+Initialization starts no P2P, mining, HTTP, WebSocket, or IPC services. Each target
+requires a nonempty `Node.DataDir`; its instance directory is
+`Node.DataDir/Node.Name`. Paths retain geth's working-directory semantics.
+
+| Process | Database under its instance directory | Persisted data |
+| --- | --- | --- |
+| Master | `rootdata` | Root genesis in SSZ, its hash, and root consensus rules. |
+| Slave | `chaindata` | Native geth genesis block, state trie, allocations, chain configuration, and indices. |
+
+`--datadir` requires a selected process. `--db.engine` overrides the target engine;
+`--state.scheme` overrides shard state storage. Otherwise these settings come
+from the deployment and native geth defaults: Pebble and path-based state for new
+databases. Existing engines and schemes are reused; incompatible explicit
+overrides are rejected. Shard freezer, Era and preimage settings follow
+`Eth.DatabaseFreezer`, `Eth.DatabaseEra`, and `Eth.Preimages`.
+
+### Repeated initialization and recovery
+
+- Repeating initialization succeeds for a compatible existing database and
+  preserves its chain head. A Slave database initialized through native geth
+  APIs needs no additional QKC marker to be accepted.
+- Slave genesis hashes, EVM fork compatibility, and QKC consensus configuration
+  are checked by `core.SetupGenesisBlock`. Compatible future EVM fork updates
+  follow geth's policy; changes to QKC consensus rules are rejected.
+- Root initialization requires the same R0 and root consensus rules, including
+  PoSW settings that do not affect the root hash.
+- After interruption, rerun the same command. Native genesis state and block
+  writes can be retried, including a path-based state commit interrupted before
+  the genesis block batch. Root records commit atomically and can be retried.
+  Successful initialization syncs writes to disk.
+- `NetworkID` selects the P2P network; like geth's network ID, it is not stored as
+  a second consensus configuration in the shard database.
+
+Node startup and root checkpoint recovery remain separate operations.
+
 ## Configure consensus in Genesis JSON
 
 Each shard file carries its full native [core.Genesis](../../core/genesis.go).
@@ -218,7 +291,11 @@ To construct blocks in memory, call `genesis.Load(cluster)` from
 [qkc/genesis](../genesis). It reads the referenced files, validates their rules,
 and returns root and shard Genesis blocks in the shared `chainIds` order, along
 with their full consensus configurations. It leaves the caller's settings and
-input files unchanged. Persistent database initialization remains a separate step.
+input files unchanged. Persist root genesis with the bundle's `InitRootDatabase`.
+For one Slave, call `genesis.LoadShard(file)` and pass the returned native
+`core.Genesis` to `core.SetupGenesisBlock`. Callers own database locks, trie
+configuration, and resource lifetimes. `qkc init` uses geth's node/database APIs
+to perform these operations.
 
 ## File formats
 

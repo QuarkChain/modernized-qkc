@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package genesis constructs a QKC network's genesis blocks without opening
-// deployment databases or starting services.
+// Package genesis constructs and validates a QKC network's genesis blocks and
+// initializes caller-owned databases without starting services.
 package genesis
 
 import (

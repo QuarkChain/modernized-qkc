@@ -127,6 +127,12 @@ func TestGenesisBuildAndImportFirstBlock(t *testing.T) {
 					if chain.CurrentBlock().Hash() != block.Hash() {
 						t.Fatal("imported first block did not become the canonical shard head")
 					}
+					if _, _, compatErr, err := core.SetupGenesisBlock(db, chain.TrieDB(), generated.Genesis); err != nil || compatErr != nil {
+						t.Fatalf("reinitialize existing shard: %v, %v", err, compatErr)
+					}
+					if chain.CurrentBlock().Hash() != block.Hash() || rawdb.ReadHeadBlockHash(db) != block.Hash() {
+						t.Fatal("reinitialization reset the existing shard head")
+					}
 				})
 			}
 		})

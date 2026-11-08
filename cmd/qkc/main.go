@@ -30,7 +30,7 @@ func newApp() *cli.App {
 	app := flags.NewApp("the QuarkChain command line interface")
 	app.Name = "qkc"
 	app.Flags = debug.Flags
-	app.Commands = []*cli.Command{checkQKCConfigCommand}
+	app.Commands = []*cli.Command{checkQKCConfigCommand, initQKCCommand}
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)
 		return debug.Setup(ctx)

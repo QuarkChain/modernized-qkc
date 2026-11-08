@@ -27,6 +27,8 @@ var (
 	lastConfirmedPrefix    = []byte("qkc_rLM")          // lastConfirmedPrefix + root hash -> last confirmed shard block hash
 	xShardDepositsPrefix   = []byte("qkc_xShard")       // xShardDepositsPrefix + source block hash -> deposits sent to this shard by the block
 	shardBlockCommitPrefix = []byte("qkc_shard_commit") // shardBlockCommitPrefix + block hash -> completed shard block delivery
+	rootChainConfigKey     = []byte("qkc_root_config")  // root consensus configuration
+	rootGenesisHashKey     = []byte("qkc_root_genesis") // root genesis hash in the Master database
 )
 
 // rootBlockKey = rootBlockPrefix + hash
