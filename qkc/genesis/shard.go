@@ -50,6 +50,10 @@ func LoadShard(file string) (*core.Genesis, error) {
 	if err := prepareShard(&spec); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
+	// This entry point returns before Commit, so validate the prepared allocations here.
+	if err := spec.ValidatePoSWStakingContracts(); err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
 	return &spec, nil
 }
 
@@ -75,6 +79,8 @@ func buildShard(spec *core.Genesis) (*Shard, error) {
 	return &Shard{Genesis: spec, Block: block}, nil
 }
 
+// prepareShard checks QKC genesis fields and fills required extra data and code.
+// Callers validate chain configuration before this and staking deployment afterwards.
 func prepareShard(g *core.Genesis) error {
 	cfg := g.Config
 	if cfg.Clique != nil || cfg.TerminalTotalDifficulty != nil || cfg.MergeNetsplitBlock != nil {
@@ -169,5 +175,5 @@ func prepareShard(g *core.Genesis) error {
 		account.Code = bytes.Clone(canonical.Code)
 		g.Alloc[address] = account
 	}
-	return g.ValidatePoSWStakingContracts()
+	return nil
 }
