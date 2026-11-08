@@ -295,7 +295,7 @@ func (c *ClusterConfig) Validate() error {
 	if c.NetworkID == 0 {
 		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
 	}
-	if err := c.ValidateGenesis(); err != nil {
+	if err := c.ValidateGenesisConfig(); err != nil {
 		return err
 	}
 	if err := c.Master.validateRuntime(c.NetworkID); err != nil {
@@ -367,13 +367,14 @@ func (c *ClusterConfig) Validate() error {
 	return nil
 }
 
-// ValidateGenesis checks loaded genesis configurations and network membership.
-// It does not load files, modify configurations, or inspect process settings.
-func (c *ClusterConfig) ValidateGenesis() error {
+// ValidateGenesisConfig checks loaded genesis configurations and network membership.
+// It is read-only and does not load files, inspect process settings, or validate
+// genesis block fields and allocations.
+func (c *ClusterConfig) ValidateGenesisConfig() error {
 	if c.Master.Role != RoleMaster || c.Master.ChainID != nil {
 		return errors.New("Master must not specify ChainID")
 	}
-	if err := c.Master.ValidateGenesis(); err != nil {
+	if err := c.Master.ValidateGenesisConfig(); err != nil {
 		return fmt.Errorf("Master: %w", err)
 	}
 	if len(c.Slaves) == 0 {
@@ -392,7 +393,7 @@ func (c *ClusterConfig) ValidateGenesis() error {
 		if ids[id] {
 			return fmt.Errorf("duplicate deployed chain ID %v", cfg.ChainID)
 		}
-		if err := cfg.ValidateGenesis(); err != nil {
+		if err := cfg.ValidateGenesisConfig(); err != nil {
 			return fmt.Errorf("Slaves[%d]: %w", i, err)
 		}
 		ids[id] = true
@@ -473,15 +474,16 @@ func (c *NodeConfig) Validate(networkID uint64) error {
 	if networkID == 0 {
 		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
 	}
-	if err := c.ValidateGenesis(); err != nil {
+	if err := c.ValidateGenesisConfig(); err != nil {
 		return err
 	}
 	return c.validateRuntime(networkID)
 }
 
-// ValidateGenesis checks this process's loaded chain identity and consensus rules.
-// It does not load files, modify configurations, or inspect runtime settings.
-func (c *NodeConfig) ValidateGenesis() error {
+// ValidateGenesisConfig checks this process's loaded chain identity and consensus rules.
+// It is read-only and does not load files, inspect runtime settings, or validate
+// genesis block fields and allocations.
+func (c *NodeConfig) ValidateGenesisConfig() error {
 	switch c.Role {
 	case RoleMaster:
 		if c.Root == nil {
