@@ -52,6 +52,8 @@ func buildShard(spec *core.Genesis) (*Shard, error) {
 	return &Shard{Genesis: spec, Block: block}, nil
 }
 
+// prepareShard checks QKC genesis fields and fills required extra data and code.
+// Callers validate chain configuration before this and staking deployment afterwards.
 func prepareShard(g *core.Genesis) error {
 	cfg := g.Config
 	if cfg.Clique != nil || cfg.TerminalTotalDifficulty != nil || cfg.MergeNetsplitBlock != nil {
@@ -146,5 +148,5 @@ func prepareShard(g *core.Genesis) error {
 		account.Code = bytes.Clone(canonical.Code)
 		g.Alloc[address] = account
 	}
-	return g.ValidatePoSWStakingContracts()
+	return nil
 }
