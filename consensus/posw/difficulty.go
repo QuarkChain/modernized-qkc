@@ -108,8 +108,8 @@ func GetAdjustedDifficulty(config *params.PoSWConfig, reader consensus.StakingRe
 // difficulty is the candidate's base PoW difficulty, before the staking discount.
 //
 // stakes come from the parent shard block's state for a shard candidate. For a root
-// candidate, they come from the state of the latest shard-0 block confirmed by
-// its parent root block.
+// candidate, they come from the state of the latest block on the configured
+// root staking chain confirmed by its parent root block.
 //
 // mined counts all blocks by this coinbase among the preceding windowSize-1
 // ancestors, including ordinary PoW blocks. Count ancestors on the candidate's
@@ -119,15 +119,18 @@ func CalcAdjustedDifficulty(config *params.PoSWConfig, number, difficulty *big.I
 	if config == nil || !config.StakingEnabled || stakes == nil || number.Sign() == 0 {
 		return diff
 	}
+	// Locked stakes determine this coinbase's quota for discounted blocks.
 	quota := new(big.Int).Div(stakes.ToBig(), config.StakePerBlockAt(number))
 	// Compare before narrowing: large stakes must not wrap a uint64 quota.
 	threshold := config.WindowSize
 	if quota.Cmp(new(big.Int).SetUint64(threshold)) < 0 {
 		threshold = quota.Uint64()
 	}
+	// Grant a discount only while the preceding blocks have not used all quota.
 	if mined < threshold {
 		diff.Div(diff, new(big.Int).SetUint64(config.DiffDivider))
 		if diff.Sign() == 0 {
+			// A large divider must not turn PoW difficulty into zero.
 			diff.SetInt64(1)
 		}
 	}

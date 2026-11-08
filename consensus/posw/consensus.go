@@ -20,11 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core/tracing"
@@ -41,10 +39,9 @@ var errOlderBlockTime = errors.New("timestamp must be greater than parent")
 // MixDigest carries the base difficulty; geth's Difficulty and Nonce stay zero.
 // Header checks need no state; VerifySeal applies the discount at body import.
 type PoSW struct {
-	config   *params.ChainConfig          // Validated when the engine is constructed.
-	gasLimit uint64                       // Fixed shard gas limit copied from genesis, matching pyquarkchain.
-	cacheMu  sync.Mutex                   // Serializes cache creation, not hashimoto verification.
-	caches   *lru.Cache[uint64, []uint32] // Immutable verification data, keyed by Ethash epoch.
+	*EthashVerifier
+	config   *params.ChainConfig // Validated when the engine is constructed.
+	gasLimit uint64              // Fixed shard gas limit copied from genesis, matching pyquarkchain.
 }
 
 var _ consensus.Engine = (*PoSW)(nil)
@@ -72,7 +69,7 @@ func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	if config.ChainID == nil || extra.ChainID.Cmp(config.ChainID) != 0 {
 		return nil, errors.New("shard genesis chain ID differs from chain config")
 	}
-	return &PoSW{config: config, gasLimit: genesis.GasLimit, caches: lru.NewCache[uint64, []uint32](2)}, nil
+	return &PoSW{EthashVerifier: NewEthashVerifier(), config: config, gasLimit: genesis.GasLimit}, nil
 }
 
 // Author returns the coinbase receiving this shard block's subsidy and fees.
@@ -307,8 +304,5 @@ func (p *PoSW) Seal(chain consensus.ChainHeaderReader, block *types.Block, resul
 // Close releases cached verification data. In-flight verification retains its
 // own slice references, so clearing the cache does not invalidate those reads.
 func (p *PoSW) Close() error {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	p.caches.Purge()
-	return nil
+	return p.EthashVerifier.Close()
 }
