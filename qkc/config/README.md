@@ -31,12 +31,10 @@ go run ./cmd/qkc checkconfig \
   --config qkc/config/examples/cluster.toml --qkc.role slave --qkc.chain 100002 --http=false
 ```
 
-Each command selects a process and applies its overrides, explicitly loads all
-referenced Genesis files, then validates the **entire deployment**. It checks consensus
-configuration and cross-shard consistency, but does not construct genesis blocks,
-validate the root header or allocation state, compare an existing database,
-create data directories, or start services. Genesis initialization and node
-startup remain separate operations.
+Each command selects a process, applies its overrides, and validates deployment
+identities, endpoints, and data directories. It does not read Genesis files,
+construct blocks, open databases, or start services. Genesis loading and validation
+are separate library operations.
 
 To build the standalone CLI, run `make qkc`. Replace `go run ./cmd/qkc` with
 `build/bin/qkc` in the commands above. Run `checkconfig --help` for supported flags.
@@ -50,8 +48,8 @@ in `Eth.Genesis`; it does not overwrite it from another file. Chain initializati
 uses the native Genesis and stored-config compatibility checks.
 
 The root chain is not an EVM chain. Its Genesis `config` contains its own
-`consensusType` and `posw`, independent of the shard settings. `checkconfig` reads
-this root configuration; root block construction is outside its scope.
+`consensusType` and `posw`, independent of the shard settings. `LoadGenesis` retains
+the complete root definition, including header fields, in `NodeConfig.Root`.
 
 ### Network ID, chain IDs, and shard order
 
@@ -113,12 +111,12 @@ For migrations, `originalBlockNumber` carries the old chain height into epoch
 calculations. Enable `poswStakingDecayEnabled` to apply the same epoch and decay
 factor to `stakePerBlock`. See [PoSWConfig](../../params/posw.go) for all fields.
 
-QKC Genesis allocations must include the canonical shard staking contract on
-every shard and the root staking contract on the first `chainIds` shard. This
-applies even when the local staking discount is disabled. The example allocations
-contain the runtime code pinned in `params.PoSWStakingRuntimeCode`; the loader does
-not insert it. The examples also contain the QKC header extra data and encode
-PoW difficulty in `mixHash`, with native `difficulty` and `nonce` set to zero.
+The Genesis loader fills missing canonical staking and active system-contract code,
+while preserving supplied balances, nonces, and storage and rejecting conflicting
+code. Every shard receives the shard staking contract; the first `chainIds` shard
+also receives the root staking contract, even when staking discounts are disabled.
+It also fills QKC header extra data and rejects conflicting supplied values. PoW
+difficulty is supplied in `mixHash`; native `difficulty` and `nonce` must be zero.
 
 ## Configure processes in `cluster.toml`
 
@@ -190,27 +188,21 @@ are rejected: edit the referenced Genesis instead.
 ## Use the Go package
 
 1. Call `LoadCluster` to decode deployment settings, apply defaults, and resolve
-   Genesis file paths. It does not read any Genesis files.
-2. Call `SelectNode` with the role and, for a shard, its chain ID.
-3. Apply explicit process overrides to the returned `NodeConfig`.
-4. To check only that process, call its `LoadGenesis()`, then
-   `Validate(cluster.NetworkID)`.
+   Genesis paths. It does not read any Genesis files.
+2. Apply process overrides, using `SelectNode` when selecting one process.
+3. Call `cluster.Validate()` for deployment checks, or
+   `selected.Validate(cluster.NetworkID)` for one process. Neither reads Genesis.
+4. For network Genesis, call `cluster.LoadGenesis()`. It loads each file once,
+   validates the complete inputs and ordered membership, and fills required QKC
+   fields and contract code. For one process, call `selected.LoadGenesis()` instead;
+   it does not read other chains' files.
 
-For a complete deployment check, replace step 4 with `cluster.LoadGenesis()`,
-then `cluster.Validate()`. This explicitly reads every referenced Genesis and
-checks cross-shard consistency. `checkconfig` follows this complete sequence.
-
-`SelectNode` returns the chosen entry within the deployment, so its edits are
-included in validation. Validation also binds each shard's `Eth.NetworkId` to
-the deployment network ID. The Master exposes its loaded consensus settings in
-`NodeConfig.Root`; each Slave exposes its complete Genesis in `NodeConfig.Eth.Genesis`.
-These checks do not replace native Genesis initialization or compatibility checks
-against a stored chain configuration. Node startup remains a separate operation.
-
-For read-only consensus configuration checks without process settings, use
-`NodeConfig.ValidateGenesisConfig()` or `ClusterConfig.ValidateGenesisConfig()` on loaded
-configurations. These do not validate genesis block fields or allocations, or
-inspect network IDs, endpoints or data directories.
+Master retains a complete `RootGenesis` in `NodeConfig.Root`, including its
+`RootConfig`. Each Slave retains native `core.Genesis` in `NodeConfig.Eth.Genesis`.
+Loading does not construct blocks, calculate state roots, or open deployment
+databases. It does not inspect runtime endpoints or data directories. Deployment
+checks bind `Eth.NetworkId` to the deployment network ID; Genesis loading checks
+that the loaded chain ID matches its deployed identity.
 
 ## File formats
 
