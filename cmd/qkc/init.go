@@ -36,7 +36,7 @@ import (
 var initQKCCommand = &cli.Command{
 	Name:   "init",
 	Usage:  "Initialize QKC databases from the deployment's genesis files",
-	Flags:  []cli.Flag{configFileFlag, qkcRoleFlag, qkcChainFlag, utils.DataDirFlag, utils.DBEngineFlag, utils.StateSchemeFlag},
+	Flags:  []cli.Flag{configFileFlag, utils.DBEngineFlag, utils.StateSchemeFlag},
 	Action: initQKC,
 }
 
@@ -44,17 +44,7 @@ func initQKC(ctx *cli.Context) error {
 	if ctx.NArg() != 0 {
 		return errors.New("init takes no positional arguments; set GenesisFile in the deployment")
 	}
-	var cluster *qkcconfig.ClusterConfig
-	var selected *qkcconfig.NodeConfig
-	var err error
-	if ctx.IsSet(qkcRoleFlag.Name) {
-		selected, cluster, err = loadQKCConfig(ctx)
-	} else {
-		if ctx.IsSet(qkcChainFlag.Name) || ctx.IsSet(utils.DataDirFlag.Name) {
-			return errors.New("--qkc.chain and --datadir require --qkc.role when initializing one process")
-		}
-		cluster, err = qkcconfig.LoadCluster(ctx.String(configFileFlag.Name))
-	}
+	cluster, err := qkcconfig.LoadCluster(ctx.String(configFileFlag.Name))
 	if err != nil {
 		return err
 	}
@@ -70,38 +60,23 @@ func initQKC(ctx *cli.Context) error {
 			cfg.Eth.StateScheme = ctx.String(utils.StateSchemeFlag.Name)
 		}
 	}
-	var bundle *genesis.Bundle
-	if selected != nil && selected.Role == qkcconfig.RoleSlave {
-		if err := selected.LoadGenesis(); err != nil {
-			return err
-		}
-		if err := selected.Validate(cluster.NetworkID); err != nil {
-			return err
-		}
-	} else {
-		// Master needs all prepared G0 definitions to construct R0.
-		if err := cluster.LoadGenesis(); err != nil {
-			return err
-		}
-		if err := cluster.Validate(); err != nil {
-			return err
-		}
-		bundle, err = genesis.Build(cluster)
-		if err != nil {
-			return err
-		}
+	if err := cluster.LoadGenesis(); err != nil {
+		return err
 	}
-	if selected != nil {
-		configs = []*qkcconfig.NodeConfig{selected}
+	if err := cluster.Validate(); err != nil {
+		return err
+	}
+	bundle, err := genesis.Build(cluster)
+	if err != nil {
+		return err
 	}
 	for _, cfg := range configs {
 		if cfg.Node.DataDir == "" {
 			return fmt.Errorf("%s: init requires a persistent DataDir", cfg.Node.Name)
 		}
 	}
-	// Each process uses the same initializer whether selected individually or
-	// in a deployment. If a later process fails, earlier databases remain valid
-	// and the command can be rerun, just like repeating geth init.
+	// Each database is initialized independently. Successfully initialized
+	// databases can be reused if a later process fails.
 	for _, cfg := range configs {
 		hash, err := initQKCProcess(cfg, bundle)
 		if err != nil {

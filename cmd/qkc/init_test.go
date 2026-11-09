@@ -175,17 +175,11 @@ func TestInitPersistence(t *testing.T) {
 	}
 }
 
-func TestInitSelectionAndRetry(t *testing.T) {
+func TestInitPartialDeploymentRetry(t *testing.T) {
 	file := initExample(t)
-	if _, err := runInit("--config", file, "--qkc.role", "slave", "--qkc.chain", "100002"); err != nil {
-		t.Fatal(err)
-	}
 	cluster, err := qkcconfig.LoadCluster(file)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(cluster.Master.Node.DataDir); !os.IsNotExist(err) {
-		t.Fatal("selecting one shard created master's datadir")
 	}
 	stack, _ := openInitDatabase(t, &cluster.Slaves[1])
 	if _, err := runInit("--config", file); err == nil {
@@ -209,22 +203,6 @@ func TestInitSelectionAndRetry(t *testing.T) {
 	}
 	if _, err := runInit("--config", file); err != nil {
 		t.Fatalf("P2P network ID changed genesis compatibility: %v", err)
-	}
-}
-
-func TestInitSlaveUsesOnlyLocalGenesis(t *testing.T) {
-	file := initExample(t)
-	cluster, err := qkcconfig.LoadCluster(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, missing := range []string{cluster.Master.GenesisFile, cluster.Slaves[0].GenesisFile} {
-		if err := os.Remove(missing); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := runInit("--config", file, "--qkc.role", "slave", "--qkc.chain", "100002"); err != nil {
-		t.Fatalf("local slave init tried to load another chain: %v", err)
 	}
 }
 
@@ -261,7 +239,7 @@ func TestInitSlaveNativeCompatibility(t *testing.T) {
 	}
 	trie.Close()
 	stack.Close()
-	args := []string{"--config", file, "--qkc.role", "slave", "--qkc.chain", "100001", "--state.scheme", "hash"}
+	args := []string{"--config", file, "--state.scheme", "hash"}
 	if _, err := runInit(args...); err != nil {
 		t.Fatalf("matching native database rejected: %v", err)
 	}
@@ -284,48 +262,40 @@ func TestInitSlaveNativeCompatibility(t *testing.T) {
 }
 
 func TestInitRejectsInvalidDeploymentBeforeWriting(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		args []string
-	}{
-		{name: "deployment"},
-		{name: "master", args: []string{"--qkc.role", "master"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			file := initExample(t)
-			content, err := os.ReadFile(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			content = bytes.Replace(content, []byte("NetworkID = 2"), []byte("NetworkID = 0"), 1)
-			if err := os.WriteFile(file, content, 0600); err != nil {
-				t.Fatal(err)
-			}
-			cluster, err := qkcconfig.LoadCluster(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := runInit(append([]string{"--config", file}, test.args...)...); err == nil || !strings.Contains(err.Error(), "NetworkID must be positive") {
-				t.Fatalf("invalid deployment accepted: %v", err)
-			}
-			for _, cfg := range append([]qkcconfig.NodeConfig{cluster.Master}, cluster.Slaves...) {
-				if _, err := os.Stat(cfg.Node.DataDir); !os.IsNotExist(err) {
-					t.Fatalf("invalid deployment created data directory %s: %v", cfg.Node.DataDir, err)
-				}
-			}
-		})
+	file := initExample(t)
+	content, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = bytes.Replace(content, []byte("NetworkID = 2"), []byte("NetworkID = 0"), 1)
+	if err := os.WriteFile(file, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cluster, err := qkcconfig.LoadCluster(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runInit("--config", file); err == nil || !strings.Contains(err.Error(), "NetworkID must be positive") {
+		t.Fatalf("invalid deployment accepted: %v", err)
+	}
+	for _, cfg := range append([]qkcconfig.NodeConfig{cluster.Master}, cluster.Slaves...) {
+		if _, err := os.Stat(cfg.Node.DataDir); !os.IsNotExist(err) {
+			t.Fatalf("invalid deployment created data directory %s: %v", cfg.Node.DataDir, err)
+		}
 	}
 }
 
 func TestInitArguments(t *testing.T) {
+	file := initExample(t)
 	for _, args := range [][]string{
 		{"extra"},
+		{"--qkc.role", "master"},
 		{"--qkc.chain", "100001"},
 		{"--datadir", "data"},
 		{"--config", "missing.toml"},
 	} {
 		t.Run(fmt.Sprint(args), func(t *testing.T) {
-			if _, err := runInit(args...); err == nil {
+			if _, err := runInit(append([]string{"--config", file}, args...)...); err == nil {
 				t.Fatal("invalid init arguments accepted")
 			}
 		})

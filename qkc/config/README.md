@@ -41,41 +41,27 @@ To build the standalone CLI, run `make qkc`. Replace `go run ./cmd/qkc` with
 
 ## Initialize databases
 
-Initializing one Slave follows geth's `init` flow. From the repository root:
-
-```sh
-go run ./cmd/qkc init --config qkc/config/examples/cluster.toml \
-  --qkc.role slave --qkc.chain 100001
-```
-
-This reads only the selected Slave's Genesis JSON, checks its QKC rules and
-process settings, locks its data directory, and calls `core.SetupGenesisBlock`.
-The native geth code persists the genesis block, allocation state, chain
-configuration, and indices. Root and other shard Genesis files are not needed
-for this operation. It writes no root checkpoint, confirmation, or additional
-QKC initialization metadata into the shard database.
-
-Master needs all shard genesis headers to construct root genesis (R0):
-
-```sh
-go run ./cmd/qkc init --config qkc/config/examples/cluster.toml --qkc.role master
-```
-
-Master initialization validates the complete deployment and all Genesis files,
-then stores R0, its hash, and the root consensus configuration together in one
-atomic database batch. Root has no EVM state. A Slave receives its root checkpoint
-and confirmation data later through the Master handshake and `ShardChain.Init`.
-
-As a convenience, initialize the entire deployment with one command:
+Initialize the entire deployment from the repository root:
 
 ```sh
 go run ./cmd/qkc init --config qkc/config/examples/cluster.toml
 ```
 
-This validates all inputs, then initializes Master and each Slave independently.
-If a later process fails, earlier databases remain initialized; rerun the command
-after resolving the error. Separate Slave initialization checks only local Genesis;
-use `ClusterConfig.LoadGenesis()` to check cross-shard consistency.
+This loads all Genesis files, validates the complete deployment and cross-shard
+consistency, and constructs the genesis blocks before opening databases. It then
+initializes Master followed by each Slave, opening and locking their configured
+data directories on the local machine. It does not initialize remote machines.
+Each database is initialized independently; if a later process fails, earlier
+databases remain initialized. There is no atomic commit across the cluster.
+
+Master uses all shard genesis headers to construct root genesis (R0), then stores
+R0, its hash, and the root consensus configuration in one atomic database batch.
+Root has no EVM state. Each Slave follows geth's `init` flow through
+`core.SetupGenesisBlock`, which persists the genesis block, allocation state,
+chain configuration, and indices. It writes no root checkpoint, confirmation, or
+additional QKC initialization metadata into the shard database. A Slave receives
+its root checkpoint and confirmation data later through the Master handshake and
+`ShardChain.Init`.
 
 Initialization starts no P2P, mining, HTTP, WebSocket, or IPC services. Each target
 requires a nonempty `Node.DataDir`; its instance directory is
@@ -86,12 +72,12 @@ requires a nonempty `Node.DataDir`; its instance directory is
 | Master | `rootdata` | Root genesis in SSZ, its hash, and root consensus rules. |
 | Slave | `chaindata` | Native geth genesis block, state trie, allocations, chain configuration, and indices. |
 
-`--datadir` requires a selected process. `--db.engine` overrides the target engine;
-`--state.scheme` overrides shard state storage. Otherwise these settings come
-from the deployment and native geth defaults: Pebble and path-based state for new
-databases. Existing engines and schemes are reused; incompatible explicit
-overrides are rejected. Shard freezer, Era and preimage settings follow
-`Eth.DatabaseFreezer`, `Eth.DatabaseEra`, and `Eth.Preimages`.
+Data directories come from the deployment. `--db.engine` overrides the engine for
+all databases; `--state.scheme` overrides state storage for all shards. Otherwise
+these settings come from the deployment and native geth defaults: Pebble and
+path-based state for new databases. Existing engines and schemes are reused;
+incompatible explicit overrides are rejected. Shard freezer, Era and preimage
+settings follow `Eth.DatabaseFreezer`, `Eth.DatabaseEra`, and `Eth.Preimages`.
 
 ### Repeated initialization and recovery
 
@@ -103,10 +89,8 @@ overrides are rejected. Shard freezer, Era and preimage settings follow
   follow geth's policy; changes to QKC consensus rules are rejected.
 - Root initialization requires the same R0 and root consensus rules, including
   PoSW settings that do not affect the root hash.
-- After interruption, rerun the same command. Native genesis state and block
-  writes can be retried, including a path-based state commit interrupted before
-  the genesis block batch. Root records commit atomically and can be retried.
-  Successful initialization syncs writes to disk.
+- Root records commit atomically and can be retried. Successful initialization
+  syncs writes to disk.
 - `NetworkID` selects the P2P network; like geth's network ID, it is not stored as
   a second consensus configuration in the shard database.
 
