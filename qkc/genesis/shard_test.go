@@ -206,9 +206,6 @@ func TestShardGenesisAllocationMerge(t *testing.T) {
 	if _, err := Load(c); err == nil || !strings.Contains(err.Error(), "only be deployed") {
 		t.Fatalf("root staking deployed on another shard: %v", err)
 	}
-	if _, err := LoadShard(c.Slaves[1].GenesisFile); err == nil || !strings.Contains(err.Error(), "only be deployed") {
-		t.Fatalf("local genesis loader accepted root staking on another shard: %v", err)
-	}
 }
 
 func TestShardGenesisActiveSystemContracts(t *testing.T) {

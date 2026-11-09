@@ -76,8 +76,8 @@ go run ./cmd/qkc init --config qkc/config/examples/cluster.toml
 
 This validates all inputs, then initializes Master and each Slave independently.
 If a later process fails, earlier databases remain initialized; rerun the command
-after resolving the error. Run `checkconfig` to check cross-shard consistency
-when initializing Slaves separately.
+after resolving the error. Separate Slave initialization checks only local Genesis;
+use `ClusterConfig.LoadGenesis()` to check cross-shard consistency.
 
 Initialization starts no P2P, mining, HTTP, WebSocket, or IPC services. Each target
 requires a nonempty `Node.DataDir`; its instance directory is

@@ -72,30 +72,22 @@ func initQKC(ctx *cli.Context) error {
 	}
 	var bundle *genesis.Bundle
 	if selected != nil && selected.Role == qkcconfig.RoleSlave {
-		selected.Eth.Genesis, err = genesis.LoadShard(selected.GenesisFile)
-		if err != nil {
+		if err := selected.LoadGenesis(); err != nil {
 			return err
 		}
 		if err := selected.Validate(cluster.NetworkID); err != nil {
 			return err
 		}
 	} else {
-		// Master needs every G0 to construct R0. Whole-deployment initialization
-		// also validates cross-shard rules before processing individual nodes.
-		bundle, err = genesis.Load(cluster)
-		if err != nil {
+		// Master needs all prepared G0 definitions to construct R0.
+		if err := cluster.LoadGenesis(); err != nil {
 			return err
 		}
-		cluster.Master.Root = bundle.RootConfig
-		for i := range cluster.Slaves {
-			for _, shard := range bundle.Shards {
-				if cluster.Slaves[i].ChainID.Cmp(shard.Genesis.Config.ChainID) == 0 {
-					cluster.Slaves[i].Eth.Genesis = shard.Genesis
-					break
-				}
-			}
-		}
 		if err := cluster.Validate(); err != nil {
+			return err
+		}
+		bundle, err = genesis.Build(cluster)
+		if err != nil {
 			return err
 		}
 	}

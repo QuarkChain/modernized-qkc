@@ -30,33 +30,6 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 )
 
-// LoadShard reads and validates one shard's complete genesis input. It does not
-// read root or other shard files, compute state, or open a deployment database.
-// Pass the result to core.SetupGenesisBlock for native geth initialization.
-func LoadShard(file string) (*core.Genesis, error) {
-	var spec core.Genesis
-	if err := decodeJSON(file, &spec); err != nil {
-		return nil, err
-	}
-	if spec.Config == nil || spec.Config.QuarkChain == nil {
-		return nil, fmt.Errorf("%s: shard genesis requires QuarkChain configuration", file)
-	}
-	if err := spec.Config.QuarkChain.ConsensusType.Check(); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
-	}
-	if err := spec.Config.CheckConfigForkOrder(); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
-	}
-	if err := prepareShard(&spec); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
-	}
-	// This entry point returns before Commit, so validate the prepared allocations here.
-	if err := spec.ValidatePoSWStakingContracts(); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
-	}
-	return &spec, nil
-}
-
 // buildShard derives QKC genesis fields and commits the validated native
 // specification in memory. Its consensus configuration comes from the JSON file.
 func buildShard(spec *core.Genesis) (*Shard, error) {

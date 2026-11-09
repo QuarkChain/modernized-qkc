@@ -119,7 +119,10 @@ func TestInitPersistence(t *testing.T) {
 				if out, err := runInit(args...); err != nil || strings.Count(out, "Initialized ") != 3 {
 					t.Fatalf("repeat init: %v, output %s", err, out)
 				}
-				bundle, err := genesis.Load(cluster)
+				if err := cluster.LoadGenesis(); err != nil {
+					t.Fatal(err)
+				}
+				bundle, err := genesis.Build(cluster)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -232,10 +235,10 @@ func TestInitSlaveNativeCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &cluster.Slaves[0]
-	spec, err := genesis.LoadShard(cfg.GenesisFile)
-	if err != nil {
+	if err := cfg.LoadGenesis(); err != nil {
 		t.Fatal(err)
 	}
+	spec := cfg.Eth.Genesis
 	timestamp := uint64(100)
 	spec.Config.ShanghaiTime = &timestamp
 	save := func() {

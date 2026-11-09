@@ -62,7 +62,7 @@ func (db *interruptedDB) SyncKeyValue() error {
 }
 
 func TestRootDatabaseRecovery(t *testing.T) {
-	bundle, err := Load(exampleInputs(t))
+	bundle, err := loadAndBuild(exampleInputs(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestRootDatabaseRecovery(t *testing.T) {
 }
 
 func TestRootDatabaseCompatibility(t *testing.T) {
-	bundle, err := Load(exampleInputs(t))
+	bundle, err := loadAndBuild(exampleInputs(t))
 	if err != nil {
 		t.Fatal(err)
 	}
