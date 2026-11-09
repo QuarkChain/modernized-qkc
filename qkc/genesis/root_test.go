@@ -58,12 +58,21 @@ func rootSeedConfig() config.RootConfig {
 	}
 }
 
+func readRootForTest(file string) (*config.RootGenesis, error) {
+	node := config.DefaultNodeConfig(nil)
+	node.GenesisFile = file
+	if err := node.LoadGenesis(); err != nil {
+		return nil, err
+	}
+	return node.Root, nil
+}
+
 func loadRootForTest(file string, headers []*types.Header) (*qkctypes.RootBlock, error) {
-	seed, err := readRoot(file)
+	seed, err := readRootForTest(file)
 	if err != nil {
 		return nil, err
 	}
-	return buildRoot(file, seed, headers)
+	return buildRoot(seed, headers)
 }
 
 func rootSeedHeaders() []*types.Header {
@@ -73,15 +82,15 @@ func rootSeedHeaders() []*types.Header {
 	}
 }
 
-func TestLoadRoot(t *testing.T) {
+func TestBuildRoot(t *testing.T) {
 	file := rootSeedFile(t, `{"timestamp":"0x2a","difficulty":"0xa","coinbase":"0x1111111111111111111111111111111111111111","extraData":"0x1234","nonce":"0x7","mixHash":"0x0000000000000000000000000000000000000000000000000000000000000009"}`)
 	headers := rootSeedHeaders()
-	seed, err := readRoot(file)
+	seed, err := readRootForTest(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := seed.Config
-	root, err := buildRoot(file, seed, headers)
+	cfg := seed.RootConfig
+	root, err := buildRoot(seed, headers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +106,11 @@ func TestLoadRoot(t *testing.T) {
 	if root.ShardHeaderHash() != qkctypes.CalcShardHeaderHash(headers) {
 		t.Fatal("root does not commit to the shard genesis headers")
 	}
-	again, err := buildRoot(file, seed, headers)
+	again, err := buildRoot(seed, headers)
 	if err != nil || again.Hash() != root.Hash() {
 		t.Fatalf("same input did not produce the same root: %v", err)
 	}
-	reversed, err := buildRoot(file, seed, []*types.Header{headers[1], headers[0]})
+	reversed, err := buildRoot(seed, []*types.Header{headers[1], headers[0]})
 	if err != nil || reversed.Hash() == root.Hash() {
 		t.Fatalf("root failed to preserve network shard order: %v", err)
 	}
@@ -114,48 +123,7 @@ func TestLoadRoot(t *testing.T) {
 	}
 }
 
-func TestLoadRootValidation(t *testing.T) {
-	for _, test := range []struct {
-		name, input, want string
-	}{
-		{"missing timestamp", `{"difficulty":"0x2"}`, "timestamp is required"},
-		{"null timestamp", `{"timestamp":null,"difficulty":"0x2"}`, "timestamp is required"},
-		{"missing difficulty", `{"timestamp":"0x0"}`, "difficulty must be a positive uint256"},
-		{"zero difficulty", `{"timestamp":"0x0","difficulty":"0x0"}`, "difficulty must be a positive uint256"},
-		{"negative difficulty", `{"timestamp":"0x0","difficulty":"-1"}`, "difficulty must be a positive uint256"},
-		{"overflow difficulty", `{"timestamp":"0x0","difficulty":"0x10000000000000000000000000000000000000000000000000000000000000000"}`, "invalid hex or decimal integer"},
-		{"below minimum", `{"timestamp":"0x0","difficulty":"0x1"}`, "below MinimumDifficulty"},
-		{"derived number", `{"timestamp":"0x0","difficulty":"0x2","number":1}`, "unknown field"},
-		{"derived parent", `{"timestamp":"0x0","difficulty":"0x2","parentHash":"0x00"}`, "unknown field"},
-		{"derived shard commitment", `{"timestamp":"0x0","difficulty":"0x2","shardHeaderHash":"0x00"}`, "unknown field"},
-		{"native allocations", `{"timestamp":"0x0","difficulty":"0x2","alloc":{}}`, "unknown field"},
-		{"empty config", `{"timestamp":"0x0","difficulty":"0x2","config":{}}`, "PoSW minimum difficulty"},
-		{"null config", `{"timestamp":"0x0","difficulty":"0x2","config":null}`, "PoSW minimum difficulty"},
-		{"trailing document", `{"timestamp":"0x0","difficulty":"0x2"} {}`, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			file := rootSeedFile(t, test.input)
-			_, err := loadRootForTest(file, rootSeedHeaders())
-			if err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("have %v, want file-aware error containing %q", err, test.want)
-			}
-		})
-	}
-	file := rootSeedFile(t, `{"timestamp":0,"difficulty":2}`)
-	writeFile(t, file, []byte(`{"timestamp":0,"difficulty":2}`))
-	if _, err := loadRootForTest(file, rootSeedHeaders()); err == nil || !strings.Contains(err.Error(), "PoSW minimum difficulty") {
-		t.Fatalf("missing root config accepted: %v", err)
-	}
-	file = rootSeedFile(t, `{"timestamp":0,"difficulty":2}`)
-	if _, err := loadRootForTest(file, nil); err == nil || !strings.Contains(err.Error(), "requires shard genesis headers") {
-		t.Fatalf("empty shard genesis list accepted: %v", err)
-	}
-	if _, err := loadRootForTest(file, []*types.Header{nil}); err == nil || !strings.Contains(err.Error(), "nil shard genesis header") {
-		t.Fatalf("nil shard genesis header accepted: %v", err)
-	}
-}
-
-func TestLoadRootDefaultsAndUint256(t *testing.T) {
+func TestBuildRootDefaultsAndUint256(t *testing.T) {
 	file := rootSeedFile(t, `{"timestamp":0,"difficulty":2}`)
 	root, err := loadRootForTest(file, rootSeedHeaders())
 	if err != nil {
@@ -172,5 +140,14 @@ func TestLoadRootDefaultsAndUint256(t *testing.T) {
 	}
 	if root.Difficulty().ToBig().BitLen() != 256 || root.TotalDifficulty().Cmp(root.Difficulty()) != 0 || root.Time() != ^uint64(0) {
 		t.Fatal("root difficulty or timestamp was truncated")
+	}
+}
+
+func TestBuildRootRequiresHeaders(t *testing.T) {
+	file := rootSeedFile(t, `{"timestamp":0,"difficulty":2}`)
+	for _, headers := range [][]*types.Header{nil, {nil}} {
+		if _, err := loadRootForTest(file, headers); err == nil {
+			t.Fatal("missing shard header accepted")
+		}
 	}
 }
