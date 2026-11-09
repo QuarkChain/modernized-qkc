@@ -280,6 +280,40 @@ func TestInitSlaveNativeCompatibility(t *testing.T) {
 	}
 }
 
+func TestInitRejectsInvalidDeploymentBeforeWriting(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "deployment"},
+		{name: "master", args: []string{"--qkc.role", "master"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := initExample(t)
+			content, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content = bytes.Replace(content, []byte("NetworkID = 2"), []byte("NetworkID = 0"), 1)
+			if err := os.WriteFile(file, content, 0600); err != nil {
+				t.Fatal(err)
+			}
+			cluster, err := qkcconfig.LoadCluster(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runInit(append([]string{"--config", file}, test.args...)...); err == nil || !strings.Contains(err.Error(), "NetworkID must be positive") {
+				t.Fatalf("invalid deployment accepted: %v", err)
+			}
+			for _, cfg := range append([]qkcconfig.NodeConfig{cluster.Master}, cluster.Slaves...) {
+				if _, err := os.Stat(cfg.Node.DataDir); !os.IsNotExist(err) {
+					t.Fatalf("invalid deployment created data directory %s: %v", cfg.Node.DataDir, err)
+				}
+			}
+		})
+	}
+}
+
 func TestInitArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"extra"},

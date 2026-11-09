@@ -82,12 +82,6 @@ func initQKC(ctx *cli.Context) error {
 	} else {
 		// Master needs every G0 to construct R0. Whole-deployment initialization
 		// also validates cross-shard rules before processing individual nodes.
-		if err := cluster.LoadGenesis(); err != nil {
-			return err
-		}
-		if err := cluster.Validate(); err != nil {
-			return err
-		}
 		bundle, err = genesis.Load(cluster)
 		if err != nil {
 			return err
@@ -100,6 +94,9 @@ func initQKC(ctx *cli.Context) error {
 					break
 				}
 			}
+		}
+		if err := cluster.Validate(); err != nil {
+			return err
 		}
 	}
 	if selected != nil {
