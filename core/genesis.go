@@ -173,19 +173,6 @@ func hashAlloc(ga *types.GenesisAlloc, isUBT bool) (common.Hash, error) {
 // flushAlloc is very similar with hash, but the main difference is all the
 // generated states will be persisted into the given database.
 func flushAlloc(ga *types.GenesisAlloc, triedb *triedb.Database, tracer *tracing.Hooks) (common.Hash, error) {
-	// A previous genesis commit may have flushed state before its block batch
-	// failed. Reusing that exact state avoids adding a duplicate PathDB layer.
-	if triedb.Scheme() == rawdb.PathScheme && !triedb.IsUBT() {
-		if node := rawdb.ReadAccountTrieNode(triedb.Disk(), nil); len(node) != 0 {
-			root, err := hashAlloc(ga, false)
-			if err != nil {
-				return common.Hash{}, err
-			}
-			if crypto.Keccak256Hash(node) == root {
-				return root, nil
-			}
-		}
-	}
 	emptyRoot := types.EmptyRootHash
 	if triedb.IsUBT() {
 		emptyRoot = types.EmptyBinaryHash
