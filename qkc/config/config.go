@@ -20,7 +20,6 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -36,7 +35,6 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
@@ -78,7 +76,7 @@ type NodeConfig struct {
 	Eth             *ethconfig.Config
 
 	Role           string            `toml:"-"`
-	Root           *RootConfig       `toml:"-"` // Loaded from Master's genesis; slaves use Eth.Genesis.
+	Root           *RootGenesis      `toml:"-"` // Complete root input; slaves use Eth.Genesis.
 	ShardEndpoints map[string]string `toml:"-"` // Keyed by decimal chain ID; derived for Master.
 }
 
@@ -196,55 +194,6 @@ func LoadCluster(file string) (*ClusterConfig, error) {
 	return &cfg, nil
 }
 
-// LoadGenesis reads genesis files for every process, for whole-deployment checks
-// such as checkconfig. Loading one process uses NodeConfig.LoadGenesis instead.
-func (c *ClusterConfig) LoadGenesis() error {
-	if err := c.Master.LoadGenesis(); err != nil {
-		return fmt.Errorf("Master: %w", err)
-	}
-	for i := range c.Slaves {
-		if err := c.Slaves[i].LoadGenesis(); err != nil {
-			return fmt.Errorf("Slaves[%d]: %w", i, err)
-		}
-	}
-	return nil
-}
-
-// LoadGenesis reads only this process's GenesisFile, as resolved by LoadCluster.
-// Shards retain the native genesis in Eth.Genesis; Master retains its consensus
-// config in Root. This does not validate configurations or initialize a database.
-func (c *NodeConfig) LoadGenesis() error {
-	if c.GenesisFile == "" {
-		return errors.New("GenesisFile is required")
-	}
-	if c.Role != RoleMaster && c.Role != RoleSlave {
-		return fmt.Errorf("invalid process role %q", c.Role)
-	}
-	if c.Role == RoleSlave && c.Eth == nil {
-		return errors.New("slave requires execution settings")
-	}
-	data, err := os.ReadFile(c.GenesisFile)
-	if err != nil {
-		return err
-	}
-	if c.Role == RoleMaster {
-		var genesis struct {
-			Config *RootConfig `json:"config"`
-		}
-		if err := json.Unmarshal(data, &genesis); err != nil {
-			return fmt.Errorf("%s: %w", c.GenesisFile, err)
-		}
-		c.Root = genesis.Config
-	} else {
-		var genesis core.Genesis
-		if err := json.Unmarshal(data, &genesis); err != nil {
-			return fmt.Errorf("%s: %w", c.GenesisFile, err)
-		}
-		c.Eth.Genesis = &genesis
-	}
-	return nil
-}
-
 // SelectNode selects one process. Only Master's effective configuration includes
 // the shard endpoint map, derived from deployment entries without duplication.
 func (c *ClusterConfig) SelectNode(role string, chainID *big.Int) (*NodeConfig, error) {
@@ -289,25 +238,37 @@ func (c *NodeConfig) PrivateEndpoint() string {
 	return net.JoinHostPort(c.PrivateHost, strconv.Itoa(c.PrivatePort))
 }
 
-// Validate checks the complete deployment after genesis loading and overrides.
-// It does not load files. Genesis rules and process settings are checked separately.
+// Validate checks deployment identities and process settings after overrides.
+// It does not load or validate genesis definitions.
 func (c *ClusterConfig) Validate() error {
 	if c.NetworkID == 0 {
 		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
 	}
-	if err := c.ValidateGenesis(); err != nil {
-		return err
+	if c.Master.Role != RoleMaster || c.Master.ChainID != nil {
+		return errors.New("Master must not specify ChainID")
+	}
+	if len(c.Slaves) == 0 {
+		return errors.New("deployment must define at least one shard")
 	}
 	if err := c.Master.validateRuntime(c.NetworkID); err != nil {
 		return fmt.Errorf("Master: %w", err)
 	}
+	ids := make(map[string]bool, len(c.Slaves))
 	dirs, ipcEndpoints := make(map[string]bool), make(map[string]bool)
 	tcpEndpoints := make(map[uint64][]*net.TCPAddr)
 	for i, cfg := range append([]NodeConfig{c.Master}, c.Slaves...) {
 		if i > 0 {
+			if cfg.Role != RoleSlave {
+				return fmt.Errorf("Slaves[%d]: invalid process role %q", i-1, cfg.Role)
+			}
 			if err := cfg.validateRuntime(c.NetworkID); err != nil {
 				return fmt.Errorf("Slaves[%d]: %w", i-1, err)
 			}
+			id := cfg.ChainID.String()
+			if ids[id] {
+				return fmt.Errorf("duplicate deployed chain ID %v", cfg.ChainID)
+			}
+			ids[id] = true
 		}
 		// Geth opens Auth RPC only for registered authenticated APIs; QKC
 		// does not register any yet, so its Auth endpoint is not reserved here.
@@ -367,84 +328,12 @@ func (c *ClusterConfig) Validate() error {
 	return nil
 }
 
-// ValidateGenesis checks loaded genesis configurations and network membership.
-// It does not load files, modify configurations, or inspect process settings.
-func (c *ClusterConfig) ValidateGenesis() error {
-	if c.Master.Role != RoleMaster || c.Master.ChainID != nil {
-		return errors.New("Master must not specify ChainID")
-	}
-	if err := c.Master.ValidateGenesis(); err != nil {
-		return fmt.Errorf("Master: %w", err)
-	}
-	if len(c.Slaves) == 0 {
-		return errors.New("deployment must define at least one shard")
-	}
-	var first *params.ChainConfig
-	ids := make(map[string]bool, len(c.Slaves))
-	for i, cfg := range c.Slaves {
-		if cfg.Role != RoleSlave {
-			return fmt.Errorf("Slaves[%d]: invalid process role %q", i, cfg.Role)
-		}
-		if cfg.ChainID == nil {
-			return fmt.Errorf("Slaves[%d]: ChainID is required", i)
-		}
-		id := cfg.ChainID.String()
-		if ids[id] {
-			return fmt.Errorf("duplicate deployed chain ID %v", cfg.ChainID)
-		}
-		if err := cfg.ValidateGenesis(); err != nil {
-			return fmt.Errorf("Slaves[%d]: %w", i, err)
-		}
-		ids[id] = true
-		chain := cfg.Eth.Genesis.Config
-		if first == nil {
-			first = chain
-		} else {
-			if !slices.EqualFunc(first.QuarkChain.ChainIDs, chain.QuarkChain.ChainIDs, func(a, b *big.Int) bool { return a.Cmp(b) == 0 }) {
-				return fmt.Errorf("chain %v: genesis chain IDs must match in order across shards", chain.ChainID)
-			}
-			if err := checkSharedForks(first, chain); err != nil {
-				return err
-			}
-		}
-	}
-	if len(ids) != len(first.QuarkChain.ChainIDs) {
-		return errors.New("deployment must contain every genesis chain ID")
-	}
-	return nil
-}
-
 // canonicalHost normalizes IP literals and hostname case without resolving DNS.
 func canonicalHost(host string) string {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.Unmap().String()
 	}
 	return strings.ToLower(host)
-}
-
-// checkSharedForks preserves the shared activation heights across independently
-// supplied genesis files. It never fills or overwrites either chain's settings.
-func checkSharedForks(first, other *params.ChainConfig) error {
-	for _, fork := range []struct {
-		name string
-		a, b *big.Int
-	}{
-		{"HomesteadBlock", first.HomesteadBlock, other.HomesteadBlock},
-		{"EIP150Block", first.EIP150Block, other.EIP150Block},
-		{"EIP155Block", first.EIP155Block, other.EIP155Block},
-		{"EIP158Block", first.EIP158Block, other.EIP158Block},
-		{"ByzantiumBlock", first.ByzantiumBlock, other.ByzantiumBlock},
-		{"ConstantinopleBlock", first.ConstantinopleBlock, other.ConstantinopleBlock},
-		{"PetersburgBlock", first.PetersburgBlock, other.PetersburgBlock},
-		{"IstanbulBlock", first.IstanbulBlock, other.IstanbulBlock},
-		{"BerlinBlock", first.BerlinBlock, other.BerlinBlock},
-		{"LondonBlock", first.LondonBlock, other.LondonBlock},
-	} {
-		if (fork.a == nil) != (fork.b == nil) || (fork.a != nil && fork.b != nil && fork.a.Cmp(fork.b) != 0) {
-			return fmt.Errorf("chain %v: genesis fork %s must match chain %v", other.ChainID, fork.name, first.ChainID)
-		}
-	}
-	return nil
 }
 
 // checkShardChainID validates the EVM identifier used for execution and routing.
@@ -467,62 +356,9 @@ func load(file string, cfg interface{}) error {
 	return nil
 }
 
-// Validate checks loaded genesis rules and process settings. Only shard execution
-// settings bind Eth.NetworkId to the deployment's NetworkID.
+// Validate checks this process's deployment settings without reading genesis.
 func (c *NodeConfig) Validate(networkID uint64) error {
-	if networkID == 0 {
-		return errors.New("NetworkID must be positive; it is not inferred from an EVM chain ID")
-	}
-	if err := c.ValidateGenesis(); err != nil {
-		return err
-	}
 	return c.validateRuntime(networkID)
-}
-
-// ValidateGenesis checks this process's loaded chain identity and consensus rules.
-// It does not load files, modify configurations, or inspect runtime settings.
-func (c *NodeConfig) ValidateGenesis() error {
-	switch c.Role {
-	case RoleMaster:
-		if c.Root == nil {
-			return errors.New("root Genesis config is required; set GenesisFile")
-		}
-		if err := c.Root.ConsensusType.Check(); err != nil {
-			return err
-		}
-		if err := c.Root.PoSW.Check(); err != nil {
-			return err
-		}
-	case RoleSlave:
-		if c.ChainID == nil || c.Eth == nil {
-			return errors.New("slave requires ChainID and execution settings")
-		}
-		if err := checkShardChainID(c.ChainID); err != nil {
-			return err
-		}
-		if c.Eth.Genesis == nil || c.Eth.Genesis.Config == nil {
-			return errors.New("shard Genesis config is required; set GenesisFile")
-		}
-		chain := c.Eth.Genesis.Config
-		if err := checkShardChainID(chain.ChainID); err != nil {
-			return fmt.Errorf("Genesis: %w", err)
-		}
-		if chain.ChainID.Cmp(c.ChainID) != 0 {
-			return fmt.Errorf("Genesis ChainID %v does not match deployed ChainID %v", chain.ChainID, c.ChainID)
-		}
-		if chain.QuarkChain == nil {
-			return errors.New("Genesis QuarkChain configuration is required")
-		}
-		if err := chain.QuarkChain.ConsensusType.Check(); err != nil {
-			return err
-		}
-		if err := chain.CheckConfigForkOrder(); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("invalid process role %q", c.Role)
-	}
-	return nil
 }
 
 func (c *NodeConfig) validateRuntime(networkID uint64) error {

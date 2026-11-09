@@ -36,9 +36,10 @@ type Slave struct {
 	Shard    *shard.Shard
 }
 
-// New prepares the local genesis, creates the execution service and registers
-// native query, filter and tracing APIs. Start and close the supplied Node as
-// with geth; it manages the execution service's lifecycle.
+// New creates the execution service from a genesis prepared by
+// config.NodeConfig.LoadGenesis and registers native query, filter and tracing
+// APIs. Start and close the supplied Node as with geth; it manages the execution
+// service's lifecycle.
 // Callers must exit the process on construction or startup failure: closing a
 // Node before successful Start does not fully release execution resources.
 func New(stack *node.Node, cfg *ethconfig.Config) (*Slave, error) {

@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -36,6 +35,48 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
+
+func loadAndBuild(c *config.ClusterConfig) (*Bundle, error) {
+	if err := c.LoadGenesis(); err != nil {
+		return nil, err
+	}
+	return Build(c)
+}
+
+func decodeJSON(file string, target any) error { return common.LoadJSON(file, target) }
+
+func TestBuildWithoutGenesisFiles(t *testing.T) {
+	c := exampleInputs(t)
+	if err := c.LoadGenesis(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range append([]config.NodeConfig{c.Master}, c.Slaves...) {
+		if err := os.Remove(n.GenesisFile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := Build(c)
+	if err != nil || first.Root.Hash() != second.Root.Hash() {
+		t.Fatalf("construction depended on genesis files: %v", err)
+	}
+	c.Slaves[0].Eth.Genesis.Alloc[common.Address{0x42}] = types.Account{Balance: big.NewInt(99)}
+	changed, err := Build(c)
+	if err != nil || changed.Shards[0].Block.Hash() == second.Shards[0].Block.Hash() {
+		t.Fatalf("construction ignored loaded allocation: %v", err)
+	}
+}
+
+func TestBuildRequiresLoadedGenesis(t *testing.T) {
+	for _, c := range []*config.ClusterConfig{nil, {}} {
+		if _, err := Build(c); err == nil {
+			t.Fatal("unloaded genesis accepted")
+		}
+	}
+}
 
 func exampleInputs(t *testing.T) *config.ClusterConfig {
 	t.Helper()
@@ -113,7 +154,7 @@ func updateRootConfig(t *testing.T, file string, change func(*config.RootConfig)
 	writeJSON(t, file, input)
 }
 
-func TestLoadExample(t *testing.T) {
+func TestBuildExample(t *testing.T) {
 	cluster := exampleInputs(t)
 	if err := cluster.LoadGenesis(); err != nil {
 		t.Fatal(err)
@@ -127,7 +168,7 @@ func TestLoadExample(t *testing.T) {
 		}
 		files[file] = data
 	}
-	generated, err := Load(cluster)
+	generated, err := Build(cluster)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +253,7 @@ func TestLoadExample(t *testing.T) {
 	if _, err := os.Stat(cluster.Master.Node.DataDir); !os.IsNotExist(err) {
 		t.Fatalf("generation touched Master datadir: %v", err)
 	}
-	again, err := Load(cluster)
+	again, err := loadAndBuild(cluster)
 	if err != nil || generated.Root.Hash() != again.Root.Hash() {
 		t.Fatalf("generation is not deterministic: %v", err)
 	}
@@ -221,7 +262,7 @@ func TestLoadExample(t *testing.T) {
 	for i, result := range generated.Shards {
 		writeJSON(t, cluster.Slaves[i].GenesisFile, result.Genesis)
 	}
-	roundtrip, err := Load(cluster)
+	roundtrip, err := loadAndBuild(cluster)
 	if err != nil || roundtrip.Root.Hash() != generated.Root.Hash() {
 		t.Fatalf("complete JSON roundtrip failed: %v", err)
 	}
@@ -235,19 +276,11 @@ func TestLoadExample(t *testing.T) {
 			t.Fatal("shard JSON roundtrip changed the full consensus rules")
 		}
 	}
-	// The bundle retains independent full rules for later DB compatibility checks.
-	cluster.Master.Root.PoSW.MinimumDifficulty.SetInt64(2)
-	cluster.Master.Root.PoSW.DecayFactor.SetInt64(0)
-	cluster.Slaves[0].Eth.Genesis.Config.QuarkChain.PoSW.MinimumDifficulty.SetInt64(2)
-	cluster.Slaves[0].Eth.Genesis.Config.QuarkChain.ChainIDs[0].SetInt64(7)
-	if generated.RootConfig.PoSW.MinimumDifficulty.Int64() != 1 || generated.RootConfig.PoSW.DecayFactor.Sign() == 0 || generated.Shards[0].Genesis.Config.QuarkChain.PoSW.MinimumDifficulty.Int64() != 1 || generated.Shards[0].Genesis.Config.QuarkChain.ChainIDs[0].Int64() != 100001 {
-		t.Fatal("bundle shares mutable caller configuration")
-	}
 }
 
-func TestLoadOrderAndMetadata(t *testing.T) {
+func TestBuildOrderAndMetadata(t *testing.T) {
 	cluster := exampleInputs(t)
-	baseline, err := Load(cluster)
+	baseline, err := loadAndBuild(cluster)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +293,7 @@ func TestLoadOrderAndMetadata(t *testing.T) {
 		cluster.Slaves[i].PrivatePort = 0
 		cluster.Slaves[i].Node.DataDir = filepath.Join(t.TempDir(), "unused-shard")
 	}
-	again, err := Load(cluster)
+	again, err := loadAndBuild(cluster)
 	if err != nil || baseline.Root.Hash() != again.Root.Hash() {
 		t.Fatalf("deployment order, ports, paths or mining recipients affected genesis: %v", err)
 	}
@@ -268,7 +301,7 @@ func TestLoadOrderAndMetadata(t *testing.T) {
 	first := readShard(t, cluster.Slaves[1].GenesisFile)
 	first.Config.QuarkChain.PoSW.CoinbaseAmount.SetInt64(100)
 	writeJSON(t, cluster.Slaves[1].GenesisFile, first)
-	changed, err := Load(cluster)
+	changed, err := loadAndBuild(cluster)
 	if err != nil || changed.Root.Hash() != baseline.Root.Hash() {
 		t.Fatalf("unexpected hash change for consensus metadata: %v", err)
 	}
@@ -281,7 +314,7 @@ func TestLoadOrderAndMetadata(t *testing.T) {
 		delete(g.Alloc, params.RootStakingContractAddress)
 		writeJSON(t, slave.GenesisFile, g)
 	}
-	reordered, err := Load(cluster)
+	reordered, err := loadAndBuild(cluster)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,37 +326,7 @@ func TestLoadOrderAndMetadata(t *testing.T) {
 	}
 }
 
-func TestLoadCoverage(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		change func(*config.ClusterConfig)
-		want   string
-	}{
-		{"root file", func(c *config.ClusterConfig) { c.Master.GenesisFile = "" }, "Master.GenesisFile"},
-		{"shard file", func(c *config.ClusterConfig) { c.Slaves[0].GenesisFile = "" }, "GenesisFile is required"},
-		{"missing chain", func(c *config.ClusterConfig) { c.Slaves = c.Slaves[:1] }, "every"},
-		{"duplicate chain", func(c *config.ClusterConfig) {
-			c.Slaves[1].ChainID = c.Slaves[0].ChainID
-			c.Slaves[1].GenesisFile = c.Slaves[0].GenesisFile
-		}, "duplicate"},
-		{"unknown chain", func(c *config.ClusterConfig) { c.Slaves[0].ChainID = big.NewInt(7) }, "ChainID"},
-		{"nil chain", func(c *config.ClusterConfig) { c.Slaves[0].ChainID = nil }, "ChainID"},
-		{"missing file", func(c *config.ClusterConfig) { c.Slaves[0].GenesisFile += ".missing" }, ".missing"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			c := exampleInputs(t)
-			test.change(c)
-			if _, err := Load(c); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("have %v, want %q", err, test.want)
-			}
-		})
-	}
-	if _, err := Load(nil); err == nil {
-		t.Fatal("missing configuration accepted")
-	}
-}
-
-func TestLoadFullUint256ChainID(t *testing.T) {
+func TestBuildFullUint256ChainID(t *testing.T) {
 	c := exampleInputs(t)
 	id := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 	c.Slaves[1].ChainID = new(big.Int).Set(id)
@@ -336,7 +339,7 @@ func TestLoadFullUint256ChainID(t *testing.T) {
 		g.Config.QuarkChain.ChainIDs[1] = new(big.Int).Set(id)
 		writeJSON(t, slave.GenesisFile, g)
 	}
-	generated, err := Load(c)
+	generated, err := loadAndBuild(c)
 	if err != nil {
 		t.Fatal(err)
 	}

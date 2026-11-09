@@ -100,9 +100,6 @@ func readQKCFlags(args ...string) (*qkcconfig.NodeConfig, error) {
 			if err != nil {
 				return err
 			}
-			if err := cluster.LoadGenesis(); err != nil {
-				return err
-			}
 			return cluster.Validate()
 		},
 	}
@@ -130,8 +127,8 @@ func TestQKCConfigPrecedence(t *testing.T) {
 	if want := filepath.Join(filepath.Dir(qkcExampleCluster), "genesis/shard-100001.json"); cfg.GenesisFile != want {
 		t.Fatalf("genesis file = %s, want %s", cfg.GenesisFile, want)
 	}
-	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config.ChainID.Cmp(cfg.ChainID) != 0 {
-		t.Fatal("selected shard genesis was not loaded")
+	if cfg.Eth.Genesis != nil {
+		t.Fatal("deployment validation loaded genesis")
 	}
 
 	cfg, err = readQKCFlags("--config", qkcExampleCluster, "--qkc.role", "slave", "--qkc.chain", "100001",
@@ -304,8 +301,8 @@ func TestQKCSelectedGenesisIgnoresBrokenPeer(t *testing.T) {
 			check := newApp()
 			var out bytes.Buffer
 			check.Writer = &out
-			if err := check.Run(append([]string{"qkc", "checkconfig"}, args...)); err == nil || !strings.Contains(err.Error(), "shard-100002.json") {
-				t.Fatalf("checkconfig did not reject the broken peer genesis: %v", err)
+			if err := check.Run(append([]string{"qkc", "checkconfig"}, args...)); err != nil {
+				t.Fatalf("deployment check read genesis: %v", err)
 			}
 		})
 	}
@@ -431,7 +428,7 @@ func TestCheckQKCConfig(t *testing.T) {
 		if _, err := os.Stat(datadir); !os.IsNotExist(err) {
 			t.Fatalf("configuration check created the data directory: %v", err)
 		}
-		if want := "QuarkChain configuration is valid (" + test.want + ", network ID 2)\n"; out.String() != want {
+		if want := "QuarkChain deployment configuration is valid (" + test.want + ", network ID 2)\n"; out.String() != want {
 			t.Fatalf("unexpected validation output: %s", &out)
 		}
 	}

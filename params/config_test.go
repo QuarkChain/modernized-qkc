@@ -218,7 +218,7 @@ func TestQuarkChainConsensusType(t *testing.T) {
 }
 
 func TestQuarkChainConfigJSON(t *testing.T) {
-	for _, input := range []string{`0.125`, `"0.125"`, `1.25e-1`} {
+	for _, input := range []string{`0.125`, `"0.125"`, `1.25e-1`, `"1/8"`, `"2/16"`} {
 		t.Run(input, func(t *testing.T) {
 			config := validQuarkChainConfig()
 			require.NoError(t, json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), config))
@@ -239,7 +239,7 @@ func TestQuarkChainConfigJSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(input), &empty))
 		require.Nil(t, empty.RewardTaxRate)
 	}
-	for _, input := range []string{`"1/2"`, `"invalid"`, `true`} {
+	for _, input := range []string{`"1/0"`, `"1/"`, `"invalid"`, `""`, `true`, `[]`, `{}`} {
 		var config QuarkChainConfig
 		require.Error(t, json.Unmarshal([]byte(`{"rewardTaxRate":`+input+`}`), &config))
 	}

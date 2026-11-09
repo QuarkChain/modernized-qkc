@@ -34,7 +34,7 @@ func newApp() *cli.App {
 	app.Name = "qkc"
 	app.Flags = append(append([]cli.Flag{}, debug.Flags...), qkcConfigFlags...)
 	app.Action = runQKC
-	app.Commands = []*cli.Command{checkQKCConfigCommand}
+	app.Commands = []*cli.Command{checkQKCConfigCommand, initQKCCommand}
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)
 		return debug.Setup(ctx)

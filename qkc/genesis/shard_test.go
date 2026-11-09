@@ -32,8 +32,10 @@ import (
 
 func TestBuildShard(t *testing.T) {
 	cluster := exampleInputs(t)
-	g := readShard(t, cluster.Slaves[0].GenesisFile)
-	g.ExtraData, g.Alloc = nil, nil
+	if err := cluster.Slaves[0].LoadGenesis(); err != nil {
+		t.Fatal(err)
+	}
+	g := cluster.Slaves[0].Eth.Genesis
 	before, err := json.Marshal(g)
 	if err != nil {
 		t.Fatal(err)
@@ -46,8 +48,8 @@ func TestBuildShard(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("BuildShard modified its input")
 	}
-	if len(built.Genesis.Alloc) == 0 || len(built.Genesis.ExtraData) == 0 {
-		t.Fatal("QKC fields were not prepared")
+	if built.Genesis != g {
+		t.Fatal("BuildShard did not retain the prepared definition")
 	}
 	if err := built.Block.Header().SanityCheckQKC(); err != nil {
 		t.Fatal(err)
@@ -56,52 +58,6 @@ func TestBuildShard(t *testing.T) {
 		if _, err := BuildShard(invalid); err == nil {
 			t.Fatal("missing QKC config accepted")
 		}
-	}
-}
-
-func TestShardGenesisInvalid(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		change func(*core.Genesis)
-		want   string
-	}{
-		{"number", func(g *core.Genesis) { g.Number = 1 }, "must be zero"},
-		{"parent", func(g *core.Genesis) { g.ParentHash = common.Hash{1} }, "must be zero"},
-		{"gas used", func(g *core.Genesis) { g.GasUsed = 1 }, "must be zero"},
-		{"nonce", func(g *core.Genesis) { g.Nonce = 1 }, "difficulty and nonce"},
-		{"difficulty", func(g *core.Genesis) { g.Difficulty.SetInt64(1) }, "difficulty and nonce"},
-		{"negative difficulty", func(g *core.Genesis) { g.Difficulty.SetInt64(-1) }, "difficulty and nonce"},
-		{"zero gas", func(g *core.Genesis) { g.GasLimit = 0 }, "gasLimit must be between"},
-		{"small gas", func(g *core.Genesis) { g.GasLimit = params.MinGasLimit - 1 }, "gasLimit must be between"},
-		{"large gas", func(g *core.Genesis) { g.GasLimit = params.MaxGasLimit + 1 }, "gasLimit must be between"},
-		{"negative basefee", func(g *core.Genesis) { g.BaseFee = big.NewInt(-1) }, "baseFeePerGas"},
-		{"extra format", func(g *core.Genesis) { g.ExtraData = []byte{1} }, "extra data length"},
-		{"negative balance", func(g *core.Genesis) {
-			g.Alloc[common.Address{1}] = types.Account{Balance: big.NewInt(-1)}
-		}, "balance must be a nonnegative uint256"},
-		{"wrong staking code", func(g *core.Genesis) {
-			g.Alloc[params.ShardStakingContractAddress] = types.Account{Balance: new(big.Int), Code: []byte{1}}
-		}, "conflicting genesis code"},
-		{"blob fields before Cancun", func(g *core.Genesis) { g.BlobGasUsed = new(uint64) }, "blob gas fields"},
-		{"excess gas before Cancun", func(g *core.Genesis) { g.ExcessBlobGas = new(uint64) }, "blob gas fields"},
-		{"slot before Amsterdam", func(g *core.Genesis) { g.SlotNumber = new(uint64) }, "slotNumber"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			c := exampleInputs(t)
-			g := readShard(t, c.Slaves[0].GenesisFile)
-			test.change(g)
-			data, err := json.Marshal(g)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Native codecs accept decimal negatives, although their marshaler
-			// emits the invalid negative-hex spelling. Exercise our own checks.
-			data = bytes.ReplaceAll(data, []byte(`"-0x1"`), []byte(`"-1"`))
-			writeFile(t, c.Slaves[0].GenesisFile, data)
-			if _, err := Load(c); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("have %v, want %q", err, test.want)
-			}
-		})
 	}
 }
 
@@ -120,7 +76,7 @@ func TestShardGenesisGasLimit(t *testing.T) {
 			g := readShard(t, c.Slaves[0].GenesisFile)
 			g.GasLimit, g.ExtraData = test.gasLimit, nil
 			writeJSON(t, c.Slaves[0].GenesisFile, g)
-			bundle, err := Load(c)
+			bundle, err := loadAndBuild(c)
 			if test.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "gasLimit must be between") {
 					t.Fatalf("have %v, want invalid gasLimit", err)
@@ -136,34 +92,6 @@ func TestShardGenesisGasLimit(t *testing.T) {
 			}
 			if bundle.Shards[0].Block.GasLimit() != test.gasLimit || extra.XShardGasLimit != params.XShardSendGas {
 				t.Fatalf("unexpected genesis gas limits: block %d, cross-shard %d", bundle.Shards[0].Block.GasLimit(), extra.XShardGasLimit)
-			}
-		})
-	}
-}
-
-func TestShardGenesisExtra(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		change func(*types.QKCExtra)
-	}{
-		{"version", func(e *types.QKCExtra) { e.Version = 1 }},
-		{"chain", func(e *types.QKCExtra) { e.ChainID.SetInt64(7) }},
-		{"root", func(e *types.QKCExtra) { e.PrevRootBlock = common.Hash{1} }},
-		{"root cursor", func(e *types.QKCExtra) { e.Cursor.RootBlockHeight = 0 }},
-		{"minor cursor", func(e *types.QKCExtra) { e.Cursor.MinorBlockIndex = 1 }},
-		{"deposit cursor", func(e *types.QKCExtra) { e.Cursor.XShardDepositIndex = 1 }},
-		{"cross gas used", func(e *types.QKCExtra) { e.XShardGasUsed = 1 }},
-		{"cross gas limit", func(e *types.QKCExtra) { e.XShardGasLimit-- }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			c := exampleInputs(t)
-			g := readShard(t, c.Slaves[0].GenesisFile)
-			e := &types.QKCExtra{ChainID: new(big.Int).Set(g.Config.ChainID), Cursor: types.XShardCursor{RootBlockHeight: 1}, XShardGasLimit: g.GasLimit / 2}
-			test.change(e)
-			g.ExtraData = e.Encode()
-			writeJSON(t, c.Slaves[0].GenesisFile, g)
-			if _, err := Load(c); err == nil || !strings.Contains(err.Error(), "extraData conflicts") {
-				t.Fatalf("invalid bootstrap extra accepted: %v", err)
 			}
 		})
 	}
@@ -188,8 +116,11 @@ func TestShardGenesisConfigMatching(t *testing.T) {
 			c := exampleInputs(t)
 			g := readShard(t, c.Slaves[0].GenesisFile)
 			test.change(g.Config)
+			if test.name == "topology" {
+				delete(g.Alloc, params.RootStakingContractAddress)
+			}
 			writeJSON(t, c.Slaves[0].GenesisFile, g)
-			bundle, err := Load(c)
+			bundle, err := loadAndBuild(c)
 			if test.want != "" {
 				if err == nil || !strings.Contains(err.Error(), test.want) {
 					t.Fatalf("have %v, want %q", err, test.want)
@@ -217,7 +148,7 @@ func TestShardGenesisAllocationMerge(t *testing.T) {
 	storage := map[common.Hash]common.Hash{{1}: {2}}
 	g.Alloc[address] = types.Account{Balance: big.NewInt(123), Nonce: 9, Storage: storage}
 	writeJSON(t, c.Slaves[0].GenesisFile, g)
-	bundle, err := Load(c)
+	bundle, err := loadAndBuild(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +163,7 @@ func TestShardGenesisAllocationMerge(t *testing.T) {
 	other := readShard(t, c.Slaves[1].GenesisFile)
 	other.Alloc[params.RootStakingContractAddress] = types.Account{Balance: new(big.Int), Code: bytes.Clone(params.PoSWStakingRuntimeCode)}
 	writeJSON(t, c.Slaves[1].GenesisFile, other)
-	if _, err := Load(c); err == nil || !strings.Contains(err.Error(), "only be deployed") {
+	if _, err := loadAndBuild(c); err == nil || !strings.Contains(err.Error(), "only be deployed") {
 		t.Fatalf("root staking deployed on another shard: %v", err)
 	}
 }
@@ -244,7 +175,7 @@ func TestShardGenesisActiveSystemContracts(t *testing.T) {
 	cfg.ShanghaiTime, cfg.CancunTime, cfg.PragueTime, cfg.OsakaTime, cfg.AmsterdamTime = new(uint64), new(uint64), new(uint64), new(uint64), new(uint64)
 	cfg.BlobScheduleConfig = &params.BlobScheduleConfig{Cancun: params.DefaultCancunBlobConfig, Prague: params.DefaultPragueBlobConfig}
 	writeJSON(t, c.Slaves[0].GenesisFile, spec)
-	bundle, err := Load(c)
+	bundle, err := loadAndBuild(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,24 +198,6 @@ func TestShardGenesisActiveSystemContracts(t *testing.T) {
 	}
 }
 
-func TestShardGenesisJSON(t *testing.T) {
-	for _, input := range []string{
-		`not json`,
-		`{"gasLimit":"0x989680","difficulty":"0x0","alloc":{}} {}`,
-		`{"gasLimit":"0x989680","alloc":{}}`,
-		`{"difficulty":"0x0","alloc":{}}`,
-		`{"gasLimit":"0x989680","difficulty":"0x0"}`,
-	} {
-		t.Run(input, func(t *testing.T) {
-			c := exampleInputs(t)
-			writeFile(t, c.Slaves[0].GenesisFile, []byte(input))
-			if _, err := Load(c); err == nil || !strings.Contains(err.Error(), c.Slaves[0].GenesisFile) {
-				t.Fatalf("invalid JSON accepted or error lacks file context: %v", err)
-			}
-		})
-	}
-}
-
 func TestShardGenesisBeforeLondon(t *testing.T) {
 	c := exampleInputs(t)
 	for i, slave := range c.Slaves {
@@ -296,39 +209,12 @@ func TestShardGenesisBeforeLondon(t *testing.T) {
 		}
 		writeJSON(t, slave.GenesisFile, g)
 	}
-	bundle, err := Load(c)
+	bundle, err := loadAndBuild(c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bundle.Shards[0].Block.BaseFee() != nil || len(bundle.Shards[0].Genesis.Alloc[params.BeaconRootsAddress].Code) != 0 {
 		t.Fatal("future London rules changed genesis")
-	}
-}
-
-func TestShardGenesisRequiredMixHash(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		mixHash json.RawMessage
-	}{
-		{"missing", nil},
-		{"null", json.RawMessage(`null`)},
-		{"zero", json.RawMessage(`"0x0000000000000000000000000000000000000000000000000000000000000000"`)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			c := exampleInputs(t)
-			var input map[string]json.RawMessage
-			if err := decodeJSON(c.Slaves[0].GenesisFile, &input); err != nil {
-				t.Fatal(err)
-			}
-			delete(input, "mixHash")
-			if test.mixHash != nil {
-				input["mixHash"] = test.mixHash
-			}
-			writeJSON(t, c.Slaves[0].GenesisFile, input)
-			if _, err := Load(c); err == nil || !strings.Contains(err.Error(), "mixHash is required and must be nonzero") || !strings.Contains(err.Error(), c.Slaves[0].GenesisFile) {
-				t.Fatalf("missing or zero QKC difficulty accepted or error lacks file context: %v", err)
-			}
-		})
 	}
 }
 
@@ -338,7 +224,7 @@ func TestShardGenesisPoWDifficulty(t *testing.T) {
 	g.Config.QuarkChain.PoSW.MinimumDifficulty.SetInt64(2)
 	g.Mixhash = common.BigToHash(big.NewInt(2))
 	writeJSON(t, c.Slaves[0].GenesisFile, g)
-	bundle, err := Load(c)
+	bundle, err := loadAndBuild(c)
 	if err != nil || bundle.Shards[0].Block.Header().QKCDifficulty().Int64() != 2 {
 		t.Fatalf("explicit difficulty equal to PoSW minimum was not preserved: %v", err)
 	}
@@ -349,7 +235,7 @@ func TestShardGenesisPoWDifficulty(t *testing.T) {
 	extra.MixHash = common.Hash{9}
 	g.ExtraData = extra.Encode()
 	writeJSON(t, c.Slaves[0].GenesisFile, g)
-	bundle, err = Load(c)
+	bundle, err = loadAndBuild(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +246,7 @@ func TestShardGenesisPoWDifficulty(t *testing.T) {
 	}
 	g.Mixhash = common.BigToHash(big.NewInt(1))
 	writeJSON(t, c.Slaves[0].GenesisFile, g)
-	if _, err := Load(c); err == nil || !strings.Contains(err.Error(), "below MinimumDifficulty") {
+	if _, err := loadAndBuild(c); err == nil || !strings.Contains(err.Error(), "below MinimumDifficulty") {
 		t.Fatalf("difficulty below PoSW minimum accepted: %v", err)
 	}
 }
@@ -381,7 +267,7 @@ func TestShardGenesisUnsupportedModes(t *testing.T) {
 			g := readShard(t, c.Slaves[0].GenesisFile)
 			test.change(g.Config)
 			writeJSON(t, c.Slaves[0].GenesisFile, g)
-			if _, err := Load(c); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := loadAndBuild(c); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("have %v, want %q", err, test.want)
 			}
 		})

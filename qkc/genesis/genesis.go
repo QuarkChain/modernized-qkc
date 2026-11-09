@@ -14,21 +14,16 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package genesis constructs a QKC network's genesis blocks without opening
-// deployment databases or starting services.
+// Package genesis constructs and validates a QKC network's genesis blocks and
+// initializes caller-owned databases without starting services.
 package genesis
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/qkc/config"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
@@ -50,81 +45,42 @@ type Shard struct {
 	Block   *types.Block
 }
 
-// Load reads the GenesisFile paths of a loaded cluster and constructs its full
-// network genesis. Config.LoadCluster resolves these paths relative to the
-// deployment file. Runtime addresses, directories and coinbases do not affect
-// genesis. The inputs are not modified and all state computation is in memory.
-func Load(cluster *config.ClusterConfig) (*Bundle, error) {
-	if cluster == nil {
-		return nil, errors.New("cluster configuration is required")
+// Build constructs network genesis from definitions prepared by ClusterConfig.LoadGenesis.
+// It does not read files or change the definitions. The returned bundle retains
+// those definitions; callers must not mutate them while the bundle is in use.
+func Build(cluster *config.ClusterConfig) (*Bundle, error) {
+	if cluster == nil || cluster.Master.Root == nil || len(cluster.Slaves) == 0 {
+		return nil, errors.New("loaded network genesis is required")
 	}
-	if cluster.Master.GenesisFile == "" {
-		return nil, errors.New("Master.GenesisFile is required")
-	}
-	seed, err := readRoot(cluster.Master.GenesisFile)
-	if err != nil {
-		return nil, err
-	}
-	// Fresh containers keep loaded genesis definitions and all derived fields
-	// independent of caller-owned execution settings or previously loaded files.
-	loaded := &config.ClusterConfig{
-		Master: config.NodeConfig{
-			Role: cluster.Master.Role, ChainID: cluster.Master.ChainID,
-			GenesisFile: cluster.Master.GenesisFile, Root: seed.Config,
-		},
-		Slaves: make([]config.NodeConfig, len(cluster.Slaves)),
-	}
+	shards := make(map[string]*core.Genesis, len(cluster.Slaves))
 	for i, slave := range cluster.Slaves {
-		loaded.Slaves[i] = config.NodeConfig{
-			Role: slave.Role, ChainID: slave.ChainID, GenesisFile: slave.GenesisFile,
-			Eth: new(ethconfig.Config),
+		if slave.Eth == nil || slave.Eth.Genesis == nil || slave.Eth.Genesis.Config == nil || slave.ChainID == nil {
+			return nil, fmt.Errorf("Slaves[%d]: loaded shard genesis is required", i)
 		}
-		if err := loaded.Slaves[i].LoadGenesis(); err != nil {
-			return nil, fmt.Errorf("Slaves[%d]: %w", i, err)
+		shards[slave.ChainID.String()] = slave.Eth.Genesis
+	}
+	first := cluster.Slaves[0].Eth.Genesis.Config.QuarkChain
+	if first == nil {
+		return nil, errors.New("loaded QuarkChain configuration is required")
+	}
+	bundle := &Bundle{RootConfig: cluster.Master.Root.RootConfig, Shards: make([]Shard, len(first.ChainIDs))}
+	headers := make([]*types.Header, len(first.ChainIDs))
+	for i, id := range first.ChainIDs {
+		spec := shards[id.String()]
+		if spec == nil {
+			return nil, fmt.Errorf("chain %v: loaded shard genesis is required", id)
 		}
-	}
-	if err := loaded.ValidateGenesis(); err != nil {
-		return nil, err
-	}
-	shards := make(map[string]*config.NodeConfig, len(loaded.Slaves))
-	for i := range loaded.Slaves {
-		slave := &loaded.Slaves[i]
-		shards[slave.ChainID.String()] = slave
-	}
-	order := loaded.Slaves[0].Eth.Genesis.Config.QuarkChain.ChainIDs
-	bundle := &Bundle{RootConfig: seed.Config, Shards: make([]Shard, len(order))}
-	headers := make([]*types.Header, len(order))
-	for i, id := range order {
-		slave := shards[id.String()]
-		shard, err := buildShard(slave.Eth.Genesis)
+		shard, err := buildShard(spec)
 		if err != nil {
-			return nil, fmt.Errorf("chain %v (%s): %w", id, slave.GenesisFile, err)
+			return nil, fmt.Errorf("chain %v: %w", id, err)
 		}
 		bundle.Shards[i] = *shard
 		headers[i] = shard.Block.Header()
 	}
-	bundle.Root, err = buildRoot(cluster.Master.GenesisFile, seed, headers)
+	root, err := buildRoot(cluster.Master.Root, headers)
 	if err != nil {
 		return nil, err
 	}
+	bundle.Root = root
 	return bundle, nil
-}
-
-// decodeJSON requires exactly one JSON document. Native types retain their
-// existing JSON codecs; plain input structs additionally reject unknown fields.
-func decodeJSON(file string, target any) error {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return fmt.Errorf("%s: %w", file, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return fmt.Errorf("%s: expected a single JSON document", file)
-	}
-	return nil
 }
