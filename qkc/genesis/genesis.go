@@ -83,7 +83,7 @@ func Load(cluster *config.ClusterConfig) (*Bundle, error) {
 			return nil, fmt.Errorf("Slaves[%d]: %w", i, err)
 		}
 	}
-	if err := loaded.ValidateGenesis(); err != nil {
+	if err := loaded.ValidateGenesisConfig(); err != nil {
 		return nil, err
 	}
 	shards := make(map[string]*config.NodeConfig, len(loaded.Slaves))
