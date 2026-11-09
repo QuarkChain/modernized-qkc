@@ -19,6 +19,7 @@ package params
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 )
 
 // MarshalJSON emits the reward tax rate as an exact, unquoted decimal number.
@@ -34,24 +35,31 @@ func (c QuarkChainConfig) MarshalJSON() ([]byte, error) {
 	}{(*configJSON)(&c), tax})
 }
 
-// UnmarshalJSON accepts a decimal number or numeric string for the reward tax
-// rate, parsed exactly without float64. Omitted or null rates leave the existing
-// value unchanged. Call Check separately to validate the consensus rules.
+// UnmarshalJSON accepts decimal numbers and strings, including the rational
+// strings persisted by older versions, without float64 rounding. Omitted or null
+// rates leave the existing value unchanged. Call Check separately to validate
+// the consensus rules.
 func (c *QuarkChainConfig) UnmarshalJSON(input []byte) error {
 	type configJSON QuarkChainConfig
 	config := configJSON(*c)
 	dec := struct {
 		*configJSON
-		RewardTaxRate *json.Number `json:"rewardTaxRate"`
+		RewardTaxRate *json.RawMessage `json:"rewardTaxRate"`
 	}{configJSON: &config}
 	if err := json.Unmarshal(input, &dec); err != nil {
 		return err
 	}
-	tax, err := ratioFromJSON(dec.RewardTaxRate)
-	if err != nil {
-		return fmt.Errorf("quarkchain: rewardTaxRate: %w", err)
-	}
 	if dec.RewardTaxRate != nil {
+		value := string(*dec.RewardTaxRate)
+		if value[0] == '"' {
+			if err := json.Unmarshal(*dec.RewardTaxRate, &value); err != nil {
+				return fmt.Errorf("quarkchain: rewardTaxRate: %w", err)
+			}
+		}
+		tax, ok := new(big.Rat).SetString(value)
+		if !ok {
+			return fmt.Errorf("quarkchain: rewardTaxRate: invalid ratio %q", value)
+		}
 		config.RewardTaxRate = tax
 	}
 	*c = QuarkChainConfig(config)
