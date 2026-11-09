@@ -215,11 +215,12 @@ For read-only consensus configuration checks without process settings, use
 configurations. These do not validate genesis block fields or allocations, or
 inspect network IDs, endpoints or data directories.
 
-To construct blocks in memory, call `genesis.Load(cluster)` from
-[qkc/genesis](../genesis). It reads the referenced files, validates their rules,
-and returns root and shard Genesis blocks in the shared `chainIds` order, along
-with their full consensus configurations. It leaves the caller's settings and
-input files unchanged. Persistent database initialization remains a separate step.
+After `cluster.LoadGenesis()`, call `genesis.Build(cluster)` from
+[qkc/genesis](../genesis) to construct blocks in memory. It consumes the prepared
+root and shard definitions without reading files or modifying them, and returns
+blocks in the shared `chainIds` order. The bundle retains the loaded definitions;
+do not mutate them while the bundle is in use. Persistent initialization remains
+separate.
 
 ## File formats
 

@@ -71,7 +71,7 @@ func TestGenesisBuildAndImportFirstBlock(t *testing.T) {
 				}
 				writeJSON(t, slave.GenesisFile, g)
 			}
-			bundle, err := Load(cluster)
+			bundle, err := loadAndBuild(cluster)
 			if err != nil {
 				t.Fatal(err)
 			}
