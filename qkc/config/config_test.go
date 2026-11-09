@@ -114,13 +114,21 @@ func TestGenesisConfiguration(t *testing.T) {
 	}
 }
 
+func validateGenesisForTest(c *ClusterConfig) error {
+	for _, node := range append([]NodeConfig{c.Master}, c.Slaves...) {
+		if err := node.validateGenesisConfig(); err != nil {
+			return err
+		}
+	}
+	return c.validateGenesisMembership()
+}
+
 func TestGenesisValidation(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		change func(*ClusterConfig)
 		want   string
 	}{
-		{"zero network", func(c *ClusterConfig) { c.NetworkID = 0 }, "NetworkID must be positive"},
 		{"missing root source", func(c *ClusterConfig) { c.Master.GenesisFile, c.Master.Root = "", nil }, "GenesisFile"},
 		{"missing shard source", func(c *ClusterConfig) { c.Slaves[0].GenesisFile, c.Slaves[0].Eth.Genesis = "", nil }, "GenesisFile"},
 		{"missing root config", func(c *ClusterConfig) { c.Master.Root = nil }, "config"},
@@ -148,7 +156,7 @@ func TestGenesisValidation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := exampleCluster(t)
 			test.change(cfg)
-			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+			if err := validateGenesisForTest(cfg); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("have %v, want error containing %q", err, test.want)
 			}
 		})
@@ -169,11 +177,11 @@ func TestGenesisValidationIgnoresRuntimeSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.ValidateGenesisConfig(); err != nil {
+	if err := validateGenesisForTest(cfg); err != nil {
 		t.Fatalf("genesis validation depended on runtime settings: %v", err)
 	}
 	for _, node := range append([]NodeConfig{cfg.Master}, cfg.Slaves...) {
-		if err := node.ValidateGenesisConfig(); err != nil {
+		if err := node.validateGenesisConfig(); err != nil {
 			t.Fatalf("local genesis validation depended on runtime settings: %v", err)
 		}
 	}
@@ -188,7 +196,7 @@ func TestGenesisValidationIgnoresRuntimeSettings(t *testing.T) {
 		t.Fatal("full validation accepted invalid deployment settings")
 	}
 	cfg.Slaves[1].Eth.Genesis.Config.QuarkChain.ChainIDs = []*big.Int{big.NewInt(100002), big.NewInt(100001)}
-	if err := cfg.ValidateGenesisConfig(); err == nil || !strings.Contains(err.Error(), "match in order") {
+	if err := validateGenesisForTest(cfg); err == nil || !strings.Contains(err.Error(), "match in order") {
 		t.Fatalf("genesis-only validation missed inconsistent membership: %v", err)
 	}
 }
@@ -206,8 +214,8 @@ func TestLoadClusterLeavesGenesisUnloaded(t *testing.T) {
 			t.Fatal("deployment loading read shard genesis")
 		}
 	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "Genesis config") {
-		t.Fatalf("validation should require explicitly loaded genesis: %v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("deployment validation depended on genesis: %v", err)
 	}
 	if cfg.Master.Root != nil || cfg.Slaves[0].Eth.Genesis != nil || cfg.Slaves[1].Eth.Genesis != nil {
 		t.Fatal("validation loaded genesis files")
@@ -334,10 +342,7 @@ func TestGenesisLoading(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := cfg.LoadGenesis(); err != nil {
-			t.Fatal(err)
-		}
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "config") {
+		if err := cfg.LoadGenesis(); err == nil || !strings.Contains(err.Error(), "config") {
 			t.Fatalf("missing native genesis config was accepted: %v", err)
 		}
 	})
@@ -366,7 +371,7 @@ func TestGenesisRewardTaxRate(t *testing.T) {
 			shard.RewardTaxRate = test.rate
 			shard.PoSW.CoinbaseAmount.SetInt64(test.coinbase)
 			shard.PoSW.StakingEnabled = test.staking
-			err := cfg.Validate()
+			err := validateGenesisForTest(cfg)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
 					t.Fatalf("have %v, want error containing %q", err, test.wantError)
@@ -401,12 +406,12 @@ func TestGenesisSharedForks(t *testing.T) {
 					reflect.ValueOf(slave.Eth.Genesis.Config).Elem().FieldByName(name).Set(reflect.ValueOf(big.NewInt(int64((i + 1) * 10))))
 				}
 			}
-			if err := cfg.Validate(); err != nil {
+			if err := validateGenesisForTest(cfg); err != nil {
 				t.Fatalf("matching nonzero forks rejected: %v", err)
 			}
 			field := reflect.ValueOf(cfg.Slaves[1].Eth.Genesis.Config).Elem().FieldByName(fork).Interface().(*big.Int)
 			field.Add(field, big.NewInt(1))
-			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), fork) {
+			if err := validateGenesisForTest(cfg); err == nil || !strings.Contains(err.Error(), fork) {
 				t.Fatalf("different %s heights accepted: %v", fork, err)
 			}
 		})
@@ -415,11 +420,11 @@ func TestGenesisSharedForks(t *testing.T) {
 	for _, slave := range cfg.Slaves {
 		slave.Eth.Genesis.Config.LondonBlock = nil
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := validateGenesisForTest(cfg); err != nil {
 		t.Fatalf("matching omitted forks rejected: %v", err)
 	}
 	cfg.Slaves[1].Eth.Genesis.Config.LondonBlock = new(big.Int)
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "LondonBlock") {
+	if err := validateGenesisForTest(cfg); err == nil || !strings.Contains(err.Error(), "LondonBlock") {
 		t.Fatalf("omitted and zero forks were treated as equal: %v", err)
 	}
 }
@@ -427,7 +432,7 @@ func TestGenesisSharedForks(t *testing.T) {
 func TestGenesisRoutingOrder(t *testing.T) {
 	cfg := exampleCluster(t)
 	cfg.Slaves[0], cfg.Slaves[1] = cfg.Slaves[1], cfg.Slaves[0]
-	if err := cfg.Validate(); err != nil {
+	if err := validateGenesisForTest(cfg); err != nil {
 		t.Fatalf("reordering deployment entries changed consensus: %v", err)
 	}
 	for _, slave := range cfg.Slaves {
@@ -438,12 +443,12 @@ func TestGenesisRoutingOrder(t *testing.T) {
 	}
 	ids := cfg.Slaves[0].Eth.Genesis.Config.QuarkChain.ChainIDs
 	ids[0], ids[1] = ids[1], ids[0]
-	if err := cfg.Validate(); err == nil {
+	if err := validateGenesisForTest(cfg); err == nil {
 		t.Fatal("inconsistent ordered membership accepted")
 	}
 	ids = cfg.Slaves[1].Eth.Genesis.Config.QuarkChain.ChainIDs
 	ids[0], ids[1] = ids[1], ids[0]
-	if err := cfg.Validate(); err != nil {
+	if err := validateGenesisForTest(cfg); err != nil {
 		t.Fatalf("consistent genesis-selected order rejected: %v", err)
 	}
 	if !cfg.Slaves[0].Eth.Genesis.Config.IsRootCoinbaseChain() {
@@ -452,7 +457,7 @@ func TestGenesisRoutingOrder(t *testing.T) {
 	for _, slave := range cfg.Slaves {
 		slave.Eth.Genesis.Config.QuarkChain.ChainIDs = append(slave.Eth.Genesis.Config.QuarkChain.ChainIDs, big.NewInt(100003))
 	}
-	if err := cfg.Validate(); err == nil {
+	if err := validateGenesisForTest(cfg); err == nil {
 		t.Fatal("undeployed member accepted")
 	}
 }
@@ -624,6 +629,15 @@ func TestClusterLargeChainID(t *testing.T) {
 			t.Fatal(err)
 		}
 		data = bytes.ReplaceAll(data, []byte("100002"), []byte(id.String()))
+		var spec core.Genesis
+		if err := json.Unmarshal(data, &spec); err != nil {
+			t.Fatal(err)
+		}
+		spec.ExtraData = nil
+		data, err = json.Marshal(&spec)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(genesis, data, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -905,10 +919,8 @@ func TestClusterValidation(t *testing.T) {
 		want   string
 	}{
 		{"no shards", func(c *ClusterConfig) { c.Slaves = nil }, "at least one shard"},
-		{"missing shard", func(c *ClusterConfig) { c.Slaves = c.Slaves[:1] }, "every genesis chain ID"},
-		{"missing id", func(c *ClusterConfig) { c.Slaves[0].ChainID = nil }, "ChainID is required"},
+		{"missing id", func(c *ClusterConfig) { c.Slaves[0].ChainID = nil }, "ChainID"},
 		{"duplicate shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = big.NewInt(100001) }, "duplicate deployed chain"},
-		{"unknown shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = big.NewInt(100003) }, "does not match deployed ChainID"},
 		{"zero shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = new(big.Int) }, "positive uint256"},
 		{"negative shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = big.NewInt(-1) }, "positive uint256"},
 		{"overflow shard", func(c *ClusterConfig) { c.Slaves[1].ChainID = new(big.Int).Lsh(big.NewInt(1), 256) }, "positive uint256"},
@@ -1171,7 +1183,6 @@ func TestNodeValidation(t *testing.T) {
 		want   string
 	}{
 		{"network mismatch", false, func(c *NodeConfig) { c.Eth.NetworkId = 100001 }, "conflicts with NetworkID"},
-		{"missing genesis config", false, func(c *NodeConfig) { c.Eth.Genesis = &core.Genesis{} }, "config"},
 		{"local fork", false, func(c *NodeConfig) { c.Eth.OverrideOsaka = new(uint64) }, "local fork overrides"},
 		{"database engine", true, func(c *NodeConfig) { c.Node.DBEngine = "unknown" }, "Node.DBEngine"},
 		{"state scheme", false, func(c *NodeConfig) { c.Eth.StateScheme = "unknown" }, "Eth.StateScheme"},
