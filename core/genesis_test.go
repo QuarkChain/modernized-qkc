@@ -153,6 +153,66 @@ func TestSetupGenesisQuarkChainConfig(t *testing.T) {
 	}
 }
 
+func TestSetupGenesisQuarkChainLegacyJSON(t *testing.T) {
+	for _, scheme := range []string{rawdb.HashScheme, rawdb.PathScheme} {
+		for _, name := range []string{"stored genesis", "same genesis", "changed config"} {
+			t.Run(scheme+"/"+name, func(t *testing.T) {
+				db := rawdb.NewMemoryDatabase()
+				defer db.Close()
+				tdb := triedb.NewDatabase(db, newDbConfig(scheme))
+				defer tdb.Close()
+				genesis := &Genesis{
+					Config: genesisConfig(10001), GasLimit: 12_000_000,
+					Difficulty: big.NewInt(1), Alloc: PoSWStakingContractAllocs(params.NewTestQuarkChainConfig(10001)),
+				}
+				block := genesis.MustCommit(db, tdb)
+				// The legacy codec used big.Rat's rational-string encoding.
+				type legacyQuarkChainConfig params.QuarkChainConfig
+				legacy, err := json.Marshal(struct {
+					*params.ChainConfig
+					QuarkChain *legacyQuarkChainConfig `json:"quarkchain"`
+				}{genesis.Config, (*legacyQuarkChainConfig)(genesis.Config.QuarkChain)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Put(append([]byte("ethereum-config-"), block.Hash().Bytes()...), legacy); err != nil {
+					t.Fatal(err)
+				}
+				// SetupGenesisBlock needs only the header; no executed blocks are required.
+				head := block.Header()
+				head.Number = big.NewInt(100)
+				rawdb.WriteHeader(db, head)
+				rawdb.WriteHeadHeaderHash(db, head.Hash())
+				rawdb.WriteHeadBlockHash(db, head.Hash())
+				rawdb.WriteHeadFastBlockHash(db, head.Hash())
+
+				var next *Genesis
+				if name != "stored genesis" {
+					next = genesis.copy()
+				}
+				if name == "changed config" {
+					next.Config = genesisConfig(10001)
+					next.Config.QuarkChain.RewardTaxRate = big.NewRat(1, 4)
+				}
+				_, _, compatErr, err := SetupGenesisBlock(db, tdb, next)
+				if name == "changed config" {
+					if !errors.Is(err, errQuarkChainConfigMismatch) || compatErr != nil {
+						t.Errorf("changed legacy configuration was not rejected: %v, %v", compatErr, err)
+					}
+				} else if err != nil || compatErr != nil {
+					t.Errorf("legacy configuration rejected: %v, %v", compatErr, err)
+				}
+				if rawdb.ReadHeadHeaderHash(db) != head.Hash() || rawdb.ReadHeadBlockHash(db) != head.Hash() || rawdb.ReadHeadFastBlockHash(db) != head.Hash() {
+					t.Error("reopening legacy configuration changed a stored head hash")
+				}
+				if stored := rawdb.ReadChainConfig(db, block.Hash()); !reflect.DeepEqual(stored, genesis.Config) {
+					t.Error("reopening legacy configuration changed the stored configuration")
+				}
+			})
+		}
+	}
+}
+
 func testSetupGenesis(t *testing.T, scheme string) {
 	var (
 		customghash = common.HexToHash("0x89c99d90b79719238d2645c7642f2c9295246e80775b38cfd162b696817fbd50")
