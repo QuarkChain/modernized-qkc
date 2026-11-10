@@ -168,8 +168,9 @@ type RootEngine interface {
 	// These base values do not include any staking discount used for the seal.
 	Prepare(chain RootChainReader, header *qkctypes.RootBlockHeader) error
 
-	// Finalize returns a new block with the calculated CoinbaseAmount. The
-	// caller supplies the shard-header commitment; the input block is unchanged.
+	// Finalize prepares a root block for mining by setting CoinbaseAmount and
+	// recomputing ShardHeaderHash, keeping the existing Coinbase address. It
+	// updates and returns the input block; errors leave the block unchanged.
 	Finalize(chain RootChainReader, block *qkctypes.RootBlock) (*qkctypes.RootBlock, error)
 
 	// SealHash returns the root header hash used for mining and signing,

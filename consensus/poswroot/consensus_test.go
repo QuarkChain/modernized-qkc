@@ -214,8 +214,8 @@ func TestNew(t *testing.T) {
 	}
 }
 
-// Finalize and body verification must agree on rewards. Finalize may replace
-// only the amount, preserving the caller's block, commitment and cached values.
+// Finalize updates the input block's reward and shard commitment in place while
+// preserving its coinbase. Body verification must agree on the resulting reward.
 func TestPrepareFinalizeAndVerify(t *testing.T) {
 	f := newFixture(t, nil)
 	a := f.shard(10001, 1)
@@ -225,6 +225,7 @@ func TestPrepareFinalizeAndVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := qkctypes.NewRootBlock(header, qkctypes.ShardBlockHeaders{a, b}, []byte("tracking"))
+	shardHash := input.ShardHeaderHash()
 	before, _ := input.MarshalSSZ()
 	oldHash, oldSize := input.Hash(), input.Size()
 	block, err := f.engine.Finalize(f.chain, input)
@@ -232,28 +233,31 @@ func TestPrepareFinalizeAndVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 101 untaxed subsidy + floor((1+2)/3), rather than taxing each shard amount.
-	if block.CoinbaseAmount().Uint64() != 102 || block.Coinbase() != header.Coinbase || block.ShardHeaderHash() != input.ShardHeaderHash() {
-		t.Fatal("Finalize changed fields other than the amount or rounded each shard separately")
+	if block.CoinbaseAmount().Uint64() != 102 || block.Coinbase() != header.Coinbase || block.ShardHeaderHash() != shardHash {
+		t.Fatal("Finalize set the wrong reward, coinbase or shard commitment")
 	}
 	if err := f.verifyUnsealed(block); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := input.MarshalSSZ()
-	if !bytes.Equal(before, after) || oldHash != input.Hash() || oldSize != input.Size() || block.Hash() == oldHash {
-		t.Fatal("Finalize changed the input block or reused its cached hash")
+	if block != input || bytes.Equal(before, after) || oldHash == input.Hash() || oldSize != input.Size() {
+		t.Fatal("Finalize did not update the input block in place or refresh its cached hash")
 	}
 	if author, err := f.engine.Author(block.Header()); err != nil || author != header.Coinbase {
 		t.Fatal("Author did not return coinbase")
 	}
-	// Finalize only sets the amount; body verification checks the commitment.
+	// Validation rejects an incorrect commitment; assembly recomputes it.
 	bad := changeHeader(input, func(h *qkctypes.RootBlockHeader) { h.ShardHeaderHash = common.Hash{1} })
 	badHash := bad.Hash()
-	finalized, err := f.engine.Finalize(f.chain, bad)
-	if err != nil || finalized == nil || finalized.ShardHeaderHash() != bad.ShardHeaderHash() || bad.Hash() != badHash {
-		t.Fatal("Finalize changed the commitment or its input")
-	}
-	if err := f.verifyUnsealed(finalized); err == nil {
+	if err := f.verifyUnsealed(bad); err == nil {
 		t.Fatal("invalid commitment accepted")
+	}
+	finalized, err := f.engine.Finalize(f.chain, bad)
+	if err != nil || finalized != bad || finalized.ShardHeaderHash() != shardHash || bad.Hash() == badHash {
+		t.Fatal("Finalize did not recompute the commitment and hash in place")
+	}
+	if err := f.verifyUnsealed(finalized); err != nil {
+		t.Fatalf("finalized block rejected: %v", err)
 	}
 }
 
@@ -531,8 +535,14 @@ func TestDifficultyAndRewardOverflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	block := qkctypes.NewRootBlock(header, qkctypes.ShardBlockHeaders{shard}, nil)
+	before, _ := block.MarshalSSZ()
+	oldHash := block.Hash()
 	if result, err := f.engine.Finalize(f.chain, block); err == nil || result != nil {
 		t.Fatal("Finalize accepted amount overflow")
+	}
+	after, _ := block.MarshalSSZ()
+	if !bytes.Equal(before, after) || block.Hash() != oldHash {
+		t.Fatal("failed Finalize changed its input block")
 	}
 	if err := f.verifyUnsealed(block); err == nil {
 		t.Fatal("body verification accepted amount overflow")

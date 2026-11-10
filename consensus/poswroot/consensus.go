@@ -316,8 +316,9 @@ func (p *PoSW) Prepare(chain consensus.RootChainReader, header *qkctypes.RootBlo
 	return nil
 }
 
-// Finalize follows pyquarkchain's root reward calculation. Unlike the block's
-// assembler Finalize, this method only replaces CoinbaseAmount in a new block.
+// Finalize prepares a root block for mining. It calculates the reward, then calls
+// RootBlock.Finalize to update the amount and shard-header commitment in place,
+// keeping the block's coinbase address. Errors leave the block unchanged.
 func (p *PoSW) Finalize(chain consensus.RootChainReader, block *qkctypes.RootBlock) (*qkctypes.RootBlock, error) {
 	if block == nil {
 		return nil, errors.New("missing root block")
@@ -333,8 +334,7 @@ func (p *PoSW) Finalize(chain consensus.RootChainReader, block *qkctypes.RootBlo
 	if err != nil {
 		return nil, err
 	}
-	header.CoinbaseAmount = *amount
-	return block.WithSeal(header), nil
+	return block.Finalize(amount, &header.Coinbase), nil
 }
 
 func (p *PoSW) SealHash(header *qkctypes.RootBlockHeader) common.Hash {
@@ -352,7 +352,7 @@ func (p *PoSW) Close() error { return p.EthashVerifier.Close() }
 // coinbaseAmount requires reported shard amounts, sums them, then applies t/(1-t)
 // and rounds once. A non-nil amount identifies a validated shard block.
 // The root's own decayed subsidy is added without reward tax.
-// Finalize and verifyBody share this calculation so creation and validation agree.
+// Finalize and verifyBody share this read-only calculation so their rewards agree.
 func (p *PoSW) coinbaseAmount(chain consensus.RootChainReader, block *qkctypes.RootBlock) (*uint256.Int, error) {
 	shardAmount := new(big.Int)
 	for i, header := range block.ShardBlockHeaders() {
