@@ -139,6 +139,8 @@ func TestLoadShardGenesisConfig(t *testing.T) {
 		{name: "slot", from: "Nonce = 0", to: "Nonce = 0\nSlotNumber = 0", want: "slot number requires Amsterdam"},
 		{name: "merge", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nTerminalTotalDifficulty = \"0\"", want: "Ethereum Merge transition"},
 		{name: "UBT", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nEnableUBTAtGenesis = true", want: "does not support UBT"},
+		{name: "UBT at genesis", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nShanghaiTime = 0\nUBTTime = 0", want: "does not support UBT"},
+		{name: "future UBT", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nShanghaiTime = 0\nUBTTime = 1", want: "does not support UBT"},
 		{name: "staking code", from: "Code = [96", to: "Code = [0", want: "unexpected genesis code hash"},
 		{name: "database only", from: inline, to: strings.Split(inline, "[Eth.Genesis]")[0]},
 		{name: "ethereum", from: inline, to: "[Eth.Genesis]\nDifficulty = \"0\"\n[Eth.Genesis.Config]\nChainID = \"1337\"\nTerminalTotalDifficulty = \"0\"\n"},

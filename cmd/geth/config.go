@@ -157,7 +157,7 @@ func validateShardGenesis(g *core.Genesis) error {
 	if config.Clique != nil || config.TerminalTotalDifficulty != nil || config.MergeNetsplitBlock != nil {
 		return errors.New("quarkchain genesis cannot specify Clique or an Ethereum Merge transition")
 	}
-	if config.EnableUBTAtGenesis || config.IsUBT(common.Big0, g.Timestamp) {
+	if config.EnableUBTAtGenesis || config.UBTTime != nil {
 		return errors.New("quarkchain genesis does not support UBT")
 	}
 	if config.DepositContractAddress != (common.Address{}) {
