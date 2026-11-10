@@ -283,6 +283,13 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		utils.RegisterEthStatsService(stack, backend, cfg.Ethstats.URL)
 	}
 
+	if backend.ChainConfig().QuarkChain != nil {
+		server := stack.Server()
+		server.MaxPeers, server.ListenAddr = 0, ""
+		server.NoDial, server.NoDiscovery = true, true
+		return stack
+	}
+
 	// Configure synchronization override service
 	syncConfig := syncer.Config{
 		ExitWhenSynced: ctx.Bool(utils.ExitWhenSyncedFlag.Name),

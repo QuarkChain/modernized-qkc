@@ -303,7 +303,7 @@ func prepare(ctx *cli.Context) {
 		log.Info("Starting Geth on Hoodi testnet...")
 
 	case !ctx.IsSet(utils.NetworkIdFlag.Name):
-		log.Info("Starting Geth on Ethereum mainnet...")
+		log.Info("Starting Geth...")
 	}
 }
 

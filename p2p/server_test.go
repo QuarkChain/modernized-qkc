@@ -90,6 +90,38 @@ func startTestServer(t *testing.T, remoteKey *ecdsa.PublicKey, pf func(*Peer)) *
 	return server
 }
 
+func TestServerDisabled(t *testing.T) {
+	srv := &Server{Config: Config{
+		PrivateKey:  newkey(),
+		NoDial:      true,
+		NoDiscovery: true,
+	}}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	if srv.running || srv.listener != nil || srv.LocalNode() != nil || srv.dialsched != nil {
+		t.Fatal("disabled server started network services")
+	}
+	// Administrative operations must not dial, panic or wait for a server loop.
+	done := make(chan int, 1)
+	go func() {
+		srv.AddPeer(srv.Self())
+		srv.RemovePeer(srv.Self())
+		srv.AddTrustedPeer(srv.Self())
+		srv.RemoveTrustedPeer(srv.Self())
+		done <- srv.PeerCount() + len(srv.PeersInfo())
+	}()
+	select {
+	case peers := <-done:
+		if peers != 0 {
+			t.Fatalf("disabled server has %d peers", peers)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disabled server blocked an administrative operation")
+	}
+}
+
 func TestServerListen(t *testing.T) {
 	// start the test server
 	connected := make(chan *Peer)

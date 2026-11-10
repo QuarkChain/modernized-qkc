@@ -20,8 +20,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/params"
 )
 
 var customGenesisTests = []struct {
@@ -94,6 +98,81 @@ func TestCustomGenesis(t *testing.T) {
 			"--exec", tt.query, "console")
 		geth.ExpectRegexp(tt.result)
 		geth.ExpectExit()
+	}
+}
+
+// TestShardGenesis exercises native TOML initialization and database-only restart
+// without Ethereum's sync protocols or Beacon Engine API.
+func TestShardGenesis(t *testing.T) {
+	t.Parallel()
+	example := filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml")
+	var cfg gethConfig
+	if err := loadConfig(example, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config == nil || cfg.Eth.Genesis.Config.QuarkChain == nil {
+		t.Fatal("example is missing shard genesis configuration")
+	}
+	contents, err := os.ReadFile(example)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline := string(contents)
+	withoutGenesis, _, ok := strings.Cut(inline, "[Eth.Genesis]")
+	if !ok {
+		t.Fatal("example is missing the Genesis table")
+	}
+	datadir := t.TempDir()
+	configFile := filepath.Join(t.TempDir(), "shard.toml")
+	query := fmt.Sprintf(`[eth.chainId(), net.version, eth.blockNumber,
+		eth.getBlock(0).hash, eth.getBlock(0).gasLimit,
+		eth.getCode(%q).length, eth.getCode(%q).length,
+		Object.keys(admin.nodeInfo.protocols).length, rpc.modules.engine === undefined,
+		net.listening, net.peerCount, admin.peers.length,
+		eth.getBalance("0x71562b71999873DB5b286dF957af199Ec94617F7").eq("1000000000000000000000000"),
+		eth.getBalance("0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF").eq("1000000000000000000000000")].join(":")`,
+		params.RootStakingContractAddress.Hex(), params.ShardStakingContractAddress.Hex())
+	// Pin the devnet genesis, including its funded test accounts.
+	want := fmt.Sprintf("0x186a1:2:0:0x60735840571556edc1765b4d0e1b97d269557f0c716dbbf4755298daf24aac22:12000000:%d:%d:0:true:true:0:0:true:true",
+		2+len(params.PoSWStakingRuntimeCode)*2, 2+len(params.PoSWStakingRuntimeCode)*2)
+	for _, tc := range []struct {
+		name   string
+		config string
+		err    string
+	}{
+		{name: "initialize", config: inline},
+		{name: "restart", config: inline},
+		{name: "different genesis", config: strings.Replace(inline, "GasLimit = 12000000", "GasLimit = 13000000", 1), err: "database contains incompatible genesis"},
+		{name: "different rules", config: strings.Replace(inline, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", 1), err: "quarkchain config differs from stored config"},
+		{name: "database only", config: withoutGenesis},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(configFile, []byte(tc.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			geth := runGeth(t, "--config", configFile, "--datadir", datadir,
+				"--cache", "16", "--http.port", "0", "--authrpc.port", "0",
+				"--nat", "none", "--ipcdisable", "--exec", query, "console")
+			if tc.err != "" {
+				geth.ExpectRegexp("Fatal: .*" + regexp.QuoteMeta(tc.err) + ".*\n")
+			} else {
+				geth.Expect(fmt.Sprintf("%q\n", want))
+			}
+			geth.ExpectExit()
+			if (geth.ExitStatus() != 0) != (tc.err != "") {
+				t.Fatalf("exit status %d, expected failure: %t", geth.ExitStatus(), tc.err != "")
+			}
+			if tc.err == "" {
+				logs := geth.StderrText()
+				if strings.Contains(logs, "Starting Geth on Ethereum mainnet") ||
+					strings.Contains(logs, "Started P2P networking") || !strings.Contains(logs, "P2P networking disabled") {
+					t.Fatalf("unexpected shard startup logs:\n%s", logs)
+				}
+				if _, err := os.Stat(filepath.Join(datadir, "geth", "nodes")); !os.IsNotExist(err) {
+					t.Fatalf("shard created a P2P node database: %v", err)
+				}
+			}
+		})
 	}
 }
 

@@ -1,5 +1,76 @@
 # QKC deployment configuration
 
+## Start local devnet shards with geth
+
+The [devnet](devnet) directory contains a self-contained geth configuration for
+each shard, including its node settings, Genesis allocation and consensus rules.
+Startup loads the configuration selected by `--config`. Both configurations use
+geth's native `[Node]`, `[Eth]`, and `[Eth.Genesis]` sections. No `geth init` command is needed.
+
+```sh
+make geth
+
+# Run each shard in a separate terminal, from the repository root.
+build/bin/geth --config qkc/config/devnet/shard-100001.toml
+build/bin/geth --config qkc/config/devnet/shard-100002.toml
+```
+
+| Configuration | Chain ID | HTTP endpoint | Data directory |
+| --- | --- | --- | --- |
+| [shard-100001.toml](devnet/shard-100001.toml) | 100001 | `127.0.0.1:18545` | `./qkc-data/shard-100001` |
+| [shard-100002.toml](devnet/shard-100002.toml) | 100002 | `127.0.0.1:18546` | `./qkc-data/shard-100002` |
+
+Each shard also has its own IPC filename. Runtime data under `qkc-data/` is ignored
+by Git. With this binary on `PATH`, a configuration copied to `shard.toml` starts with
+`geth --config shard.toml`. Relative data paths resolve from the working directory.
+
+### Test accounts
+
+Both shards preallocate 1,000,000 QKC (`1000000000000000000000000` base units) to
+each account below. These are public test keys; use them only for local development.
+
+| Account | Address | Test private key |
+| --- | --- | --- |
+| Geth developer account | `0x71562b71999873DB5b286dF957af199Ec94617F7` | `b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291` |
+| Second test account | `0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF` | `0000000000000000000000000000000000000000000000000000000000000002` |
+
+Genesis allocations fund addresses; they do not import or unlock keys. Sign test
+transactions with these keys and the target shard's chain ID. For example, query
+the first account's balance on chain 100001:
+
+```sh
+curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x71562b71999873DB5b286dF957af199Ec94617F7","latest"],"id":1}'
+```
+
+Adding or changing allocations changes the Genesis hash. If you initialized an
+earlier example, start with a new data directory (using `--datadir`) or back up and
+recreate the old one; restarting an existing chain does not apply new allocations.
+
+### Configuration and startup
+
+The first start writes Genesis, its state, and the chain configuration to the
+database. Subsequent starts parse the TOML again and check its Genesis against the
+database. After initialization, omitting `[Eth.Genesis]` and its subtables loads
+the existing chain from the same data directory. An incompatible Genesis or
+changed QuarkChain configuration fails startup.
+
+This starts the local blockchain with the existing PoSW engine and geth's node
+lifecycle and RPC services. Before starting the node, geth recognizes the
+QuarkChain configuration and forces its existing peer limit, listen address,
+dialing and discovery settings to disable P2P. No `[Node.P2P]` section is needed
+in these shard configurations.
+
+TODO: initialize `ShardChain` from a Master root checkpoint, connect cluster
+transport, implement mining, and add shard-specific RPC. The internal endpoint
+and mining recipient remain TODO comments in the example until those features are
+connected; they are not active settings.
+
+TOML uses case-sensitive Go field names, quoted big integers and rationals. `geth dumpconfig`
+omits Genesis, so keep the original configuration for initializing other nodes.
+
+## Cluster deployment
+
 A QKC deployment uses one `cluster.toml` file for the P2P network ID and process
 settings: one Master and one Slave per shard. There is no separate `network.toml`
 or `--qkc.network` flag.

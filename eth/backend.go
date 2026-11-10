@@ -187,7 +187,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb)
+	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
 	}
@@ -459,6 +459,10 @@ func (s *Ethereum) EngineMaxReorgDepth() uint64        { return s.config.EngineM
 // Protocols returns all the currently configured
 // network protocols to start.
 func (s *Ethereum) Protocols() []p2p.Protocol {
+	if s.blockchain.Config().QuarkChain != nil {
+		// Shards use cluster transport; ETH/SNAP must not select their chain head.
+		return nil
+	}
 	protos := eth.MakeProtocols((*ethHandler)(s.handler), s.networkID, s.discmix)
 	if s.config.SnapshotCache > 0 {
 		protos = append(protos, snap.MakeProtocols((*snapHandler)(s.handler), s.config.SnapV2)...)
@@ -552,6 +556,9 @@ func (s *Ethereum) updateFilterMapsHeads() {
 }
 
 func (s *Ethereum) setupDiscovery() error {
+	if s.blockchain.Config().QuarkChain != nil {
+		return nil
+	}
 	eth.StartENRUpdater(s.blockchain, s.p2pServer.LocalNode())
 
 	// Add eth nodes from DNS.

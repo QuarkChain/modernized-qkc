@@ -235,6 +235,9 @@ func (srv *Server) PeerCount() int {
 // the server will connect to the node. If the connection fails for any reason, the server
 // will attempt to reconnect the peer.
 func (srv *Server) AddPeer(node *enode.Node) {
+	if srv.dialsched == nil {
+		return
+	}
 	srv.dialsched.addStatic(node)
 }
 
@@ -338,11 +341,19 @@ func (srv *Server) Start() (err error) {
 	if srv.running {
 		return errors.New("server already running")
 	}
-	srv.running = true
 	srv.log = srv.Logger
 	if srv.log == nil {
 		srv.log = log.Root()
 	}
+	if srv.MaxPeers == 0 && srv.NoDial && srv.NoDiscovery && srv.ListenAddr == "" && len(srv.Protocols) == 0 {
+		// No network services are requested. Keep peer queries and administrative
+		// operations responsive without starting discovery, dialing or the run loop.
+		srv.quit = make(chan struct{})
+		close(srv.quit)
+		srv.log.Info("P2P networking disabled")
+		return nil
+	}
+	srv.running = true
 	if srv.clock == nil {
 		srv.clock = mclock.System{}
 	}
