@@ -50,10 +50,10 @@ type Data []byte
 // §1  Cluster initialisation
 // =============================================================================
 
-// TODO(ssz-limits): The 4294967295 values below are broad numeric bounds
-// supplied to fastssz for variable-length fields, not intended 4 GB message
-// sizes. Actual message size is primarily constrained by the per-frame size
-// limit. Revisit these bounds if QKC defines protocol-specific field limits.
+// The large ssz-max tags below are schema bounds, not permitted frame sizes.
+// MaxFramePayloadLen caps network payloads, including single Data fields such
+// as RootTip. For dynamic lists, sszgenfix additionally prevents generated
+// decoders from allocating based on an offset larger than the actual SSZ input.
 
 // PingRequest (ClusterOp.PING, 0x81) initializes a slave connection.
 // Slave↔slave PINGs use HasRootTip=false. pyquarkchain sent a dummy root block
