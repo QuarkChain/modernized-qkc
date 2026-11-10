@@ -338,7 +338,7 @@ func TestShardHeaderRules(t *testing.T) {
 			case "order":
 				headers = qkctypes.ShardBlockHeaders{b, a}
 			case "limit":
-				headers = qkctypes.ShardBlockHeaders{a, f.extendShard(a, f.parent.Hash(), 1)}
+				headers = qkctypes.ShardBlockHeaders{a, f.extendShard(a, f.parent.Hash(), 2)}
 			case "parent":
 				a.ParentHash = common.Hash{1}
 			case "time":
@@ -500,7 +500,8 @@ func TestReaderFailures(t *testing.T) {
 // whose intermediate sum exceeds uint256 when the final amount still fits.
 func TestDifficultyAndRewardOverflow(t *testing.T) {
 	f := newFixture(t, nil)
-	if amount, err := f.engine.coinbaseAmount(3, big.NewInt(3)); err != nil || amount.Uint64() != 51 {
+	rewardBlock := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{Number: 3}, qkctypes.ShardBlockHeaders{f.shard(10001, 3)}, nil)
+	if amount, err := f.engine.coinbaseAmount(f.chain, rewardBlock); err != nil || amount.Uint64() != 51 {
 		t.Fatal("wrong decayed root subsidy or tax rounding")
 	}
 	for _, field := range []string{"difficulty", "total"} {
@@ -524,9 +525,6 @@ func TestDifficultyAndRewardOverflow(t *testing.T) {
 		c.RewardTaxRate = big.NewRat(1, 2)
 		c.PoSW.CoinbaseAmount = new(uint256.Int).SetAllOne().ToBig()
 	})
-	if _, err := f.engine.coinbaseAmount(1, big.NewInt(1)); err == nil {
-		t.Fatal("coinbase overflow accepted")
-	}
 	shard := f.shard(10001, 1)
 	header := &qkctypes.RootBlockHeader{Number: 1, ParentHash: f.parent.Hash(), Time: 2}
 	if err := f.engine.Prepare(f.chain, header); err != nil {
@@ -540,12 +538,18 @@ func TestDifficultyAndRewardOverflow(t *testing.T) {
 		t.Fatal("body verification accepted amount overflow")
 	}
 	f = newFixture(t, func(c *params.QuarkChainConfig) { c.PoSW.CoinbaseAmount = new(big.Int) })
+	headers := qkctypes.ShardBlockHeaders{f.shard(10001, 0), f.shard(10002, 0)}
+	for _, header := range headers {
+		f.chain.shardAmounts[header.Hash()] = new(uint256.Int).SetAllOne()
+	}
 	large := new(big.Int).Mul(new(uint256.Int).SetAllOne().ToBig(), big.NewInt(2))
-	amount, err := f.engine.coinbaseAmount(1, large)
+	rewardBlock = qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{Number: 1}, headers, nil)
+	amount, err := f.engine.coinbaseAmount(f.chain, rewardBlock)
 	if err != nil || amount.ToBig().Cmp(new(big.Int).Div(large, big.NewInt(3))) != 0 {
 		t.Fatal("intermediate uint256 overflow changed the tax calculation")
 	}
-	if amount, err := f.engine.coinbaseAmount(3, new(big.Int)); err != nil || !amount.IsZero() {
+	rewardBlock = qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{Number: 3}, nil, nil)
+	if amount, err := f.engine.coinbaseAmount(f.chain, rewardBlock); err != nil || !amount.IsZero() {
 		t.Fatal("zero subsidy changed")
 	}
 }

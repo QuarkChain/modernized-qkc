@@ -99,7 +99,9 @@ func (p *PoSW) VerifyBlock(chain consensus.RootChainReader, block *qkctypes.Root
 	if err != nil {
 		return err
 	}
-	// Match pyquarkchain: check the seal before body checks can walk old roots.
+	// Verify the root's PoW seal before body validation, as in pyquarkchain.
+	// Checking shard headers' PrevRootBlock references may require walking many
+	// root ancestors; blocks with invalid PoW should not trigger those reads.
 	if err := p.verifySeal(chain, header, parent); err != nil {
 		return err
 	}
@@ -144,8 +146,8 @@ func (p *PoSW) verifyHeader(header, parent *qkctypes.RootBlockHeader) error {
 	return nil
 }
 
-// verifyBody checks the shard commitment, known blocks, grouping, confirmation
-// links, timestamps, per-shard limits and root references, then the reward.
+// verifyBody checks the shard commitment, known blocks and reward, then grouping,
+// confirmation links, timestamps, per-shard limits and root references.
 // Shards are responsible for validating their blocks' execution and PoW.
 func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootBlock, parent *qkctypes.RootBlockHeader) error {
 	// Match pyquarkchain root_state.validate_block's tracking-data size limit.
@@ -169,25 +171,26 @@ func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootB
 	if qkctypes.CalcShardHeaderHash(headers) != block.ShardHeaderHash() {
 		return errors.New("invalid root shard header hash")
 	}
+	// Computing the reward also requires a reported coinbase amount for every shard
+	// block, confirming that each has passed shard validation. Reject unknown shard
+	// blocks here before the checks below use their fields or follow PrevRootBlock
+	// references through root ancestors.
+	amount, err := p.coinbaseAmount(chain, block)
+	if err != nil {
+		return err
+	}
+	if amount.Cmp(block.CoinbaseAmount()) != 0 {
+		return errors.New("invalid root coinbase amount")
+	}
 	// Cache only root references verified against this parent, not intermediate
 	// ancestors. The parent itself is already known to be on this branch.
 	verifiedRootHashes := map[common.Hash]bool{parent.Hash(): true}
-	totalAmount := new(big.Int)
 	var previous *types.Header
 	var previousHash common.Hash
 	var chainID *big.Int
 	var count uint64
 	for i, header := range headers {
-		// A known shard block has already passed shard validation. Check it
-		// before using its fields or following a potentially old root reference.
 		hash := header.Hash()
-		amount, err := chain.GetShardBlockCoinbaseAmount(hash)
-		if err != nil {
-			return fmt.Errorf("shard header %d: %w", i, err)
-		}
-		if amount == nil {
-			return fmt.Errorf("unknown shard block: %s", hash)
-		}
 		extra, err := header.QKCExtra()
 		if err != nil {
 			return fmt.Errorf("shard header %d: %w", i, err)
@@ -196,7 +199,8 @@ func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootB
 		if header.Time > block.Time() {
 			return errors.New("shard timestamp is later than root timestamp")
 		}
-		// Require one ascending group per chain ID and reject unconfigured shards.
+		// Group shard headers by increasing chain ID, with consecutive block numbers
+		// within each group. Reject chain IDs not configured for this network.
 		if chainID != nil && extra.ChainID.Cmp(chainID) < 0 {
 			return errors.New("shard headers must be grouped by increasing chain ID")
 		}
@@ -205,7 +209,7 @@ func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootB
 			if !p.members[chainID.String()] {
 				return fmt.Errorf("unknown shard chain ID: %s", chainID)
 			}
-			// Each group starts from this parent root's confirmation. All shards
+			// Each group starts from this parent root block's confirmation. All shards
 			// start at root genesis; a missing baseline cannot initialize one here.
 			hash, ok := lastConfirmed[chainID.String()]
 			if !ok || hash == (common.Hash{}) {
@@ -213,19 +217,21 @@ func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootB
 			}
 			previousHash, previous = hash, nil
 		}
-		// The confirmed hash anchors the first header; shard validation has
-		// already checked its height against its parent. Later headers also
-		// have their heights checked against the preceding header in this group.
+		// The first header's ParentHash must match the shard block last confirmed
+		// by the parent root. Shard validation has already checked its block number.
+		// Each later header must point to the preceding header in this group and
+		// have a block number exactly one higher.
 		if header.Number == nil || header.ParentHash != previousHash ||
 			(previous != nil && header.Number.Cmp(new(big.Int).Add(previous.Number, common.Big1)) != 0) {
 			return errors.New("shard headers do not continue the previous header by height and hash")
 		}
 		count++
-		// Apply the same per-shard cap to every group.
+		// A root block must include at most MaxBlocksPerRootBlock shard headers
+		// for each chain ID.
 		if count > p.config.MaxBlocksPerRootBlock {
 			return errors.New("too many shard headers for one chain")
 		}
-		// The shard's previous root must be the parent root or one of its ancestors,
+		// The shard block's previous root must be the parent root or one of its ancestors,
 		// never a root on another branch or above the candidate's parent.
 		if !verifiedRootHashes[extra.PrevRootBlock] {
 			sameChain, err := isRootDescendant(chain, parent, extra.PrevRootBlock)
@@ -237,16 +243,7 @@ func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootB
 			}
 			verifiedRootHashes[extra.PrevRootBlock] = true
 		}
-		totalAmount.Add(totalAmount, amount.ToBig())
 		previousHash, previous = hash, header
-	}
-	// Recompute the decayed root subsidy and shard taxes without changing the block.
-	amount, err := p.coinbaseAmount(block.Number(), totalAmount)
-	if err != nil {
-		return err
-	}
-	if amount.Cmp(block.CoinbaseAmount()) != 0 {
-		return errors.New("invalid root coinbase amount")
 	}
 	return nil
 }
@@ -332,21 +329,7 @@ func (p *PoSW) Finalize(chain consensus.RootChainReader, block *qkctypes.RootBlo
 	if err := header.SanityCheck(); err != nil {
 		return nil, err
 	}
-	shardAmount := new(big.Int)
-	for _, shardHeader := range block.ShardBlockHeaders() {
-		if shardHeader == nil {
-			return nil, errors.New("missing shard header")
-		}
-		amount, err := chain.GetShardBlockCoinbaseAmount(shardHeader.Hash())
-		if err != nil {
-			return nil, err
-		}
-		if amount == nil {
-			return nil, fmt.Errorf("unknown shard block: %s", shardHeader.Hash())
-		}
-		shardAmount.Add(shardAmount, amount.ToBig())
-	}
-	amount, err := p.coinbaseAmount(block.Number(), shardAmount)
+	amount, err := p.coinbaseAmount(chain, block)
 	if err != nil {
 		return nil, err
 	}
@@ -366,14 +349,30 @@ func (p *PoSW) CalcDifficulty(timestamp uint64, parent *qkctypes.RootBlockHeader
 
 func (p *PoSW) Close() error { return p.EthashVerifier.Close() }
 
-// coinbaseAmount sums shard income before applying t/(1-t), then rounds once.
+// coinbaseAmount requires reported shard amounts, sums them, then applies t/(1-t)
+// and rounds once. A non-nil amount identifies a validated shard block.
 // The root's own decayed subsidy is added without reward tax.
 // Finalize and verifyBody share this calculation so creation and validation agree.
-func (p *PoSW) coinbaseAmount(number uint32, shardAmount *big.Int) (*uint256.Int, error) {
+func (p *PoSW) coinbaseAmount(chain consensus.RootChainReader, block *qkctypes.RootBlock) (*uint256.Int, error) {
+	shardAmount := new(big.Int)
+	for i, header := range block.ShardBlockHeaders() {
+		if header == nil {
+			return nil, errors.New("missing shard header")
+		}
+		hash := header.Hash()
+		amount, err := chain.GetShardBlockCoinbaseAmount(hash)
+		if err != nil {
+			return nil, fmt.Errorf("shard header %d: %w", i, err)
+		}
+		if amount == nil {
+			return nil, fmt.Errorf("unknown shard block: %s", hash)
+		}
+		shardAmount.Add(shardAmount, amount.ToBig())
+	}
 	tax := p.config.RewardTaxRate
 	amount := new(big.Int).Mul(shardAmount, tax.Num())
 	amount.Div(amount, new(big.Int).Sub(tax.Denom(), tax.Num()))
-	amount.Add(amount, p.config.PoSW.BlockRewardAt(new(big.Int).SetUint64(uint64(number))))
+	amount.Add(amount, p.config.PoSW.BlockRewardAt(new(big.Int).SetUint64(uint64(block.Number()))))
 	result, overflow := uint256.FromBig(amount)
 	if overflow {
 		return nil, fmt.Errorf("root coinbase amount exceeds uint256")
