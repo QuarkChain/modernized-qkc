@@ -435,18 +435,19 @@ SlaveService 不单独注册到 Node，也不再接收 cmd 传入的停止任务
 
 以下是模块级工作清单，不代表已实现，也不展开成逐提交执行计划。
 
-- [ ] **W01 · cmd/geth 启动代码**：在 `makeConfigNode` / `makeFullNode` 增加 QKC 分支，复用 `qkc/config` 的部署配置处理，接入 CLI 覆盖和独立的 Genesis 加载结果。创建 stack，调用 Ethereum 构造函数并启动 Node；Shard 与 SlaveService 的接口绑定由 Ethereum 完成。Node 本身不新增 QKC 逻辑，普通 geth 流程保持原行为。
-- [ ] **W02 · Ethereum 创建组件**：使用已有 `NodeConfig.Eth`，加载并校验实际链配置、核对所选 ChainID。由 `eth.New` 的 QKC 分支创建 SlaveService，调用 `posw.New(chainConfig, genesisHeader)` 创建并持有 Engine；随后创建单个 BlockChain、legacy txpool 和 builder，将同一个 Engine 实例传给 BlockChain 和 builder；再创建 `NewShardChain`、Shard、PoWMiner。将 SlaveService 作为 ClusterClient 传给 Shard，再绑定 Shard 业务接口。Ethereum 统一启动和关闭，不额外注册 SlaveService Lifecycle。不能沿用仅支持 beacon 的 [CreateConsensusEngine](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/ethconfig/config.go:236) 分支；现有普通 geth 调用继续可用。
-- [ ] **W03 · Shard 使用已有组件**：调整 [Shard.New:76](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:76)，接收外部创建的 ShardChain/ClusterClient；移除其中的 `posw.New` 和 BlockChain 创建代码，以及 `Shard.Stop` 中的链、引擎关闭逻辑和仅用于关闭的字段。Shard 若无其他清理工作则删除 `Stop`。同步更新职责注释和 TODO，保留 AddShardBlock 的完成标记、广播、上报与重试顺序。
-- [ ] **W04 · SlaveService**：建议新增 `qkc/slave/service.go`，由 Ethereum 创建和管理；持有监听器、MasterConn、XshardConnManager 和 Shard 业务接口。实现监听、请求处理、停止接收和关闭连接；检查是否允许挖矿、是否正在停止；取消并等待已开始的请求。实现 `shard.ClusterClient`，并把现有 `slaveconn.XshardHandler` 收到的请求转换成 Shard 方法调用；绑定完成后才能开始监听。
-- [ ] **W05 · Master 连接**：建议新增 `qkc/slaveconn/master_conn.go`。复用 BaseConn/wire，处理 Ping/Init、ConnectToSlaves、AddRootBlock、header 上报及查询。复用现有 XshardConnManager，保留已登记跨 shard 连接异常断开时的 shutdownSlave 策略；遵守当前 Master 逐个请求建立连接的协议顺序。
-- [ ] **W06 · 补齐消息与错误转换**：新增未确认 headers 查询等缺失 wire 消息及 handlers。对带 ErrorCode 响应的业务 RPC，业务失败编码为 response.ErrorCode；非 nil handler error 会关闭连接。Ping/Pong 没有 ErrorCode，Init 失败按握手失败处理，不能返回成功 PONG。沿用已有 Data 内层编码约定；更新生成代码及对应已有测试。
-- [ ] **W07 · 远程矿工 API**：扩展现有 `eth/api_miner.go` 的 MinerAPI，增加 GetWork / SubmitWork，复用 Node JSON-RPC，调用 Ethereum 持有的 PoWMiner；未完成 Init、所需连接尚未就绪或正在停止时返回错误，M2 再增加同步就绪检查。
-- [ ] **W08 · QKC 同步入口（M2，不属于 M1）**：新增同步任务及数据获取接口，补齐所需 shard blocks、roots 和 deposit 列表；经 Shard 导入。同步具体请求/来源协议在 M2 明确，不能把“原生 geth sync 已禁用”当作“QKC 同步已实现”。
-- [ ] **W09 · 禁止绕过 ShardChain 的调用**：逐项核对第 9 节。尤其检查调用 handler/Downloader/SyncProgress 的地方、pending 构建和 BlobTxType；验证普通 geth 分支保持原行为。
-- [ ] **W10 · 停止顺序与资源关闭**：由 Ethereum 按第 8 节统一执行；等待已开始的请求处理、构建、导入结束后再关资源，Shard 不关闭借用的 ClusterClient。验证构造和启动失败的清理，避免重复关闭或请求处理函数等待自身退出。
-- [ ] **W11 · 必要验证**：优先扩展现有测试，覆盖：所选 ChainID 与实际链配置不匹配时拒绝启动；同一链和 builder 对象被共用；Init 前拒绝挖矿但允许握手和 deposit 接收，M2 再补同步场景；本地挖矿、远程矿工和网络完整区块三种来源；没有完成标记时重试；关闭时等待已开始的调用；危险入口在 QKC 模式被拒绝、普通 geth 行为不变；handler/blobpool 未创建时不发生空指针错误。避免重复搭建链测试环境。
+### 核心集成工作
 
-M2 后续设计需明确同步的数据来源、请求方式和完成条件，作为 W08 及挖矿就绪检查的依据，不阻塞 M1。
+- [ ] **W01 · Ethereum 创建组件**：使用已有 `NodeConfig.Eth`，加载并校验实际链配置、核对所选 ChainID。由 `eth.New` 的 QKC 分支创建 SlaveService，调用 `posw.New(chainConfig, genesisHeader)` 创建并持有 Engine；随后创建单个 BlockChain、legacy txpool 和 builder，将同一个 Engine 实例传给 BlockChain 和 builder；再创建 `NewShardChain`、Shard、PoWMiner。将 SlaveService 作为 ClusterClient 传给 Shard，再绑定 Shard 业务接口。Ethereum 统一启动和关闭，不额外注册 SlaveService Lifecycle。不能沿用仅支持 beacon 的 [CreateConsensusEngine](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/ethconfig/config.go:236) 分支；现有普通 geth 调用继续可用。
+- [ ] **W02 · Shard 使用已有组件**：调整 [Shard.New:76](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:76)，接收外部创建的 ShardChain/ClusterClient；移除其中的 `posw.New` 和 BlockChain 创建代码，以及 `Shard.Stop` 中的链、引擎关闭逻辑和仅用于关闭的字段。Shard 若无其他清理工作则删除 `Stop`。同步更新职责注释和 TODO，保留 AddShardBlock 的完成标记、广播、上报与重试顺序。
+- [ ] **W03 · 禁止绕过 ShardChain 的调用**：逐项核对第 9 节。尤其检查调用 handler/Downloader/SyncProgress 的地方、pending 构建和 BlobTxType；验证普通 geth 分支保持原行为。
+- [ ] **W04 · 停止顺序与资源关闭**：由 Ethereum 按第 8 节统一执行；等待已开始的请求处理、构建、导入结束后再关资源，Shard 不关闭借用的 ClusterClient。验证构造和启动失败的清理，避免重复关闭或请求处理函数等待自身退出。
+- [ ] **W05 · geth 整体集成测试**：复用现有测试环境，验证 QKC 模式下的启动、Master 初始化、本地及远程挖矿、shard/root 区块导入、跨 shard 广播与 master 上报、停机流程；覆盖未就绪时拒绝请求、失败重试和停机时等待在途任务，并检查禁止绕过 ShardChain 的入口及普通 geth 行为。
+
+### 相关模块的对接要求
+
+- [ ] **W06 · cmd/geth 启动接入**：支持使用 QKC 配置启动，将配置和 Genesis 加载结果交给 Ethereum，复用现有 Node 启动流程；普通 geth 行为保持不变。
+- [ ] **W07 · SlaveService**：负责 Master 与跨 shard 通信，实现 `shard.ClusterClient`，将收到的业务请求转发给 Shard。由 Ethereum 创建和管理，完成业务接口绑定后才能开始监听；遵循业务就绪条件，停止时拒绝新请求，取消并等待在途请求结束后，Ethereum 才能关闭链资源。
+- [ ] **W08 · Master 连接**：负责与 Master 的连接及双向请求交互，对接 SlaveService，支持初始化、root 区块下发、header 上报和查询等业务；遵循现有连接建立顺序和异常断开时的节点停止策略。
+- [ ] **W09 · 远程矿工 API**：扩展现有 MinerAPI，提供 GetWork / SubmitWork，调用 Ethereum 持有的 PoWMiner；未完成 Init、所需连接尚未就绪或正在停止时返回错误，M2 再增加同步就绪检查。
 
 代码链接指向当前本地工作区，代码修改后行号可能变化。图的 Mermaid 源码保留在各节折叠区，修改时同步更新对应 SVG。本文仅记录设计，不修改业务代码、不引入项目依赖。
