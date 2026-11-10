@@ -284,9 +284,7 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 	}
 
 	if backend.ChainConfig().QuarkChain != nil {
-		server := stack.Server()
-		server.MaxPeers, server.ListenAddr = 0, ""
-		server.NoDial, server.NoDiscovery = true, true
+		// Shards do not use Ethereum sync overrides or the Beacon Engine API.
 		return stack
 	}
 

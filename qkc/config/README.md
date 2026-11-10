@@ -10,7 +10,7 @@ geth's native `[Node]`, `[Eth]`, and `[Eth.Genesis]` sections. No `geth init` co
 ```sh
 make geth
 
-# Run each shard in a separate terminal, from the repository root.
+# Run either shard from the repository root.
 build/bin/geth --config qkc/config/devnet/shard-100001.toml
 build/bin/geth --config qkc/config/devnet/shard-100002.toml
 ```
@@ -56,10 +56,7 @@ the existing chain from the same data directory. An incompatible Genesis or
 changed QuarkChain configuration fails startup.
 
 This starts the local blockchain with the existing PoSW engine and geth's node
-lifecycle and RPC services. Before starting the node, geth recognizes the
-QuarkChain configuration and forces its existing peer limit, listen address,
-dialing and discovery settings to disable P2P. No `[Node.P2P]` section is needed
-in these shard configurations.
+lifecycle and RPC services.
 
 TODO: initialize `ShardChain` from a Master root checkpoint, connect cluster
 transport, implement mining, and add shard-specific RPC. The internal endpoint
