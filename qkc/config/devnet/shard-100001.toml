@@ -16,7 +16,6 @@ HTTPPort = 18545
 HTTPModules = ["eth", "net", "web3"]
 
 # Native TOML uses Go field names and big integer/rational strings; byte fields use single-line arrays.
-# The current branch selects PoSW for QuarkChain; it has no ConsensusType field.
 [Eth.Genesis]
 Nonce = 0
 Timestamp = 0
@@ -40,6 +39,7 @@ BerlinBlock = "0"
 LondonBlock = "0"
 
 [Eth.Genesis.Config.QuarkChain]
+ConsensusType = "POW_ETHASH"
 ChainIDs = ["100001", "100002"]
 RewardTaxRate = "0.5"
 MaxBlocksPerRootBlock = 18

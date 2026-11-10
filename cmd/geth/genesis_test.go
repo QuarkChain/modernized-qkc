@@ -142,6 +142,8 @@ func TestShardGenesis(t *testing.T) {
 		{name: "restart", config: inline},
 		{name: "different genesis", config: strings.Replace(inline, "GasLimit = 12000000", "GasLimit = 13000000", 1), err: "database contains incompatible genesis"},
 		{name: "different rules", config: strings.Replace(inline, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", 1), err: "quarkchain config differs from stored config"},
+		{name: "different consensus", config: strings.Replace(inline, "POW_ETHASH", "POW_SIMULATE", 1), err: "quarkchain config differs from stored config"},
+		{name: "invalid consensus", config: strings.Replace(inline, "POW_ETHASH", "NONE", 1), err: "invalid ConsensusType"},
 		{name: "database only", config: withoutGenesis},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

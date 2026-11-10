@@ -58,6 +58,18 @@ changed QuarkChain configuration fails startup.
 This starts the local blockchain with the existing PoSW engine and geth's node
 lifecycle and RPC services.
 
+Set `ConsensusType` under `[Eth.Genesis.Config.QuarkChain]` to `"POW_ETHASH"`
+(shard 100001) or `"POW_SIMULATE"` (shard 100002). Both use PoSW rules; simulation
+skips Ethash seal verification. Omitting the field retains the legacy Ethash
+behavior. Unknown values, including `"NONE"`, are rejected.
+
+The consensus type is stored with the chain configuration and must match on
+restart, even though changing it does not change the Genesis hash. An omitted
+value and an explicit `"POW_ETHASH"` are distinct stored configurations.
+For an existing database initialized without this field, keep omitting it or use
+a new data directory with the updated examples. A database-only restart uses the
+stored consensus type.
+
 TODO: initialize `ShardChain` from a Master root checkpoint, connect cluster
 transport, implement mining, and add shard-specific RPC. The internal endpoint
 and mining recipient remain TODO comments in the example until those features are

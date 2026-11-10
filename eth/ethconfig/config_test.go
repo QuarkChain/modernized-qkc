@@ -17,13 +17,62 @@
 package ethconfig
 
 import (
+	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/posw"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/naoina/toml"
 )
+
+func TestCreateShardConsensusEngine(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind params.ConsensusType
+		want interface{}
+	}{
+		{"legacy", "", &posw.PoSW{}},
+		{"ethash", params.ConsensusEthash, &posw.PoSW{}},
+		{"simulate", params.ConsensusSimulate, &posw.PoSWSimulate{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			genesis := &core.Genesis{
+				Config: params.NewTestQuarkChainConfig(10001), GasLimit: 12_000_000, Difficulty: new(big.Int),
+			}
+			genesis.Config.QuarkChain.ConsensusType = test.kind
+			db := rawdb.NewMemoryDatabase()
+			defer db.Close()
+			for _, stored := range []bool{false, true} {
+				config, spec := genesis.Config, genesis
+				if stored {
+					block := genesis.ToBlock()
+					rawdb.WriteHeader(db, block.Header())
+					rawdb.WriteCanonicalHash(db, block.Hash(), 0)
+					rawdb.WriteChainConfig(db, block.Hash(), config)
+					// Recover both the consensus choice and genesis header from the DB.
+					config = rawdb.ReadChainConfig(db, block.Hash())
+					spec = nil
+				}
+				engine, err := CreateConsensusEngine(config, db, spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reflect.TypeOf(engine) != reflect.TypeOf(test.want) {
+					t.Fatalf("stored=%t: engine %T, want %T", stored, engine, test.want)
+				}
+				if err := engine.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 // TestHistoryModeTOML checks that the chain history retention round trips through
 // the config file in the same text form --history.chain takes, including a custom

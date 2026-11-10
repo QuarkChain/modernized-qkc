@@ -234,7 +234,7 @@ type Config struct {
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.
-// QuarkChain uses PoSW; Ethereum networks must have transitioned to proof of stake.
+// QuarkChain selects Ethash or simulated PoSW; Ethereum networks must have transitioned to proof of stake.
 func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, genesis *core.Genesis) (consensus.Engine, error) {
 	if config.QuarkChain != nil {
 		// PoSW needs the genesis gas limit before the blockchain is constructed.
@@ -244,6 +244,9 @@ func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, genesi
 			header = rawdb.ReadHeader(db, hash, 0)
 		} else if genesis != nil {
 			header = genesis.ToBlock().Header()
+		}
+		if config.QuarkChain.ConsensusType == params.ConsensusSimulate {
+			return posw.NewSimulate(config, header)
 		}
 		return posw.New(config, header)
 	}

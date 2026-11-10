@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/miner"
@@ -88,7 +89,7 @@ func New(chainConfig *params.ChainConfig, genesis *core.Genesis, db ethdb.Databa
 	}
 	genesisCopy := *genesis
 	genesisCopy.Config = chainConfig
-	engine, err := posw.New(chainConfig, genesisCopy.ToBlock().Header())
+	engine, err := ethconfig.CreateConsensusEngine(chainConfig, db, &genesisCopy)
 	if err != nil {
 		return nil, err
 	}

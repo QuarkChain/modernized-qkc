@@ -44,6 +44,24 @@ const (
 	XShardGasLimitDivisor uint64 = 2
 )
 
+// ConsensusType identifies the PoW algorithm selected for a QKC root or shard chain.
+type ConsensusType string
+
+const (
+	ConsensusEthash   ConsensusType = "POW_ETHASH"
+	ConsensusSimulate ConsensusType = "POW_SIMULATE"
+)
+
+// Check rejects unknown algorithms and NONE, since every configured chain is active.
+func (c ConsensusType) Check() error {
+	switch c {
+	case ConsensusEthash, ConsensusSimulate:
+		return nil
+	default:
+		return fmt.Errorf("invalid ConsensusType %q: want POW_ETHASH, POW_SIMULATE", c)
+	}
+}
+
 // QuarkChainConfig is the configuration of a QuarkChain shard chain. Its
 // presence in the chain config enables the QuarkChain specific features.
 type QuarkChainConfig struct {
@@ -51,7 +69,9 @@ type QuarkChainConfig struct {
 	// The first chain receives root rewards and hosts the root staking contract.
 	ChainIDs []*big.Int `json:"chainIds"`
 
-	PoSW *PoSWConfig `json:"posw"` // Required consensus configuration for this shard.
+	// Empty selects Ethash for legacy configurations.
+	ConsensusType ConsensusType `json:"consensusType,omitempty"`
+	PoSW          *PoSWConfig   `json:"posw"` // Required consensus configuration for this shard.
 	// RewardTaxRate is the fraction of the decayed subsidy and each miner fee
 	// shared with root. Check requires a finite decimal in (0, 1) with a reduced
 	// denominator no greater than 100. AfterTax returns the retained share.
@@ -70,6 +90,7 @@ func (c *QuarkChainConfig) Equal(other *QuarkChainConfig) bool {
 		return c == other
 	}
 	return slices.EqualFunc(c.ChainIDs, other.ChainIDs, configBlockEqual) &&
+		c.ConsensusType == other.ConsensusType &&
 		c.PoSW.Equal(other.PoSW) &&
 		configRatEqual(c.RewardTaxRate, other.RewardTaxRate) &&
 		c.MaxBlocksPerRootBlock == other.MaxBlocksPerRootBlock
@@ -93,6 +114,11 @@ func (c *QuarkChainConfig) Check() error {
 			return fmt.Errorf("duplicate chain ID: %v", id)
 		}
 		seen[id.String()] = true
+	}
+	if c.ConsensusType != "" {
+		if err := c.ConsensusType.Check(); err != nil {
+			return err
+		}
 	}
 	// Python's root reward reconstruction divides by the tax rate and the retained share.
 	if c.RewardTaxRate == nil || c.RewardTaxRate.Sign() <= 0 || c.RewardTaxRate.Cmp(big.NewRat(1, 1)) >= 0 {

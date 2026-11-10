@@ -16,8 +16,6 @@ HTTPPort = 18546
 HTTPModules = ["eth", "net", "web3"]
 
 # Native TOML uses Go field names and big integer/rational strings; byte fields use single-line arrays.
-# TODO: Support the original POW_SIMULATE selection when mining is connected.
-# The current branch uses PoSW for all shards; it has no ConsensusType field.
 [Eth.Genesis]
 Nonce = 0
 Timestamp = 0
@@ -41,6 +39,7 @@ BerlinBlock = "0"
 LondonBlock = "0"
 
 [Eth.Genesis.Config.QuarkChain]
+ConsensusType = "POW_SIMULATE"
 ChainIDs = ["100001", "100002"]
 RewardTaxRate = "0.5"
 MaxBlocksPerRootBlock = 18

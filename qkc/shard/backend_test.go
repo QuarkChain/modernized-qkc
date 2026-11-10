@@ -54,13 +54,16 @@ func (c *backendClusterClient) SendMinorBlockHeaderToMaster(ctx context.Context,
 	return c.report(ctx, header, amount)
 }
 
-// TestBackendLifecycle checks PoSW construction, separate root initialization,
+// TestBackendLifecycle checks Ethash and simulated PoSW construction, separate root initialization,
 // and root-coinbase-chain-only stake queries. Stop and failed construction must leave the
 // caller's database usable, and Init must not propagate genesis again.
 func TestBackendLifecycle(t *testing.T) {
 	for _, chainID := range []int64{10001, 10002} {
 		t.Run(big.NewInt(chainID).String(), func(t *testing.T) {
 			config := *params.NewTestQuarkChainConfig(chainID, 10001, 10002)
+			if chainID == 10002 {
+				config.QuarkChain.ConsensusType = params.ConsensusSimulate
+			}
 			alloc := core.SystemContractAllocs()
 			maps.Copy(alloc, core.PoSWStakingContractAllocs(&config))
 			genesis := &core.Genesis{
@@ -84,8 +87,12 @@ func TestBackendLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { s.Stop() })
-			if _, ok := s.engine.(*posw.PoSW); !ok || genesis.Config != nil {
-				t.Fatal("New must use PoSW without mutating the supplied genesis")
+			wantEngine := reflect.TypeOf(&posw.PoSW{})
+			if chainID == 10002 {
+				wantEngine = reflect.TypeOf(&posw.PoSWSimulate{})
+			}
+			if reflect.TypeOf(s.engine) != wantEngine || genesis.Config != nil {
+				t.Fatalf("New must select %v without mutating the supplied genesis", wantEngine)
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
