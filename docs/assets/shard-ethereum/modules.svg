@@ -1,176 +1,183 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="1668" viewBox="0 0 1260 1668" role="img" aria-labelledby="diagram-title diagram-description">
+<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="1548" viewBox="0 0 1260 1548" role="img" aria-labelledby="diagram-title diagram-description">
   <title id="diagram-title">Shard and Ethereum module relationships</title>
   <desc id="diagram-description">Fixed positions and orthogonal call routes follow the reviewed reference image. Gray modules are deferred to M2.</desc>
   <style>text { font-family: Segoe UI, Microsoft YaHei, Arial, sans-serif; } .route { fill: none; stroke: #357D9B; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }</style>
   <defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse"><path d="M 1 1 L 7 4 L 1 7 Z" fill="#357D9B"/></marker></defs>
-  <rect width="1260" height="1668" fill="#FFFFFF"/>
+  <rect width="1260" height="1548" fill="#FFFFFF"/>
   <g id="frames">
-    <rect id="node-frame" x="26.4" y="111.6" width="1202.4" height="1454.4" rx="12" ry="12" fill="#FFFFFF" stroke="#BCC1C7" stroke-width="1.8"/>
-    <rect id="ethereum-frame" x="38.4" y="468" width="1178.4" height="1086" rx="12" ry="12" fill="#FBF5E7" stroke="#C6AE78" stroke-width="1.8"/>
-    <rect id="slave-frame" x="50.4" y="529.2" width="424.8" height="230.4" rx="12" ry="12" fill="#F3F7FC" stroke="#8BA9C8" stroke-width="1.5"/>
+    <rect id="node-frame" x="26.4" y="111.6" width="1202.4" height="1334.4" rx="12" ry="12" fill="#FFFFFF" stroke="#BCC1C7" stroke-width="1.8"/>
+    <rect id="ethereum-frame" x="38.4" y="348" width="1178.4" height="1086" rx="12" ry="12" fill="#FBF5E7" stroke="#C6AE78" stroke-width="1.8"/>
+    <rect id="slave-frame" x="50.4" y="409.2" width="424.8" height="230.4" rx="12" ry="12" fill="#F3F7FC" stroke="#8BA9C8" stroke-width="1.5"/>
   </g>
   <g id="routes">
-    <path class="route" data-from="Master" data-to="MC" data-kind="&lt;--&gt;" d="M 154.8 66 L 154.8 582" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-    <path class="route" data-from="Other" data-to="XC" data-kind="&lt;--&gt;" d="M 370.8 66 L 370.8 582" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-    <path class="route" data-from="Client" data-to="RPC" data-kind="--&gt;" d="M 576 66 L 576 183.6" marker-end="url(#arrow)"/>
-    <path class="route" data-from="MC" data-to="Service" data-kind="&lt;--&gt;" d="M 154.8 649.2 L 154.8 679.2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-    <path class="route" data-from="XC" data-to="Service" data-kind="&lt;--&gt;" d="M 370.8 649.2 L 370.8 657 Q 370.8 664.8 363 664.8 L 236.4 664.8 Q 229.2 664.8 229.2 672 L 229.2 679.2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-    <path class="route" data-from="RPC" data-to="API" data-kind="--&gt;" d="M 544.8 252 L 544.8 282" marker-end="url(#arrow)"/>
-    <path class="route" data-from="RPC" data-to="MiningAPI" data-kind="--&gt;" d="M 608.4 252 L 608.4 259.2 Q 608.4 266.4 615.6 266.4 L 795 266.4 Q 802.8 266.4 802.8 274.2 L 802.8 282" marker-end="url(#arrow)"/>
-    <path class="route" data-from="API" data-to="BC" data-kind="--&gt;" d="M 490.8 349.2 L 490.8 1340.8 Q 490.8 1348.8 498.8 1348.8 L 521.2 1348.8 Q 529.2 1348.8 529.2 1356.8 L 529.2 1378.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="API" data-to="Pool" data-kind="--&gt;" d="M 598.8 349.2 L 598.8 374.8 Q 598.8 382.8 606.8 382.8 L 642.4 382.8 Q 650.4 382.8 650.4 390.8 L 650.4 438.4 Q 650.4 446.4 658.4 446.4 L 946 446.4 Q 954 446.4 954 454.4 L 954 1378.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="API" data-to="S" data-kind="--&gt;" d="M 544.8 349.2 L 544.8 374.8 Q 544.8 382.8 552.8 382.8 L 562 382.8 Q 570 382.8 570 390.8 L 570 424 Q 570 432 578 432 L 625.6 432 Q 633.6 432 633.6 440 L 633.6 1004.4" marker-end="url(#arrow)"/>
-    <path class="route" data-from="MiningAPI" data-to="Mining" data-kind="--&gt;" d="M 802.8 349.2 L 802.8 424 Q 802.8 432 810.8 432 L 1079.2 432 Q 1087.2 432 1087.2 440 L 1087.2 843.6" marker-end="url(#arrow)"/>
-    <path class="route" data-from="Mining" data-to="S" data-kind="--&gt;" d="M 1087.2 912 L 1087.2 966.4 Q 1087.2 974.4 1079.2 974.4 L 683.6 974.4 Q 675.6 974.4 675.6 982.4 L 675.6 1004.4" marker-end="url(#arrow)"/>
-    <path class="route" data-from="Service" data-to="S" data-kind="&lt;--&gt;" d="M 154.8 746.4 L 154.8 982 Q 154.8 990 162.8 990 L 541.2 990 Q 548.4 990 548.4 997.2 L 548.4 1004.4" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-    <path class="route" data-from="Service" data-to="Sync" data-kind="-.-&gt;" d="M 229.2 746.4 L 229.2 772 Q 229.2 780 237.2 780 L 352 780 Q 360 780 360 788 L 360 843.6" marker-end="url(#arrow)" stroke-dasharray="2.2 3.2"/>
-    <path class="route" data-from="Sync" data-to="S" data-kind="--&gt;" d="M 360 912 L 360 966.4 Q 360 974.4 368 974.4 L 583.6 974.4 Q 591.6 974.4 591.6 982.4 L 591.6 1004.4" marker-end="url(#arrow)"/>
-    <path class="route" data-from="S" data-to="SC" data-kind="--&gt;" d="M 646.8 1090.8 L 646.8 1098 Q 646.8 1105.2 654 1105.2 L 737.4 1105.2 Q 745.2 1105.2 745.2 1113 L 745.2 1120.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="S" data-to="BC" data-kind="--&gt;" d="M 577.2 1090.8 L 577.2 1378.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="SC" data-to="BC" data-kind="--&gt;" d="M 706.8 1188 L 706.8 1340.8 Q 706.8 1348.8 698.8 1348.8 L 633.2 1348.8 Q 625.2 1348.8 625.2 1356.8 L 625.2 1378.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="SC" data-to="Builder" data-kind="--&gt;" d="M 781.2 1188 L 781.2 1195.2 Q 781.2 1202.4 788.4 1202.4 L 815.2 1202.4 Q 823.2 1202.4 823.2 1210.4 L 823.2 1266" marker-end="url(#arrow)"/>
-    <path class="route" data-from="Builder" data-to="BC" data-kind="--&gt;" d="M 745.2 1334.4 L 745.2 1341.6 Q 745.2 1348.8 738 1348.8 L 680 1348.8 Q 672 1348.8 672 1356.8 L 672 1378.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="Builder" data-to="Pool" data-kind="--&gt;" d="M 872.4 1334.4 L 872.4 1341.6 Q 872.4 1348.8 879.6 1348.8 L 888.4 1348.8 Q 896.4 1348.8 896.4 1356.8 L 896.4 1378.8" marker-end="url(#arrow)"/>
-    <path class="route" data-from="Builder" data-to="Engine" data-kind="--&gt;" d="M 823.2 1334.4 L 823.2 1452.4 Q 823.2 1460.4 815.2 1460.4 L 675 1460.4 Q 667.2 1460.4 667.2 1468.2 L 667.2 1476" marker-end="url(#arrow)"/>
-    <path class="route" data-from="BC" data-to="Engine" data-kind="--&gt;" d="M 600 1446 L 600 1476" marker-end="url(#arrow)"/>
+    <path class="route" data-from="Master" data-to="MC" data-kind="&lt;--&gt;" d="M 154.8 66 L 154.8 462" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+    <path class="route" data-from="Other" data-to="XC" data-kind="&lt;--&gt;" d="M 370.8 66 L 370.8 462" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+    <path class="route" data-from="Client" data-to="RPC" data-kind="--&gt;" d="M 703.2 66 L 703.2 183.6" marker-end="url(#arrow)"/>
+    <path class="route" data-from="MC" data-to="Service" data-kind="&lt;--&gt;" d="M 154.8 529.2 L 154.8 559.2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+    <path class="route" data-from="XC" data-to="Service" data-kind="&lt;--&gt;" d="M 370.8 529.2 L 370.8 537 Q 370.8 544.8 363 544.8 L 236.4 544.8 Q 229.2 544.8 229.2 552 L 229.2 559.2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+    <path class="route" data-from="RPC" data-to="API" data-kind="---" d="M 703.2 252 L 703.2 409.2"/>
+    <path class="route" data-from="RPC" data-to="MiningAPI" data-kind="---" d="M 775.2 252 L 775.2 286 Q 775.2 294 783.2 294 L 976 294 Q 984 294 984 302 L 984 409.2"/>
+    <path class="route" data-from="API" data-to="BC" data-kind="--&gt;" d="M 594 442.8 L 498.8 442.8 Q 490.8 442.8 490.8 450.8 L 490.8 1220.8 Q 490.8 1228.8 498.8 1228.8 L 521.2 1228.8 Q 529.2 1228.8 529.2 1236.8 L 529.2 1258.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="API" data-to="Pool" data-kind="--&gt;" d="M 780 476.4 L 780 544 Q 780 552 788 552 L 946 552 Q 954 552 954 560 L 954 1258.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="API" data-to="S" data-kind="--&gt;" d="M 684 476.4 L 684 532 Q 684 540 676 540 L 641.6 540 Q 633.6 540 633.6 548 L 633.6 884.4" marker-end="url(#arrow)"/>
+    <path class="route" data-from="MiningAPI" data-to="Mining" data-kind="--&gt;" d="M 984 476.4 L 984 556 Q 984 564 992 564 L 1079.2 564 Q 1087.2 564 1087.2 572 L 1087.2 723.6" marker-end="url(#arrow)"/>
+    <path class="route" data-from="Mining" data-to="S" data-kind="--&gt;" d="M 1087.2 792 L 1087.2 846.4 Q 1087.2 854.4 1079.2 854.4 L 683.6 854.4 Q 675.6 854.4 675.6 862.4 L 675.6 884.4" marker-end="url(#arrow)"/>
+    <path class="route" data-from="Service" data-to="S" data-kind="&lt;--&gt;" d="M 154.8 626.4 L 154.8 862 Q 154.8 870 162.8 870 L 541.2 870 Q 548.4 870 548.4 877.2 L 548.4 884.4" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+    <path class="route" data-from="Service" data-to="Sync" data-kind="-.-&gt;" d="M 229.2 626.4 L 229.2 652 Q 229.2 660 237.2 660 L 352 660 Q 360 660 360 668 L 360 723.6" marker-end="url(#arrow)" stroke-dasharray="2.2 3.2"/>
+    <path class="route" data-from="Sync" data-to="S" data-kind="--&gt;" d="M 360 792 L 360 846.4 Q 360 854.4 368 854.4 L 583.6 854.4 Q 591.6 854.4 591.6 862.4 L 591.6 884.4" marker-end="url(#arrow)"/>
+    <path class="route" data-from="S" data-to="SC" data-kind="--&gt;" d="M 646.8 970.8 L 646.8 978 Q 646.8 985.2 654 985.2 L 737.4 985.2 Q 745.2 985.2 745.2 993 L 745.2 1000.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="S" data-to="BC" data-kind="--&gt;" d="M 577.2 970.8 L 577.2 1258.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="SC" data-to="BC" data-kind="--&gt;" d="M 706.8 1068 L 706.8 1220.8 Q 706.8 1228.8 698.8 1228.8 L 633.2 1228.8 Q 625.2 1228.8 625.2 1236.8 L 625.2 1258.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="SC" data-to="Builder" data-kind="--&gt;" d="M 781.2 1068 L 781.2 1075.2 Q 781.2 1082.4 788.4 1082.4 L 815.2 1082.4 Q 823.2 1082.4 823.2 1090.4 L 823.2 1146" marker-end="url(#arrow)"/>
+    <path class="route" data-from="Builder" data-to="BC" data-kind="--&gt;" d="M 745.2 1214.4 L 745.2 1221.6 Q 745.2 1228.8 738 1228.8 L 680 1228.8 Q 672 1228.8 672 1236.8 L 672 1258.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="Builder" data-to="Pool" data-kind="--&gt;" d="M 872.4 1214.4 L 872.4 1221.6 Q 872.4 1228.8 879.6 1228.8 L 888.4 1228.8 Q 896.4 1228.8 896.4 1236.8 L 896.4 1258.8" marker-end="url(#arrow)"/>
+    <path class="route" data-from="Builder" data-to="Engine" data-kind="--&gt;" d="M 823.2 1214.4 L 823.2 1332.4 Q 823.2 1340.4 815.2 1340.4 L 675 1340.4 Q 667.2 1340.4 667.2 1348.2 L 667.2 1356" marker-end="url(#arrow)"/>
+    <path class="route" data-from="BC" data-to="Engine" data-kind="--&gt;" d="M 600 1326 L 600 1356" marker-end="url(#arrow)"/>
   </g>
   <g id="modules">
     <g id="module-Master" class="module external" data-node="Master" data-owner="external">
       <rect x="105.6" y="16.8" width="98.4" height="49.2" rx="8" ry="8" fill="#EAECEE" stroke="#BCC1C7" stroke-width="1.5"/>
-      <text class="module-label" x="154.8" y="41.4" font-size="16px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">Master</text>
+      <text class="module-label" x="154.8" y="41.4" font-size="15px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">Master</text>
     </g>
     <g id="module-Other" class="module external" data-node="Other" data-owner="external">
       <rect x="308.4" y="16.8" width="124.8" height="49.2" rx="8" ry="8" fill="#EAECEE" stroke="#BCC1C7" stroke-width="1.5"/>
-      <text class="module-label" x="370.8" y="41.4" font-size="16px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">其他 shards</text>
+      <text class="module-label" x="370.8" y="41.4" font-size="15px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">其他 shards</text>
     </g>
     <g id="module-Client" class="module external" data-node="Client" data-owner="external">
-      <rect x="482.4" y="16.8" width="188.4" height="49.2" rx="8" ry="8" fill="#EAECEE" stroke="#BCC1C7" stroke-width="1.5"/>
-      <text class="module-label" x="576.6" y="41.4" font-size="16px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">RPC 客户端 / 远程矿工</text>
+      <rect x="609.6" y="16.8" width="188.4" height="49.2" rx="8" ry="8" fill="#EAECEE" stroke="#BCC1C7" stroke-width="1.5"/>
+      <text class="module-label" x="703.8" y="41.4" font-size="15px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">RPC 客户端 / 远程矿工</text>
     </g>
     <g id="module-MC" class="module create" data-node="MC" data-owner="SLAVE">
-      <rect x="62.4" y="582" width="186" height="67.2" rx="8" ry="8" fill="#DCE9F7" stroke="#8BA9C8" stroke-width="1.5"/>
-      <text class="module-label" x="155.4" y="603.6" font-size="16px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">slaveconn.MasterConn</text>
-      <text class="module-label" x="155.4" y="627.6" font-size="16px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">【新增】Master 连接</text>
+      <rect x="62.4" y="462" width="186" height="67.2" rx="8" ry="8" fill="#DCE9F7" stroke="#8BA9C8" stroke-width="1.5"/>
+      <text class="module-label" x="155.4" y="484.6" font-size="15px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">slaveconn.MasterConn</text>
+      <text class="module-label" x="155.4" y="506.6" font-size="15px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">【新增】Master 连接</text>
     </g>
     <g id="module-XC" class="module reuse" data-node="XC" data-owner="SLAVE">
-      <rect x="278.4" y="582" width="186" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="371.4" y="603.6" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">XshardConnManager</text>
-      <text class="module-label" x="371.4" y="627.6" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】跨 shard 连接</text>
+      <rect x="278.4" y="462" width="186" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="371.4" y="484.6" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">XshardConnManager</text>
+      <text class="module-label" x="371.4" y="506.6" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】跨 shard 连接</text>
     </g>
     <g id="module-RPC" class="module reuse" data-node="RPC" data-owner="NODE">
-      <rect x="481.2" y="183.6" width="190.8" height="68.4" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="576.6" y="205.8" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">Node JSON-RPC Server</text>
-      <text class="module-label" x="576.6" y="229.8" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】</text>
+      <rect x="608.4" y="183.6" width="190.8" height="68.4" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="703.8" y="206.8" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">Node JSON-RPC Server</text>
+      <text class="module-label" x="703.8" y="228.8" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】</text>
     </g>
     <g id="module-Service" class="module create" data-node="Service" data-owner="SLAVE">
-      <rect x="80.4" y="679.2" width="224.4" height="67.2" rx="8" ry="8" fill="#DCE9F7" stroke="#8BA9C8" stroke-width="1.5"/>
-      <text class="module-label" x="192.6" y="700.8" font-size="16px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">请求处理与 ClusterClient</text>
-      <text class="module-label" x="192.6" y="724.8" font-size="16px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">【新增】TCP 监听与业务转发</text>
+      <rect x="80.4" y="559.2" width="224.4" height="67.2" rx="8" ry="8" fill="#DCE9F7" stroke="#8BA9C8" stroke-width="1.5"/>
+      <text class="module-label" x="192.6" y="581.8" font-size="15px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">请求处理与 ClusterClient</text>
+      <text class="module-label" x="192.6" y="603.8" font-size="15px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">【新增】TCP 监听与业务转发</text>
     </g>
-    <g id="module-API" class="module modify" data-node="API" data-owner="NODE">
-      <rect x="435.6" y="282" width="218.4" height="67.2" rx="8" ry="8" fill="#F4E6C5" stroke="#BEA56A" stroke-width="1.5"/>
-      <text class="module-label" x="544.8" y="303.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">EthAPIBackend</text>
-      <text class="module-label" x="544.8" y="327.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【修改】处理 QKC 相关请求</text>
+    <g id="module-API" class="module modify" data-node="API" data-owner="ETH">
+      <rect x="594" y="409.2" width="218.4" height="67.2" rx="8" ry="8" fill="#F4E6C5" stroke="#BEA56A" stroke-width="1.5"/>
+      <text class="module-label" x="703.2" y="431.8" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">EthAPIBackend</text>
+      <text class="module-label" x="703.2" y="453.8" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【修改】处理 QKC 相关请求</text>
     </g>
-    <g id="module-MiningAPI" class="module modify" data-node="MiningAPI" data-owner="NODE">
-      <rect x="682.8" y="282" width="241.2" height="67.2" rx="8" ry="8" fill="#F4E6C5" stroke="#BEA56A" stroke-width="1.5"/>
-      <text class="module-label" x="803.4" y="303.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">MinerAPI</text>
-      <text class="module-label" x="803.4" y="327.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【修改】GetWork / SubmitWork</text>
+    <g id="module-MiningAPI" class="module modify" data-node="MiningAPI" data-owner="ETH">
+      <rect x="864" y="409.2" width="241.2" height="67.2" rx="8" ry="8" fill="#F4E6C5" stroke="#BEA56A" stroke-width="1.5"/>
+      <text class="module-label" x="984.6" y="431.8" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">MinerAPI</text>
+      <text class="module-label" x="984.6" y="453.8" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【修改】GetWork / SubmitWork</text>
     </g>
     <g id="module-Sync" class="module deferred" data-node="Sync" data-owner="ETH">
-      <rect x="250.8" y="843.6" width="218.4" height="68.4" rx="8" ry="8" fill="#F1F3F5" stroke="#B8BFC7" stroke-width="1.5"/>
-      <text class="module-label" x="360" y="865.8" font-size="16px" fill="#4B5563" text-anchor="middle" dominant-baseline="central">QKC 同步模块</text>
-      <text class="module-label" x="360" y="889.8" font-size="16px" fill="#4B5563" text-anchor="middle" dominant-baseline="central">【M2】下载缺失数据并导入</text>
+      <rect x="250.8" y="723.6" width="218.4" height="68.4" rx="8" ry="8" fill="#F1F3F5" stroke="#B8BFC7" stroke-width="1.5"/>
+      <text class="module-label" x="360" y="746.8" font-size="15px" fill="#4B5563" text-anchor="middle" dominant-baseline="central">QKC 同步模块</text>
+      <text class="module-label" x="360" y="768.8" font-size="15px" fill="#4B5563" text-anchor="middle" dominant-baseline="central">【M2】下载缺失数据并导入</text>
     </g>
     <g id="module-Mining" class="module reuse" data-node="Mining" data-owner="ETH">
-      <rect x="969.6" y="843.6" width="236.4" height="68.4" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="1087.8" y="865.8" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">PoWMiner</text>
-      <text class="module-label" x="1087.8" y="889.8" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】work、seal、本地挖矿</text>
+      <rect x="969.6" y="723.6" width="236.4" height="68.4" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="1087.8" y="746.8" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">PoWMiner</text>
+      <text class="module-label" x="1087.8" y="768.8" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】work、seal、本地挖矿</text>
     </g>
     <g id="module-S" class="module modify" data-node="S" data-owner="ETH">
-      <rect x="506.4" y="1004.4" width="211.2" height="86.4" rx="8" ry="8" fill="#F4E6C5" stroke="#BEA56A" stroke-width="1.5"/>
-      <text class="module-label" x="612" y="1023.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">shard.Shard</text>
-      <text class="module-label" x="612" y="1047.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【修改】构造与资源归属</text>
-      <text class="module-label" x="612" y="1071.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【复用】导入、广播与上报</text>
+      <rect x="506.4" y="884.4" width="211.2" height="86.4" rx="8" ry="8" fill="#F4E6C5" stroke="#BEA56A" stroke-width="1.5"/>
+      <text class="module-label" x="612" y="916.6" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">shard.Shard</text>
+      <text class="module-label" x="612" y="938.6" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">【修改】构造与资源归属</text>
     </g>
     <g id="module-SC" class="module reuse" data-node="SC" data-owner="ETH">
-      <rect x="630" y="1120.8" width="230.4" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="745.2" y="1142.4" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">ShardChain</text>
-      <text class="module-label" x="745.2" y="1166.4" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】root 规则与链头选择</text>
+      <rect x="630" y="1000.8" width="230.4" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="745.2" y="1023.4" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">ShardChain</text>
+      <text class="module-label" x="745.2" y="1045.4" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】root 规则与链头选择</text>
     </g>
     <g id="module-Builder" class="module reuse" data-node="Builder" data-owner="ETH">
-      <rect x="721.2" y="1266" width="202.8" height="68.4" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="822.6" y="1288.2" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">miner.Miner</text>
-      <text class="module-label" x="822.6" y="1312.2" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】QKC 区块构建器</text>
+      <rect x="721.2" y="1146" width="202.8" height="68.4" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="822.6" y="1169.2" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">miner.Miner</text>
+      <text class="module-label" x="822.6" y="1191.2" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】QKC 区块构建器</text>
     </g>
     <g id="module-BC" class="module reuse" data-node="BC" data-owner="ETH">
-      <rect x="481.2" y="1378.8" width="238.8" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="600.6" y="1400.4" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">core.BlockChain</text>
-      <text class="module-label" x="600.6" y="1424.4" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】执行、状态、区块数据</text>
+      <rect x="481.2" y="1258.8" width="238.8" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="600.6" y="1281.4" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">core.BlockChain</text>
+      <text class="module-label" x="600.6" y="1303.4" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】执行、状态、区块数据</text>
     </g>
     <g id="module-Pool" class="module reuse" data-node="Pool" data-owner="ETH">
-      <rect x="838.8" y="1378.8" width="174" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="925.8" y="1400.4" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">txpool</text>
-      <text class="module-label" x="925.8" y="1424.4" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】交易池能力</text>
+      <rect x="838.8" y="1258.8" width="174" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="925.8" y="1281.4" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">txpool</text>
+      <text class="module-label" x="925.8" y="1303.4" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】交易池能力</text>
     </g>
     <g id="module-Engine" class="module reuse" data-node="Engine" data-owner="ETH">
-      <rect x="534" y="1476" width="200.4" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
-      <text class="module-label" x="634.2" y="1497.6" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">Shard PoSW Engine</text>
-      <text class="module-label" x="634.2" y="1521.6" font-size="16px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】共识验证与奖励</text>
+      <rect x="534" y="1356" width="200.4" height="67.2" rx="8" ry="8" fill="#DFEBDD" stroke="#91AC8C" stroke-width="1.5"/>
+      <text class="module-label" x="634.2" y="1378.6" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">Shard PoSW Engine</text>
+      <text class="module-label" x="634.2" y="1400.6" font-size="15px" fill="#203D25" text-anchor="middle" dominant-baseline="central">【复用】共识验证与奖励</text>
     </g>
   </g>
   <g id="route-labels">
+    <g class="edge-label" data-label-from="RPC" data-label-to="API">
+      <rect x="632" y="301" width="142.4" height="22" rx="2" ry="2" fill="#FFFFFF" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="703.2" y="312" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">经 ethapi 服务绑定</text>
+    </g>
+    <g class="edge-label" data-label-from="RPC" data-label-to="MiningAPI">
+      <rect x="930.15" y="301" width="107.7" height="22" rx="2" ry="2" fill="#FFFFFF" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="984" y="312" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">注册 MinerAPI</text>
+    </g>
     <g class="edge-label" data-label-from="API" data-label-to="BC">
-      <rect x="443.8" y="397" width="70" height="22" rx="2" ry="2" fill="#FFFFFF" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="478.8" y="408" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">普通查询</text>
+      <rect x="455.8" y="661" width="70" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="490.8" y="672" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">普通查询</text>
     </g>
     <g class="edge-label" data-label-from="API" data-label-to="Pool">
-      <rect x="627.4" y="397" width="70" height="22" rx="2" ry="2" fill="#FFFFFF" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="662.4" y="408" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">提交交易</text>
+      <rect x="823" y="541" width="70" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="858" y="552" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">提交交易</text>
     </g>
     <g class="edge-label" data-label-from="API" data-label-to="S">
-      <rect x="520.4" y="397" width="99.2" height="22" rx="2" ry="2" fill="#FFFFFF" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="570" y="408" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">QKC 专用操作</text>
+      <rect x="584" y="565" width="99.2" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="633.6" y="576" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">QKC 专用操作</text>
     </g>
     <g class="edge-label" data-label-from="Mining" data-label-to="S">
-      <rect x="1036.4" y="940.6" width="101.6" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="1087.2" y="951.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">MinerBackend</text>
+      <rect x="1036.4" y="820.6" width="101.6" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="1087.2" y="831.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">MinerBackend</text>
     </g>
     <g class="edge-label" data-label-from="Service" data-label-to="S">
-      <rect x="61.4" y="866.2" width="186.8" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="154.8" y="877.2" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">业务请求 / ClusterClient</text>
+      <rect x="61.4" y="746.2" width="186.8" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="154.8" y="757.2" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">业务请求 / ClusterClient</text>
     </g>
     <g class="edge-label" data-label-from="Service" data-label-to="Sync">
-      <rect x="276" y="794.2" width="168" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="360" y="805.2" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">提供缺失数据，接口待补</text>
+      <rect x="276" y="674.2" width="168" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="360" y="685.2" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">提供缺失数据，接口待补</text>
     </g>
     <g class="edge-label" data-label-from="Sync" data-label-to="S">
-      <rect x="269.65" y="940.6" width="180.7" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="360" y="951.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">导入 shard / root block</text>
+      <rect x="269.65" y="820.6" width="180.7" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="360" y="831.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">导入 shard / root block</text>
     </g>
     <g class="edge-label" data-label-from="S" data-label-to="BC">
-      <rect x="502" y="1216.6" width="112" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="558" y="1227.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">金额与数据查询</text>
+      <rect x="502" y="1096.6" width="112" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="558" y="1107.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">金额与数据查询</text>
     </g>
     <g class="edge-label" data-label-from="SC" data-label-to="BC">
-      <rect x="622.8" y="1216.6" width="168" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="706.8" y="1227.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">导入区块、更新主链链头</text>
+      <rect x="622.8" y="1096.6" width="168" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="706.8" y="1107.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">导入区块、更新主链链头</text>
     </g>
     <g class="edge-label" data-label-from="SC" data-label-to="Builder">
-      <rect x="798.9" y="1216.6" width="87" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
-      <text class="route-label" x="842.4" y="1227.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">BuildBlock</text>
+      <rect x="798.9" y="1096.6" width="87" height="22" rx="2" ry="2" fill="#FBF5E7" stroke="none" stroke-width="0"/>
+      <text class="route-label" x="842.4" y="1107.6" font-size="14px" fill="#153B61" text-anchor="middle" dominant-baseline="central">BuildBlock</text>
     </g>
   </g>
   <g id="frame-titles">
-    <text class="" x="930" y="126" font-size="16px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">node.Node【复用】 · 启动和关闭已注册服务</text>
-    <text class="" x="768" y="483.6" font-size="16px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">eth.Ethereum【修改】</text>
-    <text class="" x="768" y="502.8" font-size="14px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">创建组件、启动任务和关闭资源</text>
-    <text class="" x="262.8" y="543.6" font-size="14px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">SlaveService【新增】</text>
-    <text class="" x="262.8" y="561.6" font-size="14px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">管理监听器与连接</text>
+    <text class="" x="930" y="126" font-size="15px" fill="#1F2937" text-anchor="middle" dominant-baseline="central">node.Node【复用】 · 启动和关闭已注册服务</text>
+    <text class="" x="840" y="363.6" font-size="15px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">eth.Ethereum【修改】</text>
+    <text class="" x="840" y="382.8" font-size="14px" fill="#4A3308" text-anchor="middle" dominant-baseline="central">创建组件、启动任务和关闭资源</text>
+    <text class="" x="262.8" y="423.6" font-size="14px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">SlaveService【新增】</text>
+    <text class="" x="262.8" y="441.6" font-size="14px" fill="#102E4A" text-anchor="middle" dominant-baseline="central">管理监听器与连接</text>
   </g>
   <g id="figure-caption" font-size="14px" fill="#374151">
-    <text class="caption" x="24" y="1600" font-size="14px" fill="#374151" text-anchor="start">外框：管理范围；如 node.Node 管理已注册服务；Ethereum 内部以最近一层容器表示创建和管理归属。</text>
-    <text class="caption" x="24" y="1622" font-size="14px" fill="#374151" text-anchor="start">实线：调用关系；虚线：同步数据来源，请求由同步模块发起。</text>
-    <text class="caption" x="24" y="1644" font-size="14px" fill="#374151" text-anchor="start">“复用”：沿用已有实现；“新增”：需要新实现的模块或接口；“修改”：调整现有实现。</text>
+    <text class="caption" x="24" y="1480" font-size="14px" fill="#374151" text-anchor="start">外框：管理范围；如 node.Node 管理已注册服务；Ethereum 内部以最近一层容器表示创建和管理归属。</text>
+    <text class="caption" x="24" y="1502" font-size="14px" fill="#374151" text-anchor="start">箭头实线：调用；无箭头实线：RPC 注册/绑定；虚线：同步数据来源，请求由同步模块发起。</text>
+    <text class="caption" x="24" y="1524" font-size="14px" fill="#374151" text-anchor="start">“复用”：沿用已有实现；“新增”：需要新实现的模块或接口；“修改”：调整现有实现。</text>
   </g>
 </svg>
