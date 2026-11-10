@@ -101,6 +101,73 @@ func TestCustomGenesis(t *testing.T) {
 	}
 }
 
+// TestLoadShardGenesisConfig checks validation at the TOML file boundary,
+// before a node or database is opened.
+func TestLoadShardGenesisConfig(t *testing.T) {
+	input, err := os.ReadFile(filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline := string(input)
+	extra := regexp.MustCompile(`(?m)^ExtraData = .*`).FindString(inline)
+	if extra == "" {
+		t.Fatal("example is missing ExtraData")
+	}
+	for _, test := range []struct {
+		name string
+		from string
+		to   string
+		want string
+	}{
+		{name: "ethash"},
+		{name: "simulate", from: "POW_ETHASH", to: "POW_SIMULATE"},
+		{name: "omitted balance", from: `Balance = "1000000000000000000000000"`},
+		{name: "consensus", from: "POW_ETHASH", to: "NONE", want: "invalid ConsensusType"},
+		{name: "number", from: "Nonce = 0", to: "Nonce = 0\nNumber = 1", want: "number, parent hash and gas used must be zero"},
+		{name: "nonce", from: "Nonce = 0", to: "Nonce = 1", want: "difficulty and nonce must be zero"},
+		{name: "difficulty", from: `Difficulty = "0"`, to: `Difficulty = "1"`, want: "difficulty and nonce must be zero"},
+		{name: "missing difficulty", from: `Difficulty = "0"`, want: "difficulty and nonce must be zero"},
+		{name: "PoW difficulty", from: `MinimumDifficulty = "1"`, to: `MinimumDifficulty = "2"`, want: "below minimum difficulty"},
+		{name: "gas limit", from: "GasLimit = 12000000", to: "GasLimit = 17999", want: "invalid gas limit"},
+		{name: "cross-shard gas", from: "GasLimit = 12000000", to: "GasLimit = 13000000", want: "invalid cross-shard gas limits"},
+		{name: "extra-data", from: extra, to: "ExtraData = [0]", want: "invalid extra-data"},
+		{name: "chain ID", from: `ChainID = "100001"`, to: `ChainID = "100002"`, want: "invalid version or chain ID"},
+		{name: "negative balance", from: `Balance = "1000000000000000000000000"`, to: `Balance = "-1"`, want: "balance must be a nonnegative uint256"},
+		{name: "large balance", from: `Balance = "1000000000000000000000000"`, to: `Balance = "115792089237316195423570985008687907853269984665640564039457584007913129639936"`, want: "balance must be a nonnegative uint256"},
+		{name: "base fee", from: "Nonce = 0", to: "Nonce = 0\nBaseFee = \"-1\"", want: "base fee requires London"},
+		{name: "blob gas", from: "Nonce = 0", to: "Nonce = 0\nBlobGasUsed = 0", want: "blob gas fields require Cancun"},
+		{name: "slot", from: "Nonce = 0", to: "Nonce = 0\nSlotNumber = 0", want: "slot number requires Amsterdam"},
+		{name: "merge", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nTerminalTotalDifficulty = \"0\"", want: "Ethereum Merge transition"},
+		{name: "UBT", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nEnableUBTAtGenesis = true", want: "does not support UBT"},
+		{name: "staking code", from: "Code = [96", to: "Code = [0", want: "unexpected genesis code hash"},
+		{name: "database only", from: inline, to: strings.Split(inline, "[Eth.Genesis]")[0]},
+		{name: "ethereum", from: inline, to: "[Eth.Genesis]\nDifficulty = \"0\"\n[Eth.Genesis.Config]\nChainID = \"1337\"\nTerminalTotalDifficulty = \"0\"\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := inline
+			if test.from != "" {
+				if !strings.Contains(inline, test.from) {
+					t.Fatalf("example is missing %q", test.from)
+				}
+				config = strings.Replace(inline, test.from, test.to, 1)
+			}
+			file := filepath.Join(t.TempDir(), "shard.toml")
+			if err := os.WriteFile(file, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var cfg gethConfig
+			err := loadConfig(file, &cfg)
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), file) {
+				t.Fatalf("loadConfig: got %v, want %q with the config filename", err, test.want)
+			}
+		})
+	}
+}
+
 // TestShardGenesis exercises native TOML initialization and database-only restart.
 func TestShardGenesis(t *testing.T) {
 	t.Parallel()
@@ -140,7 +207,7 @@ func TestShardGenesis(t *testing.T) {
 	}{
 		{name: "initialize", config: inline},
 		{name: "restart", config: inline},
-		{name: "different genesis", config: strings.Replace(inline, "GasLimit = 12000000", "GasLimit = 13000000", 1), err: "database contains incompatible genesis"},
+		{name: "different genesis", config: strings.Replace(inline, "Timestamp = 0", "Timestamp = 1", 1), err: "database contains incompatible genesis"},
 		{name: "different rules", config: strings.Replace(inline, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", 1), err: "quarkchain config differs from stored config"},
 		{name: "different consensus", config: strings.Replace(inline, "POW_ETHASH", "POW_SIMULATE", 1), err: "quarkchain config differs from stored config"},
 		{name: "invalid consensus", config: strings.Replace(inline, "POW_ETHASH", "NONE", 1), err: "invalid ConsensusType"},

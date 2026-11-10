@@ -35,6 +35,8 @@ import (
 	"github.com/ethereum/go-ethereum/beacon/blsync"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/catalyst"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
@@ -45,6 +47,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/naoina/toml"
 	"github.com/urfave/cli/v2"
@@ -126,7 +129,84 @@ func loadConfig(file string, cfg *gethConfig) error {
 	if _, ok := err.(*toml.LineError); ok {
 		err = errors.New(file + ", " + err.Error())
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if err := validateShardGenesis(cfg.Eth.Genesis); err != nil {
+		return fmt.Errorf("%s: invalid genesis: %w", file, err)
+	}
+	return nil
+}
+
+// validateShardGenesis checks the supplied TOML definition without filling or
+// modifying it. Database-only startup and Ethereum genesis retain geth's defaults.
+func validateShardGenesis(g *core.Genesis) error {
+	if g == nil {
+		return nil
+	}
+	config := g.Config
+	if config == nil {
+		return errors.New("genesis has no chain configuration")
+	}
+	if config.QuarkChain == nil {
+		return nil
+	}
+	if err := config.CheckConfigForkOrder(); err != nil {
+		return err
+	}
+	if config.Clique != nil || config.TerminalTotalDifficulty != nil || config.MergeNetsplitBlock != nil {
+		return errors.New("quarkchain genesis cannot specify Clique or an Ethereum Merge transition")
+	}
+	if config.EnableUBTAtGenesis || config.IsUBT(common.Big0, g.Timestamp) {
+		return errors.New("quarkchain genesis does not support UBT")
+	}
+	if config.DepositContractAddress != (common.Address{}) {
+		return errors.New("quarkchain deposit contract address must be zero")
+	}
+	if g.Number != 0 || g.ParentHash != (common.Hash{}) || g.GasUsed != 0 {
+		return errors.New("genesis number, parent hash and gas used must be zero")
+	}
+	if g.Difficulty == nil || g.Difficulty.Sign() != 0 || g.Nonce != 0 {
+		return errors.New("quarkchain genesis difficulty and nonce must be zero; PoW difficulty belongs in mixHash")
+	}
+	// The fixed cross-shard gas budget must fit at least one deposit.
+	minGasLimit := max(params.MinGasLimit, params.XShardSendGas*params.XShardGasLimitDivisor)
+	if g.GasLimit < minGasLimit || g.GasLimit > params.MaxGasLimit {
+		return fmt.Errorf("invalid gas limit: have %d, want %d..%d", g.GasLimit, minGasLimit, params.MaxGasLimit)
+	}
+	if g.Mixhash.Big().Cmp(config.QuarkChain.PoSW.MinimumDifficulty) < 0 {
+		return errors.New("genesis PoW difficulty in mixHash is below minimum difficulty")
+	}
+	extra, err := types.DecodeQKCExtra(g.ExtraData)
+	if err != nil {
+		return fmt.Errorf("invalid extra-data: %w", err)
+	}
+	if extra.Version != 0 || extra.ChainID.Cmp(config.ChainID) != 0 {
+		return errors.New("genesis extra-data has an invalid version or chain ID")
+	}
+	if extra.PrevRootBlock != (common.Hash{}) || extra.Cursor != (types.XShardCursor{RootBlockHeight: 1}) {
+		return errors.New("genesis extra-data has an invalid root reference or cursor")
+	}
+	if extra.XShardGasUsed != 0 || extra.XShardGasLimit != g.GasLimit/params.XShardGasLimitDivisor {
+		return errors.New("genesis extra-data has invalid cross-shard gas limits")
+	}
+	if g.BaseFee != nil && (!config.IsLondon(common.Big0) || g.BaseFee.Sign() < 0 || g.BaseFee.BitLen() > 256) {
+		return errors.New("genesis base fee requires London and a nonnegative uint256 value")
+	}
+	if (g.ExcessBlobGas != nil && (*g.ExcessBlobGas != 0 || !config.IsCancun(common.Big0, g.Timestamp))) ||
+		(g.BlobGasUsed != nil && (*g.BlobGasUsed != 0 || !config.IsCancun(common.Big0, g.Timestamp))) {
+		return errors.New("genesis blob gas fields require Cancun and must be zero")
+	}
+	if g.SlotNumber != nil && (*g.SlotNumber != 0 || !config.IsAmsterdam(common.Big0, g.Timestamp)) {
+		return errors.New("genesis slot number requires Amsterdam and must be zero")
+	}
+	for address, account := range g.Alloc {
+		// As in geth's state initialization, an omitted balance means zero.
+		if account.Balance != nil && (account.Balance.Sign() < 0 || account.Balance.BitLen() > 256) {
+			return fmt.Errorf("allocation %s: balance must be a nonnegative uint256", address)
+		}
+	}
+	return g.ValidatePoSWStakingContracts()
 }
 
 func defaultNodeConfig() node.Config {
