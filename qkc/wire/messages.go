@@ -22,6 +22,7 @@ import "github.com/ethereum/go-ethereum/common"
 // the repository root so the generator paths are stable and can be copied
 // into documentation.
 //go:generate sh -c "cd ../.. && go run github.com/ferranbt/fastssz/sszgen --path qkc/wire/messages.go --output qkc/wire/messages_ssz.go --include common/types.go"
+//go:generate go run ./sszgenfix
 
 // =============================================================================
 // Wire-level constants

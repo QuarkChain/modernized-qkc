@@ -18,6 +18,7 @@ package wire
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"math/big"
 	"reflect"
@@ -75,6 +76,48 @@ func TestNewCommandMessageRegistry(t *testing.T) {
 	}
 	if _, ok := msg.(*HelloCommand); !ok {
 		t.Fatalf("NewCommandMessage(Hello) = %T, want *HelloCommand", msg)
+	}
+}
+
+func TestDynamicListRejectsOffsetBeyondPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		msg       SSZMessage
+		fixedSize int
+	}{
+		{"slave request", new(ConnectToSlavesRequest), 4},
+		{"slave response", new(ConnectToSlavesResponse), 4},
+		{"deposit request", new(AddXshardTxListRequest), 68},
+		{"headers response", new(GetUnconfirmedHeadersResponse), 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, offset := range []uint32{0x00100000, 0xfffffffc} {
+				payload := make([]byte, tc.fixedSize+4)
+				binary.LittleEndian.PutUint32(payload[tc.fixedSize-4:], uint32(tc.fixedSize))
+				binary.LittleEndian.PutUint32(payload[tc.fixedSize:], offset)
+				if err := tc.msg.UnmarshalSSZ(payload); err == nil {
+					t.Fatalf("accepted offset %#x beyond payload", offset)
+				}
+				switch msg := tc.msg.(type) {
+				case *ConnectToSlavesRequest:
+					if msg.SlaveInfoList != nil {
+						t.Fatal("allocated SlaveInfoList")
+					}
+				case *ConnectToSlavesResponse:
+					if msg.ResultList != nil {
+						t.Fatal("allocated ResultList")
+					}
+				case *AddXshardTxListRequest:
+					if msg.DepositTxList != nil {
+						t.Fatal("allocated DepositTxList")
+					}
+				case *GetUnconfirmedHeadersResponse:
+					if msg.HeaderList != nil {
+						t.Fatal("allocated HeaderList")
+					}
+				}
+			}
+		})
 	}
 }
 
