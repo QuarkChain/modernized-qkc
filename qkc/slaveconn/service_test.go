@@ -1,0 +1,446 @@
+// Copyright 2026-2027 The quarkchain Authors
+// This file is part of the quarkchain library.
+//
+// The quarkchain library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The quarkchain library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
+
+package slaveconn
+
+import (
+	"context"
+	"errors"
+	"io"
+	"math/big"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/qkc/comm"
+	"github.com/ethereum/go-ethereum/qkc/conn"
+	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/holiman/uint256"
+)
+
+type serviceBackend struct {
+	inits    atomic.Int32
+	initErr  error
+	roots    atomic.Int32
+	deposits chan common.Hash
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (b *serviceBackend) Init(*qkctypes.RootBlock) error { b.inits.Add(1); return b.initErr }
+func (b *serviceBackend) AddRootBlock(*qkctypes.RootBlock) (bool, error) {
+	b.roots.Add(1)
+	return false, errors.New("unknown root parent")
+}
+func (b *serviceBackend) GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error) {
+	return uint256.NewInt(42), common.Address{1}, nil
+}
+func (b *serviceBackend) GetUnconfirmedHeaderList() ([]*types.Header, error) { return nil, nil }
+func (b *serviceBackend) AddXshardTxList(hash common.Hash, _ []*types.DepositTx) error {
+	if b.entered != nil {
+		close(b.entered)
+		<-b.release
+	}
+	if b.deposits != nil {
+		b.deposits <- hash
+	}
+	return nil
+}
+
+func newTestService(t *testing.T, id int64, backend *serviceBackend, shutdown func()) *Service {
+	t.Helper()
+	// Model the required owner entrypoint: schedule full shutdown once and
+	// return immediately, even if another connection reports failure.
+	var shutdownOnce sync.Once
+	requestShutdown := func() { shutdownOnce.Do(func() { go shutdown() }) }
+	s, err := NewService(ServiceConfig{ListenAddr: "127.0.0.1:0", LocalChainID: big.NewInt(id), ConfiguredChainIDs: []*big.Int{big.NewInt(1), big.NewInt(2)}, Shutdown: requestShutdown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindShard(backend); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Stop() })
+	return s
+}
+
+func serviceMaster(t *testing.T, s *Service, handler conn.TypedHandler) *conn.BaseConn {
+	t.Helper()
+	nc, err := net.Dial("tcp", s.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handler == nil {
+		handler = func(wire.SSZMessage) (wire.SSZMessage, error) {
+			return &wire.AddShardBlockHeaderResponse{ErrorCode: 9}, nil
+		}
+	}
+	remote := conn.NewBaseConn(conn.Config{
+		Transport: conn.NewTCPTransport(nc, func(r io.Reader) (*wire.ClusterFrame, error) {
+			return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
+		}, wire.WriteClusterFrameWithPeerID),
+		Serializers: map[byte]*conn.OpSerializer{
+			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
+			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
+			byte(wire.ClusterOpGetRootChainStakesRequest):    conn.OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
+			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): conn.OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
+			byte(wire.ClusterOpAddShardBlockHeaderRequest):   conn.OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
+		},
+		Handlers: map[byte]conn.TypedHandler{byte(wire.ClusterOpAddShardBlockHeaderRequest): handler},
+	})
+	remote.Start()
+	t.Cleanup(remote.Close)
+	// A round trip ensures that the Master slot is assigned before xshard dials.
+	serviceRPC(t, remote, wire.ClusterOpPing, &wire.PingRequest{})
+	return remote
+}
+
+func serviceRPC(t *testing.T, remote *conn.BaseConn, op wire.ClusterOp, req wire.SSZMessage) wire.SSZMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := remote.SendRPC(ctx, byte(op), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func initializeService(t *testing.T, remote *conn.BaseConn) []byte {
+	t.Helper()
+	root := qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{})
+	data, err := root.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceRPC(t, remote, wire.ClusterOpPing, &wire.PingRequest{HasRootTip: true, RootTip: data})
+	return data
+}
+
+func TestServiceClusterRoundTrip(t *testing.T) {
+	aBackend := &serviceBackend{}
+	bBackend := &serviceBackend{deposits: make(chan common.Hash, 1)}
+	shutdown := make(chan struct{})
+	a, b := newTestService(t, 1, aBackend, func() { close(shutdown) }), newTestService(t, 2, bBackend, noopShutdown)
+	am, bm := serviceMaster(t, a, nil), serviceMaster(t, b, nil)
+	if aBackend.inits.Load() != 0 || bBackend.inits.Load() != 0 {
+		t.Fatal("initial PING must not initialize shards")
+	}
+
+	// Ask the service to connect through the real Master topology handler.
+	addr := b.Addr().(*net.TCPAddr)
+	chainID, _ := wire.ChainIDToSSZ(big.NewInt(2))
+	response := serviceRPC(t, am, wire.ClusterOpConnectToSlavesRequest, &wire.ConnectToSlavesRequest{
+		SlaveInfoList: []wire.SlaveInfo{{Host: []byte("127.0.0.1"), Port: uint16(addr.Port), ChainID: chainID}},
+	}).(*wire.ConnectToSlavesResponse)
+	if len(response.ResultList) != 1 || len(response.ResultList[0]) != 0 {
+		t.Fatalf("dial response: %+v", response)
+	}
+	if aBackend.inits.Load() != 0 || bBackend.inits.Load() != 0 {
+		t.Fatal("interconnection must not initialize shards")
+	}
+	// Only the subsequent PING(rootTip) initializes each already constructed shard.
+	root := initializeService(t, am)
+	initializeService(t, bm)
+	if aBackend.inits.Load() != 1 || bBackend.inits.Load() != 1 {
+		t.Fatal("root PING did not initialize shards")
+	}
+	hash := common.Hash{3}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.BroadcastXShardTxList(ctx, big.NewInt(2), hash, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-bBackend.deposits:
+		if got != hash {
+			t.Fatalf("deposit block hash: %v", got)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	err := a.SendShardBlockHeaderToMaster(ctx, &types.Header{Number: big.NewInt(1), Difficulty: big.NewInt(1)}, uint256.NewInt(7))
+	var remoteErr *comm.RemoteError
+	if !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
+		t.Fatalf("master rejection lost: %v", err)
+	}
+	if err := a.BroadcastXShardTxList(ctx, big.NewInt(3), hash, nil); err == nil {
+		t.Fatal("missing connection accepted")
+	}
+
+	result := serviceRPC(t, am, wire.ClusterOpAddRootBlockRequest, &wire.AddRootBlockRequest{RootBlock: root}).(*wire.AddRootBlockResponse)
+	if result.ErrorCode == 0 || aBackend.roots.Load() != 1 {
+		t.Fatal("backend failure was not returned")
+	}
+	// Business rejection must leave the connection usable.
+	stakes := serviceRPC(t, am, wire.ClusterOpGetRootChainStakesRequest, &wire.GetRootChainStakesRequest{}).(*wire.GetRootChainStakesResponse)
+	if stakes.ErrorCode != 0 || stakes.Stakes[0] != 42 || stakes.Signer != (common.Address{1}) {
+		t.Fatalf("stakes adapter: %+v", stakes)
+	}
+	headers := serviceRPC(t, am, wire.ClusterOpGetUnconfirmedHeadersRequest, &wire.GetUnconfirmedHeadersRequest{}).(*wire.GetUnconfirmedHeadersResponse)
+	if headers.ErrorCode != 0 || len(headers.HeaderList) != 0 {
+		t.Fatalf("headers adapter: %+v", headers)
+	}
+
+	am.Close()
+	select {
+	case <-shutdown:
+	case <-ctx.Done():
+		t.Fatal("master loss did not notify owner")
+	}
+}
+
+func TestServiceStopWaitsForBackend(t *testing.T) {
+	backend := &serviceBackend{entered: make(chan struct{}), release: make(chan struct{})}
+	shutdown := make(chan struct{})
+	s := newTestService(t, 1, backend, func() { close(shutdown) })
+	done := make(chan error, 1)
+	go func() { done <- s.AddXshardTxList(common.Hash{}, nil) }()
+	select {
+	case <-backend.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend not called")
+	}
+	stopped := make(chan struct{})
+	go func() { s.Stop(); close(stopped) }()
+	select {
+	case <-s.ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not cancel lifecycle")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while backend still uses resources")
+	default:
+	}
+	if err := s.AddXshardTxList(common.Hash{}, nil); err == nil {
+		t.Fatal("new request admitted during stop")
+	}
+	close(backend.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not finish")
+	}
+	if err := s.CreateShards(qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{})); err == nil {
+		t.Fatal("late initialization admitted after Stop")
+	}
+	if backend.inits.Load() != 0 {
+		t.Fatal("late request reached backend")
+	}
+}
+
+func TestServiceStopClosesPendingRPC(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	shutdown := make(chan struct{})
+	s := newTestService(t, 1, &serviceBackend{}, func() { close(shutdown) })
+	remote := serviceMaster(t, s, func(wire.SSZMessage) (wire.SSZMessage, error) {
+		close(entered)
+		<-release
+		return &wire.AddShardBlockHeaderResponse{}, nil
+	})
+	initializeService(t, remote)
+	result := make(chan error, 1)
+	go func() {
+		result <- s.SendShardBlockHeaderToMaster(context.Background(), &types.Header{Number: big.NewInt(1), Difficulty: big.NewInt(1)}, nil)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("master did not receive report")
+	}
+	s.Stop()
+	select {
+	case err := <-result:
+		if !errors.Is(err, conn.ErrConnectionClosed) {
+			t.Fatalf("pending RPC error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending RPC not canceled")
+	}
+}
+
+func TestServiceAssembly(t *testing.T) {
+	cfg := ServiceConfig{ListenAddr: "127.0.0.1:0", LocalChainID: big.NewInt(1), ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown}
+	s, err := NewService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	if s.Addr() != nil {
+		t.Fatal("constructor opened listener")
+	}
+	if err := s.Start(); err == nil {
+		t.Fatal("started before binding")
+	}
+	if err := s.BindShard(nil); err == nil {
+		t.Fatal("bound nil backend")
+	}
+	if err := s.BindShard(&serviceBackend{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindShard(&serviceBackend{}); err == nil {
+		t.Fatal("bound twice")
+	}
+	cfg.LocalChainID.SetInt64(99)
+	if s.cfg.LocalChainID.Int64() != 1 {
+		t.Fatal("configuration ID was not copied")
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err == nil {
+		t.Fatal("started twice")
+	}
+	s.Stop()
+	if err := s.Start(); err == nil {
+		t.Fatal("restarted stopped service")
+	}
+}
+
+func TestServiceInitializationRetry(t *testing.T) {
+	backend := &serviceBackend{initErr: errors.New("checkpoint unavailable")}
+	shutdown := make(chan struct{})
+	s := newTestService(t, 1, backend, func() { close(shutdown) })
+	root := qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{})
+	if err := s.CreateShards(root); err == nil {
+		t.Fatal("initialization failure ignored")
+	}
+	backend.initErr = nil
+	if err := s.CreateShards(root); err != nil {
+		t.Fatal(err)
+	}
+	if backend.inits.Load() != 2 {
+		t.Fatal("initialization retry was not forwarded")
+	}
+}
+
+// Fault notification must reach the owner before an in-flight business call
+// completes. The owner asynchronously stops Service and only then releases
+// business resources. Duplicate socket notifications must not repeat cleanup.
+func TestServiceFailureShutdown(t *testing.T) {
+	for _, failure := range []string{"master", "xshard", "listener", "simultaneous", "owner"} {
+		t.Run(failure, func(t *testing.T) {
+			backend := &serviceBackend{entered: make(chan struct{}), release: make(chan struct{})}
+			var calls atomic.Int32
+			done := make(chan struct{})
+			requested := make(chan struct{})
+			var a *Service
+			a = newTestService(t, 1, backend, func() {
+				calls.Add(1)
+				close(requested)
+				a.Stop()
+				close(done)
+			})
+			b := newTestService(t, 2, &serviceBackend{}, noopShutdown)
+			am := serviceMaster(t, a, nil)
+			serviceMaster(t, b, nil)
+			addr := b.Addr().(*net.TCPAddr)
+			id, _ := wire.ChainIDToSSZ(big.NewInt(2))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := a.DialToSlave(ctx, wire.SlaveInfo{Host: []byte("127.0.0.1"), Port: uint16(addr.Port), ChainID: id}); err != nil {
+				t.Fatal(err)
+			}
+			peer := a.xshard.Lookup(big.NewInt(2))
+			// Keep a business request running while communication shuts down.
+			// Cleanup also releases it if an assertion fails.
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(backend.release) }) }
+			defer release()
+			result := make(chan error, 1)
+			go func() { result <- a.AddXshardTxList(common.Hash{}, nil) }()
+			select {
+			case <-backend.entered:
+			case <-ctx.Done():
+				t.Fatal("backend not entered")
+			}
+			switch failure {
+			case "master":
+				am.Close()
+			case "xshard":
+				peer.Close()
+			case "listener":
+				a.listener.Close()
+			case "simultaneous":
+				var closes sync.WaitGroup
+				closes.Add(2)
+				go func() { defer closes.Done(); am.Close() }()
+				go func() { defer closes.Done(); peer.Close() }()
+				closes.Wait()
+			case "owner":
+				a.shutdown()
+			}
+			select {
+			case <-requested:
+			case <-ctx.Done():
+				t.Fatal("owner not notified while backend was still running")
+			}
+			select {
+			case <-a.ctx.Done():
+			case <-ctx.Done():
+				t.Fatal("failure did not stop service")
+			}
+			select {
+			case <-done:
+				t.Fatal("owner closed before business request finished")
+			default:
+			}
+			release()
+			select {
+			case err := <-result:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("business request did not finish")
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("owner callback missing or reentrant Stop deadlocked")
+			}
+			if !a.master.IsClosed() || !peer.IsClosed() {
+				t.Fatal("callback ran before connections closed")
+			}
+			if _, err := a.listener.Accept(); !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("listener still open: %v", err)
+			}
+			a.shutdown()
+			a.Stop()
+			if err := a.AddXshardTxList(common.Hash{}, nil); err == nil {
+				t.Fatal("late deposit handler admitted after Stop")
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("owner shutdown calls: %d", calls.Load())
+			}
+		})
+	}
+}
