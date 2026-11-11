@@ -77,7 +77,7 @@ const (
 // block is where the next block resumes applying messages.
 type XShardCursor struct {
 	RootBlockHeight    uint64 // height of the root block that confirms the source block
-	ShardBlockIndex    uint64 // position of the source block in that root block
+	ShardBlockIndex    uint64 // position of the source block in that root block (minor_block_index in pyquarkchain)
 	XShardDepositIndex uint64 // position of the message in the source block
 }
 

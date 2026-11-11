@@ -110,7 +110,7 @@ type HelloCommand struct {
 // AddShardBlockHeaderRequest reports an accepted shard block to Master.
 // ShardBlockHeader carries an RLP-encoded geth header.
 type AddShardBlockHeaderRequest struct {
-	ShardBlockHeader Data                `ssz-max:"4294967295"`
+	ShardBlockHeader Data                `ssz-max:"4294967295"` // minor_block_header in pyquarkchain
 	CoinbaseAmount   [UInt256Length]byte // Shard miner's total reward in QKC base units, including fees.
 }
 
@@ -123,7 +123,7 @@ type AddShardBlockHeaderResponse struct {
 // without the 0x7e transaction prefix, in source log order.
 type AddXshardTxListRequest struct {
 	ChainID        [UInt256Length]byte // Destination ChainConfig.ChainID, little-endian.
-	ShardBlockHash common.Hash         // Source block hash.
+	ShardBlockHash common.Hash         // Source block hash (minor_block_hash in pyquarkchain).
 	DepositTxList  []Data              `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
 }
 
@@ -155,7 +155,7 @@ type GetUnconfirmedHeadersResponse struct {
 // at ShardBlockHash.
 type GetRootChainStakesRequest struct {
 	Address        common.Address
-	ShardBlockHash common.Hash
+	ShardBlockHash common.Hash // minor_block_hash in pyquarkchain
 }
 
 // GetRootChainStakesResponse reports staking information. Stakes is a
