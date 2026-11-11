@@ -17,6 +17,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -165,6 +169,63 @@ func TestLoadShardGenesisConfig(t *testing.T) {
 				}
 			} else if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), file) {
 				t.Fatalf("loadConfig: got %v, want %q with the config filename", err, test.want)
+			}
+		})
+	}
+}
+
+// TestShardGenesisJSONValidation checks the JSON entry points that bypass TOML validation.
+func TestShardGenesisJSONValidation(t *testing.T) {
+	t.Parallel()
+	example := filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml")
+	var cfg gethConfig
+	if err := loadConfig(example, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Eth.Genesis.ExtraData = []byte{0}
+	input, err := json.Marshal(cfg.Eth.Genesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesisFile := filepath.Join(t.TempDir(), "genesis.json")
+	if err := os.WriteFile(genesisFile, input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"init", "override", "override without config"} {
+		t.Run(entry, func(t *testing.T) {
+			datadir := t.TempDir()
+			args := []string{"--datadir", datadir, "--cache", "16",
+				"--http.port", "0", "--authrpc.port", "0", "--port", "0",
+				"--maxpeers", "0", "--nodiscover", "--discovery.dns", "", "--nat", "none", "--ipcdisable"}
+			if entry != "override without config" {
+				args = append(args, "--config", example)
+			}
+			if entry == "init" {
+				args = append(args, "init", genesisFile)
+			} else {
+				args = append(args, "--override.genesis", genesisFile, "--exec", "eth.chainId()", "console")
+			}
+			geth := runGeth(t, args...)
+			geth.ExpectRegexp("Fatal: .*invalid extra-data.*\n")
+			geth.ExpectExit()
+			if geth.ExitStatus() == 0 {
+				t.Fatal("invalid JSON genesis was accepted")
+			}
+			// Reopen the failed initialization to ensure it did not persist a genesis.
+			nodeConfig := defaultNodeConfig()
+			nodeConfig.DataDir = datadir
+			stack, err := node.New(&nodeConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stack.Close()
+			db, err := stack.OpenDatabaseWithOptions("chaindata", node.DatabaseOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if rawdb.ReadCanonicalHash(db, 0) != (common.Hash{}) || rawdb.ReadHeadBlockHash(db) != (common.Hash{}) {
+				t.Fatal("invalid JSON genesis changed the canonical chain")
 			}
 		})
 	}

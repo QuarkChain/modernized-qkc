@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/naoina/toml"
 )
@@ -44,7 +45,13 @@ func TestCreateShardConsensusEngine(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			genesis := &core.Genesis{
 				Config: params.NewTestQuarkChainConfig(10001), GasLimit: 12_000_000, Difficulty: new(big.Int),
+				Mixhash: common.BigToHash(common.Big1),
 			}
+			genesis.ExtraData = (&types.QKCExtra{
+				ChainID: genesis.Config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+				XShardGasLimit: genesis.GasLimit / params.XShardGasLimitDivisor,
+			}).Encode()
+			genesis.Alloc = core.PoSWStakingContractAllocs(genesis.Config)
 			genesis.Config.QuarkChain.ConsensusType = test.kind
 			db := rawdb.NewMemoryDatabase()
 			defer db.Close()
@@ -69,6 +76,45 @@ func TestCreateShardConsensusEngine(t *testing.T) {
 				if err := engine.Close(); err != nil {
 					t.Fatal(err)
 				}
+			}
+		})
+	}
+}
+
+func TestCreateShardConsensusEngineRejectsInvalidGenesis(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*core.Genesis)
+		want   string
+	}{
+		{"extra-data", func(g *core.Genesis) { g.ExtraData = []byte{0} }, "invalid extra-data"},
+		{"balance overflow", func(g *core.Genesis) {
+			g.Alloc[common.Address{1}] = types.Account{Balance: new(big.Int).Lsh(common.Big1, 256)}
+		}, "balance must be a nonnegative uint256"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := params.NewTestQuarkChainConfig(10001)
+			genesis := &core.Genesis{
+				Config: config, GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+				ExtraData: (&types.QKCExtra{
+					ChainID: config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+					XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+				}).Encode(),
+				Alloc: core.PoSWStakingContractAllocs(config),
+			}
+			test.change(genesis)
+			db := rawdb.NewMemoryDatabase()
+			defer db.Close()
+			engine, err := CreateConsensusEngine(config, db, genesis)
+			if engine != nil {
+				engine.Close()
+				t.Fatal("created an engine with invalid genesis")
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+			if hash := rawdb.ReadCanonicalHash(db, 0); hash != (common.Hash{}) {
+				t.Fatalf("invalid genesis was written: %s", hash)
 			}
 		})
 	}

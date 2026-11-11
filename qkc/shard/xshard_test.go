@@ -68,7 +68,14 @@ func TestXShardDeposits(t *testing.T) {
 	maps.Copy(alloc, core.PoSWStakingContractAllocs(&config))
 	alloc[sender] = types.Account{Balance: big.NewInt(params.Ether)}
 	alloc[impostor] = types.Account{Code: program.New().Push(vm.XShardSentMessageTopic).Push(0).Push(0).Op(vm.LOG1).Bytes()}
-	gspec := &core.Genesis{Config: &config, Alloc: alloc}
+	gspec := &core.Genesis{
+		Config: &config, Alloc: alloc, GasLimit: params.GenesisGasLimit,
+		Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+		ExtraData: (&types.QKCExtra{
+			ChainID: config.ChainID, Cursor: pos(1, 0, 0),
+			XShardGasLimit: params.GenesisGasLimit / params.XShardGasLimitDivisor,
+		}).Encode(),
+	}
 	signer := types.LatestSigner(gspec.Config)
 
 	// Block 1 sends messages to shards 1 and 2, between a SentMessage topic of

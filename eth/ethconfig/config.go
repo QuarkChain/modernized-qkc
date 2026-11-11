@@ -243,6 +243,9 @@ func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, genesi
 		if hash := rawdb.ReadCanonicalHash(db, 0); hash != (common.Hash{}) {
 			header = rawdb.ReadHeader(db, hash, 0)
 		} else if genesis != nil {
+			if err := genesis.ValidateQuarkChain(); err != nil {
+				return nil, err
+			}
 			header = genesis.ToBlock().Header()
 		}
 		if config.QuarkChain.ConsensusType == params.ConsensusSimulate {

@@ -50,38 +50,35 @@ func TestSetupGenesisQuarkChainConfig(t *testing.T) {
 				name     string
 				change   func(*params.ChainConfig)
 				ethereum bool
-				wantErr  bool
+				wantErr  string
 			}{
-				{"unchanged", func(c *params.ChainConfig) {}, false, false},
-				{"coinbaseAmount", func(c *params.ChainConfig) { c.QuarkChain.PoSW.CoinbaseAmount.SetInt64(200) }, false, true},
-				{"consensusType", func(c *params.ChainConfig) { c.QuarkChain.ConsensusType = params.ConsensusSimulate }, false, true},
-				{"chainId", func(c *params.ChainConfig) { c.ChainID = big.NewInt(10002) }, false, true},
+				{"unchanged", func(c *params.ChainConfig) {}, false, ""},
+				{"coinbaseAmount", func(c *params.ChainConfig) { c.QuarkChain.PoSW.CoinbaseAmount.SetInt64(200) }, false, errQuarkChainConfigMismatch.Error()},
+				{"consensusType", func(c *params.ChainConfig) { c.QuarkChain.ConsensusType = params.ConsensusSimulate }, false, errQuarkChainConfigMismatch.Error()},
+				{"chainId", func(c *params.ChainConfig) { c.ChainID = big.NewInt(10002) }, false, "invalid version or chain ID"},
 				{"chainIds", func(c *params.ChainConfig) {
 					c.QuarkChain.ChainIDs = []*big.Int{big.NewInt(10001), big.NewInt(10002), big.NewInt(10003)}
-				}, false, true},
+				}, false, errQuarkChainConfigMismatch.Error()},
 				{"chainIds order", func(c *params.ChainConfig) {
 					c.QuarkChain.ChainIDs[0], c.QuarkChain.ChainIDs[1] = c.QuarkChain.ChainIDs[1], c.QuarkChain.ChainIDs[0]
-				}, false, true},
-				{"maxBlocksPerRootBlock", func(c *params.ChainConfig) { c.QuarkChain.MaxBlocksPerRootBlock = 12 }, false, true},
-				{"remove config", func(c *params.ChainConfig) { c.QuarkChain = nil }, false, true},
+				}, false, "root staking contract must only be deployed on the root coinbase chain"},
+				{"maxBlocksPerRootBlock", func(c *params.ChainConfig) { c.QuarkChain.MaxBlocksPerRootBlock = 12 }, false, errQuarkChainConfigMismatch.Error()},
+				{"remove config", func(c *params.ChainConfig) { c.QuarkChain = nil }, false, errQuarkChainConfigMismatch.Error()},
 				{"add config", func(c *params.ChainConfig) {
 					c.QuarkChain = params.NewTestQuarkChainConfig(10001, 10001, 10002).QuarkChain
-				}, true, true},
-				{"ethereum unchanged", func(c *params.ChainConfig) {}, true, false},
+				}, true, errQuarkChainConfigMismatch.Error()},
+				{"ethereum unchanged", func(c *params.ChainConfig) {}, true, ""},
 				{"ethereum fork conflict", func(c *params.ChainConfig) {
 					c.QuarkChain.PoSW.CoinbaseAmount.SetInt64(200)
 					c.ChainID = big.NewInt(10002)
-				}, false, true},
+				}, false, "invalid version or chain ID"},
 			} {
 				t.Run(scheme+"/"+strconv.FormatUint(height, 10)+"/"+test.name, func(t *testing.T) {
 					db := rawdb.NewMemoryDatabase()
 					defer db.Close()
 					tdb := triedb.NewDatabase(db, newDbConfig(scheme))
 					defer tdb.Close()
-					genesis := &Genesis{
-						Config: genesisConfig(10001), GasLimit: 12_000_000,
-						Difficulty: big.NewInt(1), Alloc: PoSWStakingContractAllocs(params.NewTestQuarkChainConfig(10001)),
-					}
+					genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
 					genesis.Config.QuarkChain.PoSW.CoinbaseAmount.SetInt64(100)
 					if test.ethereum {
 						genesis.Config.QuarkChain = nil
@@ -109,19 +106,19 @@ func TestSetupGenesisQuarkChainConfig(t *testing.T) {
 						t.Fatal(err)
 					}
 					_, _, compatErr, err := SetupGenesisBlock(db, tdb, &next)
-					if !test.wantErr {
+					if test.wantErr == "" {
 						if err != nil || compatErr != nil {
 							t.Fatalf("identical configuration rejected: %v, %v", compatErr, err)
 						}
 					} else {
-						if !errors.Is(err, errQuarkChainConfigMismatch) || compatErr != nil {
+						if err == nil || !strings.Contains(err.Error(), test.wantErr) || compatErr != nil {
 							t.Fatalf("expected a startup error instead of an automatic rewind: %v, %v", compatErr, err)
 						}
 						bc, err := NewBlockChain(db, &next, ethash.NewFullFaker(), DefaultConfig().WithStateScheme(scheme))
 						if bc != nil {
 							bc.Stop()
 						}
-						if !errors.Is(err, errQuarkChainConfigMismatch) {
+						if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 							t.Fatalf("NewBlockChain must reject the changed QKC configuration: %v", err)
 						}
 					}
@@ -140,7 +137,7 @@ func TestSetupGenesisQuarkChainConfig(t *testing.T) {
 			defer db.Close()
 			tdb := triedb.NewDatabase(db, newDbConfig(scheme))
 			defer tdb.Close()
-			genesis := &Genesis{Config: genesisConfig(10001), GasLimit: 12_000_000, Difficulty: big.NewInt(1), Alloc: PoSWStakingContractAllocs(params.NewTestQuarkChainConfig(10001))}
+			genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
 			genesis.Config.QuarkChain.PoSW.CoinbaseAmount.SetInt64(200)
 			_, hash, compatErr, err := SetupGenesisBlock(db, tdb, genesis)
 			if err != nil || compatErr != nil {
@@ -453,8 +450,152 @@ func TestBinaryGenesisCommit(t *testing.T) {
 func genesisConfig(chainID int64) *params.ChainConfig {
 	config := *params.AllEthashProtocolChanges
 	config.ChainID = big.NewInt(chainID)
+	config.TerminalTotalDifficulty = nil
 	config.QuarkChain = params.NewTestQuarkChainConfig(chainID, 10001, 10002).QuarkChain
 	return &config
+}
+
+func quarkChainGenesis(config *params.ChainConfig, gasLimit uint64) *Genesis {
+	return &Genesis{
+		Config: config, GasLimit: gasLimit, Difficulty: new(big.Int),
+		Mixhash: common.BigToHash(config.QuarkChain.PoSW.MinimumDifficulty),
+		ExtraData: (&types.QKCExtra{
+			ChainID: config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+			XShardGasLimit: gasLimit / params.XShardGasLimitDivisor,
+		}).Encode(),
+		Alloc: PoSWStakingContractAllocs(config),
+	}
+}
+
+func TestQuarkChainGenesisValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*Genesis)
+		want   string
+	}{
+		{"valid", func(g *Genesis) {}, ""},
+		{"extra data", func(g *Genesis) { g.ExtraData = []byte{0} }, "invalid extra-data"},
+		{"chain ID", func(g *Genesis) {
+			extra, _ := types.DecodeQKCExtra(g.ExtraData)
+			extra.ChainID = big.NewInt(10002)
+			g.ExtraData = extra.Encode()
+		}, "invalid version or chain ID"},
+		{"cursor", func(g *Genesis) {
+			extra, _ := types.DecodeQKCExtra(g.ExtraData)
+			extra.Cursor.RootBlockHeight = 2
+			g.ExtraData = extra.Encode()
+		}, "invalid root reference or cursor"},
+		{"nonce", func(g *Genesis) { g.Nonce = 1 }, "difficulty and nonce must be zero"},
+		{"difficulty", func(g *Genesis) { g.Difficulty = big.NewInt(1) }, "difficulty and nonce must be zero"},
+		{"gas limit", func(g *Genesis) { g.GasLimit = 17999 }, "invalid gas limit"},
+		{"large balance", func(g *Genesis) {
+			g.Alloc[common.Address{1}] = types.Account{Balance: new(big.Int).Lsh(common.Big1, 256)}
+		}, "balance must be a nonnegative uint256"},
+		{"staking code", func(g *Genesis) { delete(g.Alloc, params.ShardStakingContractAddress) }, "unexpected genesis code hash"},
+	} {
+		for _, entry := range []string{"commit", "load", "setup", "restart", "missing config"} {
+			t.Run(test.name+"/"+entry, func(t *testing.T) {
+				db := rawdb.NewMemoryDatabase()
+				defer db.Close()
+				tdb := triedb.NewDatabase(db, triedb.HashDefaults)
+				defer tdb.Close()
+				genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
+				block := genesis.ToBlock()
+				switch entry {
+				case "restart":
+					genesis.MustCommit(db, tdb)
+				case "missing config":
+					// Exercise recovery when the canonical genesis exists without its config.
+					rawdb.WriteHeader(db, block.Header())
+					rawdb.WriteCanonicalHash(db, block.Hash(), 0)
+					rawdb.WriteHeadHeaderHash(db, block.Hash())
+				}
+				beforeHash := rawdb.ReadCanonicalHash(db, 0)
+				beforeHead := rawdb.ReadHeadHeaderHash(db)
+				beforeConfig, err := json.Marshal(rawdb.ReadChainConfig(db, block.Hash()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				test.change(genesis)
+				beforeGenesis, err := json.Marshal(genesis)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch entry {
+				case "commit":
+					_, err = genesis.Commit(db, tdb, nil)
+				case "load":
+					_, _, err = LoadChainConfig(db, genesis)
+				default:
+					_, _, _, err = SetupGenesisBlock(db, tdb, genesis)
+				}
+				if test.want == "" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err == nil || !strings.Contains(err.Error(), test.want) {
+						t.Fatalf("got %v, want %q", err, test.want)
+					}
+					afterConfig, err := json.Marshal(rawdb.ReadChainConfig(db, block.Hash()))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if rawdb.ReadCanonicalHash(db, 0) != beforeHash || rawdb.ReadHeadHeaderHash(db) != beforeHead || !bytes.Equal(beforeConfig, afterConfig) {
+						t.Fatal("invalid genesis changed the stored genesis, head or config")
+					}
+				}
+				afterGenesis, err := json.Marshal(genesis)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(beforeGenesis, afterGenesis) {
+					t.Fatal("genesis validation changed the supplied definition")
+				}
+			})
+		}
+	}
+	if err := (*Genesis)(nil).ValidateQuarkChain(); err != nil {
+		t.Fatal(err)
+	}
+	if err := new(Genesis).ValidateQuarkChain(); !errors.Is(err, errGenesisNoConfig) {
+		t.Fatalf("missing config: got %v, want %v", err, errGenesisNoConfig)
+	}
+	if err := (&Genesis{Config: params.MergedTestChainConfig, Nonce: 1}).ValidateQuarkChain(); err != nil {
+		t.Fatalf("applied shard rules to Ethereum genesis: %v", err)
+	}
+}
+
+func TestQuarkChainGenesisValidationAfterOverrides(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		t.Run(strconv.FormatBool(stored), func(t *testing.T) {
+			db := rawdb.NewMemoryDatabase()
+			defer db.Close()
+			tdb := triedb.NewDatabase(db, triedb.HashDefaults)
+			defer tdb.Close()
+			genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
+			genesis.Config.ShanghaiTime = new(uint64)
+			if stored {
+				genesis.MustCommit(db, tdb)
+			}
+			beforeHash := rawdb.ReadCanonicalHash(db, 0)
+			beforeConfig, err := json.Marshal(rawdb.ReadChainConfig(db, beforeHash))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, err = SetupGenesisBlockWithOverride(db, tdb, genesis, &ChainOverrides{OverrideUBT: u64(1)}, nil)
+			if err == nil || !strings.Contains(err.Error(), "does not support UBT") {
+				t.Fatalf("got %v, want the supplied genesis checked after overrides", err)
+			}
+			afterConfig, err := json.Marshal(rawdb.ReadChainConfig(db, beforeHash))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if genesis.Config.UBTTime != nil || rawdb.ReadCanonicalHash(db, 0) != beforeHash || !bytes.Equal(beforeConfig, afterConfig) {
+				t.Fatal("rejected override changed the supplied or stored genesis config")
+			}
+		})
+	}
 }
 
 func TestGenesisQKCSlotNumber(t *testing.T) {
@@ -522,7 +663,8 @@ func TestStakingGenesisFromConfig(t *testing.T) {
 					account.Balance = big.NewInt(123)
 					account.Storage = map[common.Hash]common.Hash{{1}: {2}}
 					alloc[address] = account
-					genesis := &Genesis{Config: config, GasLimit: 12_000_000, Difficulty: big.NewInt(1), Alloc: alloc}
+					genesis := quarkChainGenesis(config, 12_000_000)
+					genesis.Alloc = alloc
 					encoded, err := json.Marshal(genesis)
 					if err != nil {
 						t.Fatal(err)
@@ -626,7 +768,8 @@ func TestStakingGenesisValidation(t *testing.T) {
 func TestGenesisDoesNotInjectStaking(t *testing.T) {
 	config := genesisConfig(10001)
 	funded := common.HexToAddress("0xabcd")
-	genesis := &Genesis{Config: config, GasLimit: 12_000_000, Difficulty: big.NewInt(1), Alloc: types.GenesisAlloc{funded: {Balance: big.NewInt(42)}}}
+	genesis := quarkChainGenesis(config, 12_000_000)
+	genesis.Alloc = types.GenesisAlloc{funded: {Balance: big.NewInt(42)}}
 	db := rawdb.NewMemoryDatabase()
 	defer db.Close()
 	tdb := triedb.NewDatabase(db, triedb.HashDefaults)
