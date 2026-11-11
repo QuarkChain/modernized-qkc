@@ -108,7 +108,7 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 func (sc *SlaveConn) watchConnection() {
 	<-sc.WaitUntilClosed()
 	sc.shutdownOnce.Do(func() {
-		sc.Logger().Error("slave connection closed; shutting down master", "chain_id", sc.remoteChainID)
+		sc.Logger().Info("slave connection closed; shutting down master", "chain_id", sc.remoteChainID)
 		sc.shutdownMaster()
 	})
 }
@@ -122,7 +122,8 @@ func (sc *SlaveConn) RemoteChainID() *big.Int {
 // The first PING checks identity without a root tip. After all slaves connect
 // to each other, a second PING carries the root tip to initialize their shards.
 // A nil rootTip sends an identity-only PING.
-// An identity mismatch closes the connection.
+// The owner must close the connection on any error and complete identity
+// verification before starting business activity.
 func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) error {
 	req := &wire.PingRequest{}
 	if rootTip != nil {
@@ -142,7 +143,6 @@ func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) 
 	}
 	id := wire.ChainIDFromSSZ(pong.ChainID)
 	if id.Cmp(sc.remoteChainID) != 0 {
-		sc.Close()
 		return fmt.Errorf("slave chain ID mismatch: expected %s, got %s", sc.remoteChainID, id)
 	}
 	return nil
