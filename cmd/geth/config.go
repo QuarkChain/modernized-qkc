@@ -148,10 +148,7 @@ func validateShardGenesis(g *core.Genesis) error {
 	if config == nil {
 		return errors.New("genesis has no chain configuration")
 	}
-	if config.QuarkChain == nil {
-		return nil
-	}
-	if err := config.CheckConfigForkOrder(); err != nil {
+	if err := config.CheckQuarkChain(); err != nil {
 		return err
 	}
 	if config.Clique != nil || config.TerminalTotalDifficulty != nil || config.MergeNetsplitBlock != nil {
