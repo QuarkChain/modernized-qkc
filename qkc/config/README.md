@@ -71,9 +71,9 @@ a new data directory with the updated examples. A database-only restart uses the
 stored consensus type.
 
 TODO: initialize `ShardChain` from a Master root checkpoint, connect cluster
-transport, implement mining, and add shard-specific RPC. The internal endpoint
-and mining recipient remain TODO comments in the example until those features are
-connected; they are not active settings.
+transport, implement mining, and add shard-specific RPC. The `PrivateHost`,
+`PrivatePort`, and `CoinbaseAddress` fields under `[Node]` store the internal
+cluster endpoint and mining recipient.
 
 TOML uses case-sensitive Go field names, quoted big integers and rationals. `geth dumpconfig`
 omits Genesis, so keep the original configuration for initializing other nodes.

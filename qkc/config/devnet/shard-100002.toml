@@ -1,8 +1,6 @@
 # Standalone chain 100002, using the native geth TOML schema.
 # Run from the repository root: build/bin/geth --config qkc/config/devnet/shard-100002.toml
 # Runtime paths are relative to the working directory.
-# TODO: Cluster transport will use PrivateHost = "127.0.0.1", PrivatePort = 38001.
-# TODO: Mining will use CoinbaseAddress = "0x3333333333333333333333333333333333333333".
 
 [Eth]
 NetworkId = 2
@@ -10,6 +8,9 @@ SyncMode = "full"
 
 [Node]
 DataDir = "./qkc-data/shard-100002"
+PrivateHost = "127.0.0.1"
+PrivatePort = 38001
+CoinbaseAddress = "0x3333333333333333333333333333333333333333"
 IPCPath = "qkc-shard-100002.ipc"
 HTTPHost = "127.0.0.1"
 HTTPPort = 18546
