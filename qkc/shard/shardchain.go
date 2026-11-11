@@ -510,7 +510,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 // It mirrors the shard-specific checks of ShardState.add_root_block in
 // pyquarkchain. The master must validate the root
 // block and its body before forwarding it to shards. Each shard validates its
-// minor blocks and distributes outgoing cross-shard deposits. This method checks
+// shard blocks and distributes outgoing cross-shard deposits. This method checks
 // availability and consistency of local shard data.
 // Failures of these cluster guarantees wrap ErrClusterStateInconsistency;
 // missing already-validated local data wraps ErrShardStateInconsistency.
