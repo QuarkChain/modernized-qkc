@@ -231,6 +231,56 @@ func TestShardGenesisJSONValidation(t *testing.T) {
 	}
 }
 
+func TestShardGenesisUBTOverride(t *testing.T) {
+	t.Parallel()
+	contents, err := os.ReadFile(filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enable Shanghai so fork ordering does not mask the QKC UBT restriction.
+	inline := strings.Replace(string(contents), `ChainID = "100001"`, "ChainID = \"100001\"\nShanghaiTime = 0", 1)
+	withoutGenesis, _, ok := strings.Cut(inline, "[Eth.Genesis]")
+	if !ok {
+		t.Fatal("example is missing the Genesis table")
+	}
+	datadir := t.TempDir()
+	configFile := filepath.Join(t.TempDir(), "shard.toml")
+	for _, tc := range []struct {
+		name     string
+		config   string
+		override string
+	}{
+		{name: "initialize", config: inline},
+		{name: "database only UBT at genesis", config: withoutGenesis, override: "0"},
+		{name: "database only future UBT", config: withoutGenesis, override: "1"},
+		{name: "restart after rejection", config: withoutGenesis},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(configFile, []byte(tc.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--config", configFile, "--datadir", datadir,
+				"--cache", "16", "--http.port", "0", "--authrpc.port", "0",
+				"--port", "0", "--maxpeers", "0", "--nodiscover", "--discovery.dns", "",
+				"--nat", "none", "--ipcdisable"}
+			if tc.override != "" {
+				args = append(args, "--override.ubt", tc.override)
+			}
+			args = append(args, "--exec", "eth.chainId()", "console")
+			geth := runGeth(t, args...)
+			if tc.override != "" {
+				geth.ExpectRegexp("Fatal: .*quarkchain does not support UBT.*\n")
+			} else {
+				geth.Expect("\"0x186a1\"\n")
+			}
+			geth.ExpectExit()
+			if (geth.ExitStatus() != 0) != (tc.override != "") {
+				t.Fatalf("unexpected exit status %d", geth.ExitStatus())
+			}
+		})
+	}
+}
+
 // TestShardGenesis exercises native TOML initialization and database-only restart.
 func TestShardGenesis(t *testing.T) {
 	t.Parallel()

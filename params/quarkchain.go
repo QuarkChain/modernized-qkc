@@ -173,6 +173,9 @@ func (c *ChainConfig) CheckQuarkChain() error {
 	if c.QuarkChain == nil {
 		return nil
 	}
+	if c.EnableUBTAtGenesis || c.UBTTime != nil {
+		return errors.New("quarkchain does not support UBT")
+	}
 	if c.ChainID == nil || c.ChainID.Sign() <= 0 || c.ChainID.BitLen() > 256 {
 		return fmt.Errorf("invalid QuarkChain chain ID: %v", c.ChainID)
 	}

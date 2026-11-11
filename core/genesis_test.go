@@ -567,34 +567,43 @@ func TestQuarkChainGenesisValidation(t *testing.T) {
 }
 
 func TestQuarkChainGenesisValidationAfterOverrides(t *testing.T) {
-	for _, stored := range []bool{false, true} {
-		t.Run(strconv.FormatBool(stored), func(t *testing.T) {
-			db := rawdb.NewMemoryDatabase()
-			defer db.Close()
-			tdb := triedb.NewDatabase(db, triedb.HashDefaults)
-			defer tdb.Close()
-			genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
-			genesis.Config.ShanghaiTime = new(uint64)
-			if stored {
-				genesis.MustCommit(db, tdb)
-			}
-			beforeHash := rawdb.ReadCanonicalHash(db, 0)
-			beforeConfig, err := json.Marshal(rawdb.ReadChainConfig(db, beforeHash))
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, _, _, err = SetupGenesisBlockWithOverride(db, tdb, genesis, &ChainOverrides{OverrideUBT: u64(1)}, nil)
-			if err == nil || !strings.Contains(err.Error(), "does not support UBT") {
-				t.Fatalf("got %v, want the supplied genesis checked after overrides", err)
-			}
-			afterConfig, err := json.Marshal(rawdb.ReadChainConfig(db, beforeHash))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if genesis.Config.UBTTime != nil || rawdb.ReadCanonicalHash(db, 0) != beforeHash || !bytes.Equal(beforeConfig, afterConfig) {
-				t.Fatal("rejected override changed the supplied or stored genesis config")
-			}
-		})
+	for _, entry := range []string{"initialize", "restart", "database only"} {
+		for _, timestamp := range []uint64{0, 1} {
+			t.Run(entry+"/"+strconv.FormatUint(timestamp, 10), func(t *testing.T) {
+				db := rawdb.NewMemoryDatabase()
+				defer db.Close()
+				tdb := triedb.NewDatabase(db, triedb.HashDefaults)
+				defer tdb.Close()
+				genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
+				genesis.Config.ShanghaiTime = new(uint64)
+				if entry != "initialize" {
+					genesis.MustCommit(db, tdb)
+				}
+				beforeHash := rawdb.ReadCanonicalHash(db, 0)
+				beforeHead := rawdb.ReadHeadHeaderHash(db)
+				beforeBlock := rawdb.ReadHeadBlockHash(db)
+				beforeConfig, err := json.Marshal(rawdb.ReadChainConfig(db, beforeHash))
+				if err != nil {
+					t.Fatal(err)
+				}
+				input := genesis
+				if entry == "database only" {
+					input = nil
+				}
+				_, _, _, err = SetupGenesisBlockWithOverride(db, tdb, input, &ChainOverrides{OverrideUBT: &timestamp}, nil)
+				if err == nil || !strings.Contains(err.Error(), "quarkchain does not support UBT") {
+					t.Fatalf("got %v, want QKC UBT override rejected", err)
+				}
+				afterConfig, err := json.Marshal(rawdb.ReadChainConfig(db, beforeHash))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if genesis.Config.UBTTime != nil || rawdb.ReadCanonicalHash(db, 0) != beforeHash ||
+					rawdb.ReadHeadHeaderHash(db) != beforeHead || rawdb.ReadHeadBlockHash(db) != beforeBlock || !bytes.Equal(beforeConfig, afterConfig) {
+					t.Fatal("rejected override changed the supplied genesis, stored chain or config")
+				}
+			})
+		}
 	}
 }
 

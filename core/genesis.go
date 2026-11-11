@@ -620,9 +620,6 @@ func (g *Genesis) ValidateQuarkChain() error {
 	if config.Clique != nil || config.TerminalTotalDifficulty != nil || config.MergeNetsplitBlock != nil {
 		return errors.New("quarkchain genesis cannot specify Clique or an Ethereum Merge transition")
 	}
-	if config.EnableUBTAtGenesis || config.UBTTime != nil {
-		return errors.New("quarkchain genesis does not support UBT")
-	}
 	if config.DepositContractAddress != (common.Address{}) {
 		return errors.New("quarkchain deposit contract address must be zero")
 	}

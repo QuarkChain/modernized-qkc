@@ -216,6 +216,37 @@ func TestQuarkChainConsensusType(t *testing.T) {
 	}
 }
 
+func TestQuarkChainRejectsUBT(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		genesis bool
+		time    *uint64
+		wantErr bool
+	}{
+		{"disabled", false, nil, false},
+		{"genesis flag", true, nil, true},
+		{"time zero", false, newUint64(0), true},
+		{"future time", false, newUint64(100), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := NewTestQuarkChainConfig(10001)
+			// Keep fork ordering valid so it cannot mask the QKC restriction.
+			config.ShanghaiTime = newUint64(0)
+			config.EnableUBTAtGenesis, config.UBTTime = test.genesis, test.time
+			if test.wantErr {
+				require.ErrorContains(t, config.CheckQuarkChain(), "quarkchain does not support UBT")
+				require.ErrorContains(t, config.CheckConfigForkOrder(), "quarkchain does not support UBT")
+			} else {
+				require.NoError(t, config.CheckQuarkChain())
+				require.NoError(t, config.CheckConfigForkOrder())
+			}
+			config.QuarkChain = nil
+			require.NoError(t, config.CheckQuarkChain())
+			require.NoError(t, config.CheckConfigForkOrder())
+		})
+	}
+}
+
 func TestQuarkChainIDs(t *testing.T) {
 	large := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(10001))
 	config := NewTestQuarkChainConfig(10001, 10001, 10002)
