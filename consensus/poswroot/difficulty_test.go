@@ -54,9 +54,14 @@ func authorize(t *testing.T, f *fixture, block *qkctypes.RootBlock, stakes uint6
 // Check difficulty selection directly: only the authorized signer with enough
 // stakes gets a discount. Base difficulty and total difficulty stay unchanged.
 func TestSignerAndQuota(t *testing.T) {
-	for _, name := range []string{"authorized", "zero stakes", "wrong signer", "zero signer", "missing signature", "bad signature", "invalid recovery ID"} {
+	for _, name := range []string{"authorized", "zero stakes", "wrong signer", "zero signer", "missing signature", "bad signature", "invalid recovery ID", "large divider"} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, staking)
+			f := newFixture(t, func(c *params.QuarkChainConfig) {
+				staking(c)
+				if name == "large divider" {
+					c.PoSW.DiffDivider = 1000
+				}
+			})
 			block := authorize(t, f, f.candidate(t), 100)
 			confirmed := f.chain.confirmed[f.parent.Hash()]["10001"]
 			result := f.chain.stakes[confirmed.Hash()]
@@ -77,21 +82,61 @@ func TestSignerAndQuota(t *testing.T) {
 			}
 			f.chain.stakes[confirmed.Hash()] = result
 			before := block.Header()
-			difficulty, err := f.engine.adjustedDifficulty(f.chain, block.Header(), f.parent.Header())
+			info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
 			if err != nil {
 				t.Fatal(err)
 			}
 			want := int64(100)
 			if name == "authorized" {
 				want = 10
+			} else if name == "large divider" {
+				want = 1
 			}
-			if difficulty.Int64() != want || f.chain.stakeHash != confirmed.Hash() || f.chain.stakeCoinbase != block.Coinbase() {
+			if info.EffectiveDifficulty.Int64() != want || f.chain.stakeHash != confirmed.Hash() || f.chain.stakeCoinbase != block.Coinbase() {
 				t.Fatal("wrong stake source or effective difficulty")
 			}
 			if block.Difficulty().Cmp(&before.Difficulty) != 0 || block.TotalDifficulty().Cmp(&before.TotalDifficulty) != 0 {
 				t.Fatal("staking changed base difficulty or total difficulty")
 			}
 		})
+	}
+}
+
+// Mining needs quota and window usage before signing, with large quotas capped
+// before conversion to uint64.
+func TestPoSWInfoBeforeSigning(t *testing.T) {
+	f := newFixture(t, staking)
+	f.appendRoot(t, common.Address{9})
+	block := authorize(t, f, f.candidate(t), 200)
+	confirmed := f.chain.confirmed[f.parent.Hash()]["10001"]
+	result := f.chain.stakes[confirmed.Hash()]
+	result.stakes.Lsh(uint256.NewInt(100), 64) // The uncapped quota is exactly 2^64.
+	header := block.Header()
+	header.Signature = [65]byte{}
+	before := header.Hash()
+	info, err := GetPoSWInfo(f.engine.config, f.chain, header)
+	if err != nil || info == nil || info.Signer != result.signer || info.Quota != 4 || info.Mined != 2 || info.EffectiveDifficulty.Int64() != 100 {
+		t.Fatalf("info %+v, error %v; want quota 4, mined 2 and base difficulty before signing", info, err)
+	}
+	if header.Hash() != before || result.stakes.Cmp(new(uint256.Int).Lsh(uint256.NewInt(100), 64)) != 0 {
+		t.Fatal("PoSW info calculation changed the header or stored stakes")
+	}
+}
+
+// Zero quota still reports the historical count plus the candidate, without a discount.
+func TestZeroQuotaStillCountsHistory(t *testing.T) {
+	for _, stakes := range []uint64{0, 99} {
+		f := newFixture(t, staking)
+		f.appendRoot(t, common.Address{9})
+		f.appendRoot(t, common.Address{})
+		block := authorize(t, f, f.candidate(t), stakes)
+		info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+		if err != nil || info == nil || info.Quota != 0 || info.Mined != 2 || info.Signer == (common.Address{}) {
+			t.Fatalf("stakes %d: info %+v, error %v; want zero quota and mined 2", stakes, info, err)
+		}
+		if info.EffectiveDifficulty.Int64() != 100 {
+			t.Fatalf("stakes %d: difficulty %v, want base difficulty", stakes, info.EffectiveDifficulty)
+		}
 	}
 }
 
@@ -158,8 +203,8 @@ func (f *fixture) appendRoot(t *testing.T, coinbase common.Address) *qkctypes.Ro
 	return block
 }
 
-// Count the coinbase's blocks only in the preceding windowSize-1 ancestors.
-// Genesis counts inside that window; a window of one has no prior blocks.
+// Report the candidate plus the coinbase's blocks in the preceding windowSize-1
+// ancestors. Genesis counts inside that window; a window of one counts only the candidate.
 func TestQuotaUsesParentBranchWindow(t *testing.T) {
 	for _, name := range []string{"below quota", "quota used", "outside window", "genesis counted", "window one"} {
 		t.Run(name, func(t *testing.T) {
@@ -191,16 +236,21 @@ func TestQuotaUsesParentBranchWindow(t *testing.T) {
 				stakes = 100
 			}
 			block := authorize(t, f, f.candidate(t), stakes)
-			difficulty, err := f.engine.adjustedDifficulty(f.chain, block.Header(), f.parent.Header())
-			if err != nil {
-				t.Fatal(err)
+			info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+			wantInfo := map[string]PoSWInfo{
+				"below quota": {Quota: 2, Mined: 2}, "quota used": {Quota: 2, Mined: 3},
+				"outside window": {Quota: 1, Mined: 1}, "genesis counted": {Quota: 1, Mined: 2},
+				"window one": {Quota: 1, Mined: 1},
+			}[name]
+			if err != nil || info == nil || info.Quota != wantInfo.Quota || info.Mined != wantInfo.Mined {
+				t.Fatalf("info %+v, error %v; want quota %d, mined %d", info, err, wantInfo.Quota, wantInfo.Mined)
 			}
 			want := int64(10)
 			if name == "quota used" || name == "genesis counted" {
 				want = 100
 			}
-			if difficulty.Int64() != want {
-				t.Fatalf("difficulty %v, want %d", difficulty, want)
+			if info.EffectiveDifficulty.Int64() != want {
+				t.Fatalf("difficulty %v, want %d", info.EffectiveDifficulty, want)
 			}
 		})
 	}
@@ -215,12 +265,12 @@ func TestStakesUseConfirmedStateBeforeCandidate(t *testing.T) {
 	// The new confirmation funds the same coinbase, but it cannot give this
 	// candidate a discount. Eligibility comes from its parent's confirmation.
 	f.chain.stakes[newShard.Hash()] = stakeResult{uint256.NewInt(10000), common.Address{1}}
-	difficulty, err := f.engine.adjustedDifficulty(f.chain, block.Header(), f.parent.Header())
+	info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldShard := f.chain.confirmed[f.parent.Hash()]["10001"]
-	if f.chain.stakeHash != oldShard.Hash() || difficulty.Int64() != 100 {
+	if f.chain.stakeHash != oldShard.Hash() || info.EffectiveDifficulty.Int64() != 100 {
 		t.Fatal("used candidate confirmation state")
 	}
 
@@ -241,20 +291,20 @@ func TestStakesUseConfirmedStateBeforeCandidate(t *testing.T) {
 	f.chain.blocks[fork.Hash()], f.chain.confirmed[fork.Hash()] = fork, forkConfirmed
 	f.parent = fork
 	block = authorize(t, f, f.candidate(t), 100)
-	difficulty, err = f.engine.adjustedDifficulty(f.chain, block.Header(), f.parent.Header())
+	info, err = GetPoSWInfo(f.engine.config, f.chain, block.Header())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.chain.stakeHash != forkShard.Hash() || difficulty.Int64() != 10 {
+	if f.chain.stakeHash != forkShard.Hash() || info.EffectiveDifficulty.Int64() != 10 {
 		t.Fatal("used another branch's stakes")
 	}
 }
 
-// Disabled staking uses base difficulty without reading confirmation or stakes.
+// Disabled staking and genesis return nil info without reading confirmation or stakes.
 // Missing required data and read failures must return errors.
 func TestStakingFallbackAndReadFailures(t *testing.T) {
 	failure := errors.New("staking read failed")
-	for _, name := range []string{"disabled", "missing confirmation", "confirmation error", "stakes error", "nil stakes", "missing ancestor", "ancestor error"} {
+	for _, name := range []string{"disabled", "genesis", "missing confirmation", "confirmation error", "stakes error", "nil stakes", "missing parent", "inconsistent parent", "missing ancestor", "ancestor error"} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, func(c *params.QuarkChainConfig) {
 				c.PoSW.StakingEnabled = name != "disabled"
@@ -271,6 +321,10 @@ func TestStakingFallbackAndReadFailures(t *testing.T) {
 			case "disabled":
 				f.chain.confirmationErr = failure
 				want = nil
+			case "genesis":
+				block = f.parent
+				f.chain.confirmationErr = failure
+				want = nil
 			case "missing confirmation":
 				delete(f.chain.confirmed[f.parent.Hash()], "10001")
 				f.chain.stakeErr = failure
@@ -281,16 +335,25 @@ func TestStakingFallbackAndReadFailures(t *testing.T) {
 			case "nil stakes":
 				f.chain.stakes[confirmed.Hash()] = stakeResult{}
 				want = nil
+			case "missing parent":
+				delete(f.chain.blocks, f.parent.Hash())
+				want = consensus.ErrUnknownAncestor
+			case "inconsistent parent":
+				f.chain.blocks[f.parent.Hash()] = changeHeader(f.parent, func(h *qkctypes.RootBlockHeader) { h.Number++ })
 			case "missing ancestor":
 				delete(f.chain.blocks, missing)
 				want = consensus.ErrUnknownAncestor
 			case "ancestor error":
 				f.chain.headerErr = failure
 			}
-			difficulty, err := f.engine.adjustedDifficulty(f.chain, block.Header(), f.parent.Header())
+			info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
 			if name == "missing confirmation" {
 				if err == nil || !strings.Contains(err.Error(), "missing parent root staking shard confirmation") {
 					t.Fatalf("missing confirmation did not fail before reading stakes: %v", err)
+				}
+			} else if name == "inconsistent parent" {
+				if err == nil || !strings.Contains(err.Error(), "inconsistent root staking history") {
+					t.Fatalf("inconsistent parent accepted: %v", err)
 				}
 			} else if name == "nil stakes" {
 				if err == nil {
@@ -299,8 +362,10 @@ func TestStakingFallbackAndReadFailures(t *testing.T) {
 			} else if !errors.Is(err, want) {
 				t.Fatalf("error %v, want %v", err, want)
 			}
-			if name == "disabled" && difficulty.Int64() != 100 {
-				t.Fatal("fallback did not use base difficulty")
+			if name == "disabled" || name == "genesis" {
+				if info != nil {
+					t.Fatal("inapplicable staking did not return nil info without reads")
+				}
 			}
 		})
 	}
@@ -321,11 +386,11 @@ func TestConfiguredStakingChainAndLargeIDs(t *testing.T) {
 	if err := f.verifyUnsealed(block); err != nil {
 		t.Fatalf("body with large chain ID rejected: %v", err)
 	}
-	difficulty, err := f.engine.adjustedDifficulty(f.chain, block.Header(), f.parent.Header())
+	info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.chain.stakeChain.Cmp(large) != 0 || difficulty.Int64() != 10 {
+	if f.chain.stakeChain.Cmp(large) != 0 || info.EffectiveDifficulty.Int64() != 10 {
 		t.Fatal("staking chain used a fixed or shortened chain ID")
 	}
 }

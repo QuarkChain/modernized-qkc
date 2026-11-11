@@ -22,17 +22,29 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
 
+// PoSWInfo describes a root coinbase's staking quota, usage and effective difficulty.
+type PoSWInfo struct {
+	EffectiveDifficulty *big.Int       // Base difficulty unless the signature and quota allow a discount.
+	Signer              common.Address // Authorized signer from parent-confirmed staking state.
+	Quota               uint64         // min(WindowSize, stakes / StakePerBlockAt(number)).
+	Mined               uint64         // This coinbase's blocks in the preceding WindowSize-1, plus the candidate.
+}
+
 // verifySeal selects the effective staking difficulty, then checks Ethash outside
 // simulation. Header fields must already pass verifyHeader.
-func (p *PoSW) verifySeal(chain consensus.RootChainReader, header, parent *qkctypes.RootBlockHeader) error {
-	difficulty, err := p.adjustedDifficulty(chain, header, parent)
+func (p *PoSW) verifySeal(chain consensus.RootChainReader, header *qkctypes.RootBlockHeader) error {
+	info, err := GetPoSWInfo(p.config, chain, header)
 	if err != nil {
 		return err
+	}
+	difficulty := header.Difficulty.ToBig()
+	if info != nil {
+		difficulty = info.EffectiveDifficulty
 	}
 	// Simulation keeps staking reads and their errors, and skips only Ethash.
 	if p.simulate {
@@ -42,18 +54,21 @@ func (p *PoSW) verifySeal(chain consensus.RootChainReader, header, parent *qkcty
 	return p.EthashVerifier.Verify(uint64(header.Number), header.SealHash(), header.Nonce, header.MixDigest, difficulty)
 }
 
-// adjustedDifficulty checks parent-confirmed stakes, the authorized signer and
-// this coinbase's quota on the parent branch. It leaves Difficulty and TD unchanged.
-func (p *PoSW) adjustedDifficulty(chain consensus.RootChainReader, header, parent *qkctypes.RootBlockHeader) (*big.Int, error) {
-	base := header.Difficulty.ToBig()
-	// Disabled staking needs neither staking state nor a history walk.
-	if !p.config.PoSW.StakingEnabled {
-		return base, nil
+// GetPoSWInfo reads parent-confirmed stakes and counts this coinbase's blocks on
+// the parent branch, then checks the signature to select the effective difficulty.
+// Invalid signatures keep the base difficulty without discarding quota or counts.
+// The header and stored chain data are unchanged.
+// config must pass Check; the header must be valid apart from its unverified seal.
+// Staking disabled or genesis returns nil without reading chain. Mined includes
+// the candidate as if it were added, even when quota is zero or the signature fails.
+func GetPoSWInfo(config *params.QuarkChainConfig, chain consensus.RootChainReader, header *qkctypes.RootBlockHeader) (*PoSWInfo, error) {
+	if !config.PoSW.StakingEnabled || header.Number == 0 {
+		return nil, nil
 	}
 	// Pin stakes to the candidate parent's last confirmation on the configured
 	// root staking chain. Neither the current head nor candidate body is used.
-	chainID := p.config.ChainIDs[0]
-	lastConfirmed, err := chain.GetLastConfirmedShardBlocks(parent.Hash())
+	chainID := config.ChainIDs[0]
+	lastConfirmed, err := chain.GetLastConfirmedShardBlocks(header.ParentHash)
 	if err != nil {
 		return nil, err
 	}
@@ -71,44 +86,67 @@ func (p *PoSW) adjustedDifficulty(chain consensus.RootChainReader, header, paren
 	if stakes == nil {
 		return nil, errors.New("missing root staking result")
 	}
-	// Invalid or missing authorization removes the discount, not the PoW check.
-	if signer == (common.Address{}) {
-		return base, nil
+	quota := new(big.Int).Div(stakes.ToBig(), config.PoSW.StakePerBlockAt(new(big.Int).SetUint64(uint64(header.Number))))
+	info := &PoSWInfo{
+		EffectiveDifficulty: header.Difficulty.ToBig(),
+		Signer:              signer,
+		Quota:               config.PoSW.WindowSize,
+		Mined:               1,
 	}
-	// Require V=0/1 so CGO and pure Go recovery apply the same consensus rule.
-	if header.Signature[64] > 1 {
-		return base, nil
+	// Cap before converting: large stakes must not wrap a uint64 quota.
+	if quota.Cmp(new(big.Int).SetUint64(info.Quota)) < 0 {
+		info.Quota = quota.Uint64()
 	}
-	// Recover the candidate SealHash signer and match the authorized address
-	// read from the confirmed staking state.
-	pubkey, err := crypto.SigToPub(header.SealHash().Bytes(), header.Signature[:])
-	if err != nil || crypto.PubkeyToAddress(*pubkey) != signer {
-		return base, nil
-	}
-	// Count all roots by this coinbase in the preceding WindowSize-1 ancestors,
-	// including ordinary PoW blocks and genesis when in range. The candidate
-	// occupies the last window slot.
-	var mined uint64
-	for i, ancestor := uint64(0), parent; i < p.config.PoSW.WindowSize-1; i++ {
-		if ancestor.Coinbase == header.Coinbase {
-			mined++
-		}
-		if ancestor.Number == 0 || i+1 == p.config.PoSW.WindowSize-1 {
-			break
-		}
-		previous, err := chain.GetRootHeader(ancestor.ParentHash)
+	if config.PoSW.WindowSize > 1 {
+		parent, err := chain.GetRootHeader(header.ParentHash)
 		if err != nil {
 			return nil, err
 		}
-		if previous == nil {
+		if parent == nil {
 			return nil, consensus.ErrUnknownAncestor
 		}
-		// Keep the count on this candidate's branch, with no gaps in its history.
-		if previous.Number+1 != ancestor.Number || previous.Hash() != ancestor.ParentHash {
+		if parent.Number+1 != header.Number || parent.Hash() != header.ParentHash {
 			return nil, errors.New("inconsistent root staking history")
 		}
-		ancestor = previous
+		// Add this coinbase's roots in the preceding WindowSize-1 ancestors,
+		// including genesis when in range. Mined already includes the candidate.
+		for i, ancestor := uint64(0), parent; i < config.PoSW.WindowSize-1; i++ {
+			if ancestor.Coinbase == header.Coinbase {
+				info.Mined++
+			}
+			if ancestor.Number == 0 || i+1 == config.PoSW.WindowSize-1 {
+				break
+			}
+			previous, err := chain.GetRootHeader(ancestor.ParentHash)
+			if err != nil {
+				return nil, err
+			}
+			if previous == nil {
+				return nil, consensus.ErrUnknownAncestor
+			}
+			// Keep the count on this candidate's branch, with no gaps in its history.
+			if previous.Number+1 != ancestor.Number || previous.Hash() != ancestor.ParentHash {
+				return nil, errors.New("inconsistent root staking history")
+			}
+			ancestor = previous
+		}
 	}
-	// Apply the shared stake quota and divider using the candidate's height.
-	return posw.CalcAdjustedDifficulty(p.config.PoSW, new(big.Int).SetUint64(uint64(header.Number)), base, stakes, mined), nil
+	// Mined includes the candidate, so it may equal the quota and still qualify.
+	if info.Mined > info.Quota || signer == (common.Address{}) {
+		return info, nil
+	}
+	// Require V=0/1 so CGO and pure Go recovery apply the same consensus rule.
+	if header.Signature[64] > 1 {
+		return info, nil
+	}
+	pubkey, err := crypto.SigToPub(header.SealHash().Bytes(), header.Signature[:])
+	if err != nil || crypto.PubkeyToAddress(*pubkey) != signer {
+		return info, nil
+	}
+	info.EffectiveDifficulty.Div(info.EffectiveDifficulty, new(big.Int).SetUint64(config.PoSW.DiffDivider))
+	if info.EffectiveDifficulty.Sign() == 0 {
+		// A large divider must not turn PoW difficulty into zero.
+		info.EffectiveDifficulty.SetInt64(1)
+	}
+	return info, nil
 }

@@ -102,7 +102,7 @@ func (p *PoSW) VerifyBlock(chain consensus.RootChainReader, block *qkctypes.Root
 	// Verify the root's PoW seal before body validation, as in pyquarkchain.
 	// Checking shard headers' PrevRootBlock references may require walking many
 	// root ancestors; blocks with invalid PoW should not trigger those reads.
-	if err := p.verifySeal(chain, header, parent); err != nil {
+	if err := p.verifySeal(chain, header); err != nil {
 		return err
 	}
 	return p.verifyBody(chain, block, parent)
