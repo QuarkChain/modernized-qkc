@@ -50,7 +50,7 @@ type PoSW struct {
 var _ consensus.Engine = (*PoSW)(nil)
 var _ consensus.SealVerifier = (*PoSW)(nil)
 
-// New validates the shard configuration and saves the genesis gas limit.
+// New validates the shard configuration and genesis chain ID, and saves its gas limit.
 // The caller supplies genesis so engine creation does not require a running chain.
 func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	if config == nil || config.QuarkChain == nil {
@@ -64,6 +64,13 @@ func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	}
 	if genesis.GasLimit > params.MaxGasLimit {
 		return nil, fmt.Errorf("invalid genesis gas limit: have %d, max %d", genesis.GasLimit, params.MaxGasLimit)
+	}
+	extra, err := genesis.QKCExtra()
+	if err != nil {
+		return nil, err
+	}
+	if config.ChainID == nil || extra.ChainID.Cmp(config.ChainID) != 0 {
+		return nil, errors.New("shard genesis chain ID differs from chain config")
 	}
 	return &PoSW{config: config, gasLimit: genesis.GasLimit, caches: lru.NewCache[uint64, []uint32](2)}, nil
 }
@@ -198,7 +205,8 @@ func (p *PoSW) verifyHeader(chain consensus.ChainHeaderReader, header, parent *t
 	if cancun != (header.BlobGasUsed != nil) {
 		return errors.New("invalid blob gas used presence")
 	}
-	// TODO: Also disable blob transactions in the transaction pool to match this consensus restriction.
+	// QuarkChain disables blob transactions in its pool; imported headers must
+	// enforce the same chain rule independently of the local transaction pool.
 	if header.BlobGasUsed != nil && *header.BlobGasUsed != 0 {
 		return errors.New("qkc blob gas used must be zero")
 	}

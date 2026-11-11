@@ -54,9 +54,9 @@ func (c *backendClusterClient) SendShardBlockHeaderToMaster(ctx context.Context,
 	return c.report(ctx, header, amount)
 }
 
-// TestBackendLifecycle checks PoSW construction, separate root initialization,
-// and root-coinbase-chain-only stake queries. Stop and failed construction must leave the
-// caller's database usable, and Init must not propagate genesis again.
+// TestBackendLifecycle checks binding the existing chain, separate root
+// initialization and root-coinbase-chain-only stake queries. Init must not
+// propagate genesis again; the caller owns all shared resources.
 func TestBackendLifecycle(t *testing.T) {
 	for _, chainID := range []int64{10001, 10002} {
 		t.Run(big.NewInt(chainID).String(), func(t *testing.T) {
@@ -64,6 +64,7 @@ func TestBackendLifecycle(t *testing.T) {
 			alloc := core.SystemContractAllocs()
 			maps.Copy(alloc, core.PoSWStakingContractAllocs(&config))
 			genesis := &core.Genesis{
+				Config:   &config,
 				GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
 				ExtraData: (&types.QKCExtra{ChainID: big.NewInt(chainID)}).Encode(), Alloc: alloc,
 			}
@@ -79,13 +80,23 @@ func TestBackendLifecycle(t *testing.T) {
 					return nil
 				},
 			}
-			s, err := New(&config, genesis, db, nil, client)
+			engine, err := posw.New(&config, genesis.ToBlock().Header())
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { s.Stop() })
-			if _, ok := s.engine.(*posw.PoSW); !ok || genesis.Config != nil {
-				t.Fatal("New must use PoSW without mutating the supplied genesis")
+			t.Cleanup(func() { engine.Close() })
+			chain, err := core.NewBlockChain(db, genesis, engine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(chain.Stop)
+			shardChain := NewShardChain(db, chain, nil)
+			s, err := New(shardChain, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.chain != shardChain || s.clusterClient != client {
+				t.Fatal("New must borrow the supplied chain and client")
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
@@ -115,30 +126,6 @@ func TestBackendLifecycle(t *testing.T) {
 				}
 			} else if err == nil {
 				t.Fatal("non-root-coinbase chain served root-chain stakes")
-			}
-			if err := s.Stop(); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Stop(); err != nil {
-				t.Fatal(err)
-			}
-			badGenesis := *genesis
-			badGenesis.GasLimit++
-			var mismatch *core.GenesisMismatchError
-			if failed, err := New(&config, &badGenesis, db, nil, client); failed != nil || !errors.As(err, &mismatch) {
-				t.Fatalf("mismatched genesis: backend %v, error %v", failed, err)
-			}
-			if err := db.Put([]byte("caller-owned"), []byte{1}); err != nil {
-				t.Fatalf("Stop or failed New closed the borrowed database: %v", err)
-			}
-			// Reconstruct from the same database; Init remains a separate step.
-			reopened, err := New(&config, genesis, db, nil, client)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reopened.Stop()
-			if err := reopened.Init(root); err != nil {
-				t.Fatal(err)
 			}
 		})
 	}
