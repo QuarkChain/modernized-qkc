@@ -496,7 +496,10 @@ func TestServiceWithShard(t *testing.T) {
 	maps.Copy(alloc, core.PoSWStakingContractAllocs(config))
 	backend, err := shard.New(config, &core.Genesis{
 		GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
-		ExtraData: (&types.QKCExtra{ChainID: chainID}).Encode(), Alloc: alloc,
+		ExtraData: (&types.QKCExtra{
+			ChainID: chainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+			XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+		}).Encode(), Alloc: alloc,
 	}, db, nil, s)
 	if err != nil {
 		t.Fatal(err)
