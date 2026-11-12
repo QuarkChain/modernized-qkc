@@ -126,7 +126,13 @@ func loadConfig(file string, cfg *gethConfig) error {
 	if _, ok := err.(*toml.LineError); ok {
 		err = errors.New(file + ", " + err.Error())
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if err := cfg.Eth.Genesis.ValidateQuarkChain(); err != nil {
+		return fmt.Errorf("%s: invalid genesis: %w", file, err)
+	}
+	return nil
 }
 
 func defaultNodeConfig() node.Config {
@@ -281,6 +287,11 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 	// Add the Ethereum Stats daemon if requested.
 	if cfg.Ethstats.URL != "" {
 		utils.RegisterEthStatsService(stack, backend, cfg.Ethstats.URL)
+	}
+
+	if backend.ChainConfig().QuarkChain != nil {
+		// Shards do not use Ethereum sync overrides or the Beacon Engine API.
+		return stack
 	}
 
 	// Configure synchronization override service

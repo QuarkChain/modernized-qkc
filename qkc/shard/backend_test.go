@@ -19,6 +19,7 @@ package shard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"math/big"
 	"reflect"
@@ -54,18 +55,24 @@ func (c *backendClusterClient) SendShardBlockHeaderToMaster(ctx context.Context,
 	return c.report(ctx, header, amount)
 }
 
-// TestBackendLifecycle checks PoSW construction, separate root initialization,
+// TestBackendLifecycle checks Ethash and simulated PoSW construction, separate root initialization,
 // and root-coinbase-chain-only stake queries. Stop and failed construction must leave the
 // caller's database usable, and Init must not propagate genesis again.
 func TestBackendLifecycle(t *testing.T) {
 	for _, chainID := range []int64{10001, 10002} {
 		t.Run(big.NewInt(chainID).String(), func(t *testing.T) {
 			config := *params.NewTestQuarkChainConfig(chainID, 10001, 10002)
+			if chainID == 10002 {
+				config.QuarkChain.ConsensusType = params.ConsensusSimulate
+			}
 			alloc := core.SystemContractAllocs()
 			maps.Copy(alloc, core.PoSWStakingContractAllocs(&config))
 			genesis := &core.Genesis{
 				GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
-				ExtraData: (&types.QKCExtra{ChainID: big.NewInt(chainID)}).Encode(), Alloc: alloc,
+				ExtraData: (&types.QKCExtra{
+					ChainID: big.NewInt(chainID), Cursor: pos(1, 0, 0),
+					XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+				}).Encode(), Alloc: alloc,
 			}
 			db := rawdb.NewMemoryDatabase()
 			t.Cleanup(func() { db.Close() })
@@ -84,8 +91,12 @@ func TestBackendLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { s.Stop() })
-			if _, ok := s.engine.(*posw.PoSW); !ok || genesis.Config != nil {
-				t.Fatal("New must use PoSW without mutating the supplied genesis")
+			wantEngine := reflect.TypeOf(&posw.PoSW{})
+			if chainID == 10002 {
+				wantEngine = reflect.TypeOf(&posw.PoSWSimulate{})
+			}
+			if reflect.TypeOf(s.engine) != wantEngine || genesis.Config != nil {
+				t.Fatalf("New must select %v without mutating the supplied genesis", wantEngine)
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
@@ -141,6 +152,61 @@ func TestBackendLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestBackendRejectsInvalidGenesis(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*core.Genesis)
+		want   string
+	}{
+		{"extra-data", func(g *core.Genesis) { g.ExtraData = []byte{0} }, "invalid extra-data"},
+		{"balance overflow", func(g *core.Genesis) {
+			g.Alloc[common.Address{1}] = types.Account{Balance: new(big.Int).Lsh(common.Big1, 256)}
+		}, "balance must be a nonnegative uint256"},
+	} {
+		for _, stored := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stored=%t", test.name, stored), func(t *testing.T) {
+				config := params.NewTestQuarkChainConfig(10001)
+				genesis := &core.Genesis{
+					GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+					ExtraData: (&types.QKCExtra{
+						ChainID: config.ChainID, Cursor: pos(1, 0, 0),
+						XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+					}).Encode(),
+					Alloc: core.PoSWStakingContractAllocs(config),
+				}
+				db := rawdb.NewMemoryDatabase()
+				defer db.Close()
+				client := &backendClusterClient{}
+				if stored {
+					shard, err := New(config, genesis, db, nil, client)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := shard.Stop(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				genesisHash, headHash := rawdb.ReadCanonicalHash(db, 0), rawdb.ReadHeadBlockHash(db)
+				test.change(genesis)
+				shard, err := New(config, genesis, db, nil, client)
+				if shard != nil {
+					shard.Stop()
+					t.Fatal("created a shard with invalid genesis")
+				}
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("error %v, want %q", err, test.want)
+				}
+				if rawdb.ReadCanonicalHash(db, 0) != genesisHash || rawdb.ReadHeadBlockHash(db) != headHash {
+					t.Fatal("invalid genesis changed the chain database")
+				}
+				if genesis.Config != nil {
+					t.Fatal("New modified the caller's genesis configuration")
+				}
+			})
+		}
 	}
 }
 

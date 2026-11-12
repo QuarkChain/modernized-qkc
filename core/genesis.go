@@ -374,6 +374,9 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 			return nil, common.Hash{}, nil, err
 		}
 
+		if err := genesis.ValidateQuarkChain(); err != nil {
+			return nil, common.Hash{}, nil, err
+		}
 		if hash := genesis.ToBlock().Hash(); hash != ghash {
 			return nil, common.Hash{}, nil, &GenesisMismatchError{ghash, hash}
 		}
@@ -391,6 +394,9 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 			return nil, common.Hash{}, nil, err
 		}
 
+		if err := genesis.ValidateQuarkChain(); err != nil {
+			return nil, common.Hash{}, nil, err
+		}
 		if hash := genesis.ToBlock().Hash(); hash != ghash {
 			return nil, common.Hash{}, nil, &GenesisMismatchError{ghash, hash}
 		}
@@ -450,9 +456,9 @@ func LoadChainConfig(db ethdb.Database, genesis *Genesis) (cfg *params.ChainConf
 	}
 	// Load the config from the provided genesis specification
 	if genesis != nil {
-		// Reject invalid genesis spec without valid chain config
-		if genesis.Config == nil {
-			return nil, common.Hash{}, errGenesisNoConfig
+		// Validate supplied fields before hashing the allocation.
+		if err := genesis.ValidateQuarkChain(); err != nil {
+			return nil, common.Hash{}, err
 		}
 		// If the canonical genesis header is present, but the chain
 		// config is missing(initialize the empty leveldb with an
@@ -595,6 +601,74 @@ func PoSWStakingContractAllocs(config *params.ChainConfig) types.GenesisAlloc {
 	return alloc
 }
 
+// ValidateQuarkChain checks a supplied QuarkChain genesis without modifying or
+// supplementing it. A nil genesis and Ethereum genesis retain their defaults.
+func (g *Genesis) ValidateQuarkChain() error {
+	if g == nil {
+		return nil
+	}
+	config := g.Config
+	if config == nil {
+		return errGenesisNoConfig
+	}
+	if config.QuarkChain == nil {
+		return nil
+	}
+	if err := config.CheckQuarkChain(); err != nil {
+		return err
+	}
+	if config.Clique != nil || config.TerminalTotalDifficulty != nil || config.MergeNetsplitBlock != nil {
+		return errors.New("quarkchain genesis cannot specify Clique or an Ethereum Merge transition")
+	}
+	if config.DepositContractAddress != (common.Address{}) {
+		return errors.New("quarkchain deposit contract address must be zero")
+	}
+	if g.Number != 0 || g.ParentHash != (common.Hash{}) || g.GasUsed != 0 {
+		return errors.New("genesis number, parent hash and gas used must be zero")
+	}
+	if g.Difficulty == nil || g.Difficulty.Sign() != 0 || g.Nonce != 0 {
+		return errors.New("quarkchain genesis difficulty and nonce must be zero; PoW difficulty belongs in mixHash")
+	}
+	// The fixed cross-shard gas budget must fit at least one deposit.
+	minGasLimit := max(params.MinGasLimit, params.XShardSendGas*params.XShardGasLimitDivisor)
+	if g.GasLimit < minGasLimit || g.GasLimit > params.MaxGasLimit {
+		return fmt.Errorf("invalid gas limit: have %d, want %d..%d", g.GasLimit, minGasLimit, params.MaxGasLimit)
+	}
+	if g.Mixhash.Big().Cmp(config.QuarkChain.PoSW.MinimumDifficulty) < 0 {
+		return errors.New("genesis PoW difficulty in mixHash is below minimum difficulty")
+	}
+	extra, err := types.DecodeQKCExtra(g.ExtraData)
+	if err != nil {
+		return fmt.Errorf("invalid extra-data: %w", err)
+	}
+	if extra.Version != 0 || extra.ChainID.Cmp(config.ChainID) != 0 {
+		return errors.New("genesis extra-data has an invalid version or chain ID")
+	}
+	if extra.PrevRootBlock != (common.Hash{}) || extra.Cursor != (types.XShardCursor{RootBlockHeight: 1}) {
+		return errors.New("genesis extra-data has an invalid root reference or cursor")
+	}
+	if extra.XShardGasUsed != 0 || extra.XShardGasLimit != g.GasLimit/params.XShardGasLimitDivisor {
+		return errors.New("genesis extra-data has invalid cross-shard gas limits")
+	}
+	if g.BaseFee != nil && (!config.IsLondon(common.Big0) || g.BaseFee.Sign() < 0 || g.BaseFee.BitLen() > 256) {
+		return errors.New("genesis base fee requires London and a nonnegative uint256 value")
+	}
+	if (g.ExcessBlobGas != nil && (*g.ExcessBlobGas != 0 || !config.IsCancun(common.Big0, g.Timestamp))) ||
+		(g.BlobGasUsed != nil && (*g.BlobGasUsed != 0 || !config.IsCancun(common.Big0, g.Timestamp))) {
+		return errors.New("genesis blob gas fields require Cancun and must be zero")
+	}
+	if g.SlotNumber != nil && (*g.SlotNumber != 0 || !config.IsAmsterdam(common.Big0, g.Timestamp)) {
+		return errors.New("genesis slot number requires Amsterdam and must be zero")
+	}
+	for address, account := range g.Alloc {
+		// As in geth's state initialization, an omitted balance means zero.
+		if account.Balance != nil && (account.Balance.Sign() < 0 || account.Balance.BitLen() > 256) {
+			return fmt.Errorf("allocation %s: balance must be a nonnegative uint256", address)
+		}
+	}
+	return g.ValidatePoSWStakingContracts()
+}
+
 // ValidatePoSWStakingContracts checks staking deployment in a QuarkChain genesis allocation.
 // It never modifies or supplements the allocation. Account balances, nonces and
 // initial storage remain exactly as specified in the genesis configuration.
@@ -644,7 +718,7 @@ func (g *Genesis) Commit(db ethdb.Database, triedb *triedb.Database, tracer *tra
 	if config.Clique != nil && len(g.ExtraData) < 32+crypto.SignatureLength {
 		return nil, errors.New("can't start clique chain without signers")
 	}
-	if err := g.ValidatePoSWStakingContracts(); err != nil {
+	if err := g.ValidateQuarkChain(); err != nil {
 		return nil, err
 	}
 	// flush the data to disk and compute the state root

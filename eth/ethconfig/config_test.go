@@ -17,13 +17,108 @@
 package ethconfig
 
 import (
+	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/posw"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/naoina/toml"
 )
+
+func TestCreateShardConsensusEngine(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind params.ConsensusType
+		want interface{}
+	}{
+		{"legacy", "", &posw.PoSW{}},
+		{"ethash", params.ConsensusEthash, &posw.PoSW{}},
+		{"simulate", params.ConsensusSimulate, &posw.PoSWSimulate{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			genesis := &core.Genesis{
+				Config: params.NewTestQuarkChainConfig(10001), GasLimit: 12_000_000, Difficulty: new(big.Int),
+				Mixhash: common.BigToHash(common.Big1),
+			}
+			genesis.ExtraData = (&types.QKCExtra{
+				ChainID: genesis.Config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+				XShardGasLimit: genesis.GasLimit / params.XShardGasLimitDivisor,
+			}).Encode()
+			genesis.Alloc = core.PoSWStakingContractAllocs(genesis.Config)
+			genesis.Config.QuarkChain.ConsensusType = test.kind
+			db := rawdb.NewMemoryDatabase()
+			defer db.Close()
+			for _, stored := range []bool{false, true} {
+				config, spec := genesis.Config, genesis
+				if stored {
+					block := genesis.ToBlock()
+					rawdb.WriteHeader(db, block.Header())
+					rawdb.WriteCanonicalHash(db, block.Hash(), 0)
+					rawdb.WriteChainConfig(db, block.Hash(), config)
+					// Recover both the consensus choice and genesis header from the DB.
+					config = rawdb.ReadChainConfig(db, block.Hash())
+					spec = nil
+				}
+				engine, err := CreateConsensusEngine(config, db, spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reflect.TypeOf(engine) != reflect.TypeOf(test.want) {
+					t.Fatalf("stored=%t: engine %T, want %T", stored, engine, test.want)
+				}
+				if err := engine.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateShardConsensusEngineRejectsInvalidGenesis(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*core.Genesis)
+		want   string
+	}{
+		{"extra-data", func(g *core.Genesis) { g.ExtraData = []byte{0} }, "invalid extra-data"},
+		{"balance overflow", func(g *core.Genesis) {
+			g.Alloc[common.Address{1}] = types.Account{Balance: new(big.Int).Lsh(common.Big1, 256)}
+		}, "balance must be a nonnegative uint256"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := params.NewTestQuarkChainConfig(10001)
+			genesis := &core.Genesis{
+				Config: config, GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+				ExtraData: (&types.QKCExtra{
+					ChainID: config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+					XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+				}).Encode(),
+				Alloc: core.PoSWStakingContractAllocs(config),
+			}
+			test.change(genesis)
+			db := rawdb.NewMemoryDatabase()
+			defer db.Close()
+			engine, err := CreateConsensusEngine(config, db, genesis)
+			if engine != nil {
+				engine.Close()
+				t.Fatal("created an engine with invalid genesis")
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+			if hash := rawdb.ReadCanonicalHash(db, 0); hash != (common.Hash{}) {
+				t.Fatalf("invalid genesis was written: %s", hash)
+			}
+		})
+	}
+}
 
 // TestHistoryModeTOML checks that the chain history retention round trips through
 // the config file in the same text form --history.chain takes, including a custom
