@@ -83,6 +83,11 @@ func NewSimulate(config *params.ChainConfig, genesis *types.Header) (*PoSW, erro
 	return engine, nil
 }
 
+// IsSimulate reports whether the engine skips Ethash verification.
+func (p *PoSW) IsSimulate() bool {
+	return p.simulate
+}
+
 // Author returns the coinbase receiving this shard block's subsidy and fees.
 func (p *PoSW) Author(header *types.Header) (common.Address, error) {
 	return header.Coinbase, nil

@@ -115,12 +115,15 @@ func TestBackendLifecycle(t *testing.T) {
 			if s.chain != shardChain || s.clusterClient != client {
 				t.Fatal("New must borrow the supplied chain and client")
 			}
-			wantEngine := reflect.TypeOf(&posw.PoSW{})
-			if chainID == 10002 {
-				wantEngine = reflect.TypeOf(&posw.PoSWSimulate{})
+			shardEngine, ok := s.chain.chain.Engine().(*posw.PoSW)
+			if !ok {
+				t.Fatalf("New selected engine %T, want *posw.PoSW", s.chain.chain.Engine())
 			}
-			if reflect.TypeOf(s.chain.chain.Engine()) != wantEngine || genesis.Config != &config {
-				t.Fatalf("New must preserve %v and the supplied genesis configuration", wantEngine)
+			if wantSimulate := config.QuarkChain.ConsensusType == params.ConsensusSimulate; shardEngine.IsSimulate() != wantSimulate {
+				t.Fatalf("simulate=%t, want %t", shardEngine.IsSimulate(), wantSimulate)
+			}
+			if genesis.Config != &config {
+				t.Fatal("New mutated the supplied genesis")
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
