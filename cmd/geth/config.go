@@ -126,7 +126,13 @@ func loadConfig(file string, cfg *gethConfig) error {
 	if _, ok := err.(*toml.LineError); ok {
 		err = errors.New(file + ", " + err.Error())
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if err := cfg.Eth.Genesis.ValidateQuarkChain(); err != nil {
+		return fmt.Errorf("%s: invalid genesis: %w", file, err)
+	}
+	return nil
 }
 
 func defaultNodeConfig() node.Config {

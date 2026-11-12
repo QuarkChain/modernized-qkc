@@ -40,7 +40,20 @@ import (
 )
 
 // Header sealing is outside block construction; execute and validate the body normally.
-type qkcTestEngine struct{ consensus.Engine }
+type qkcTestEngine struct {
+	consensus.Engine
+	gasLimit uint64 // Allow candidate gas limits below the valid genesis minimum.
+}
+
+func (e qkcTestEngine) Prepare(chain consensus.ChainHeaderReader, header *types.Header) error {
+	if err := e.Engine.Prepare(chain, header); err != nil {
+		return err
+	}
+	if e.gasLimit != 0 {
+		header.GasLimit = e.gasLimit
+	}
+	return nil
+}
 
 func (qkcTestEngine) VerifyHeader(consensus.ChainHeaderReader, *types.Header) error { return nil }
 func (qkcTestEngine) VerifyHeaders(_ consensus.ChainHeaderReader, headers []*types.Header) (chan<- struct{}, <-chan error) {
@@ -161,12 +174,14 @@ func TestBuildXShardDeposits(t *testing.T) {
 					alloc[testBankAddress] = types.Account{Balance: testBankFunds}
 					// Deposits to a contract must remain moves, even if its code reverts.
 					alloc[testUserAddress] = types.Account{Code: common.FromHex("0x60006000fd"), Balance: new(big.Int)}
+					genesisGasLimit := max(tt.limit, params.XShardSendGas*params.XShardGasLimitDivisor)
 					genesis := &core.Genesis{
-						Config: &config, GasLimit: tt.limit,
-						ExtraData: (&types.QKCExtra{ChainID: big.NewInt(10002), Cursor: types.XShardCursor{RootBlockHeight: 1}}).Encode(),
+						Config: &config, GasLimit: genesisGasLimit, Difficulty: new(big.Int),
+						Mixhash:   common.BigToHash(config.QuarkChain.PoSW.MinimumDifficulty),
+						ExtraData: (&types.QKCExtra{ChainID: big.NewInt(10002), Cursor: types.XShardCursor{RootBlockHeight: 1}, XShardGasLimit: genesisGasLimit / params.XShardGasLimitDivisor}).Encode(),
 						Alloc:     alloc,
 					}
-					engine := qkcTestEngine{beacon.New(ethash.NewFaker())}
+					engine := qkcTestEngine{Engine: beacon.New(ethash.NewFaker()), gasLimit: tt.limit}
 					chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), genesis, engine, nil)
 					if err != nil {
 						t.Fatal(err)
@@ -307,8 +322,8 @@ func TestBuildQKCBlockDifficulty(t *testing.T) {
 	alloc[testBankAddress] = types.Account{Balance: testBankFunds}
 	alloc[contract] = types.Account{Code: common.FromHex("0x4460005500"), Balance: new(big.Int)}
 	genesis := &core.Genesis{
-		Config: &config, GasLimit: 1_000_000, Mixhash: common.BigToHash(big.NewInt(1_000_000)),
-		ExtraData: (&types.QKCExtra{ChainID: big.NewInt(10002), Cursor: types.XShardCursor{RootBlockHeight: 1}}).Encode(),
+		Config: &config, GasLimit: 1_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(big.NewInt(1_000_000)),
+		ExtraData: (&types.QKCExtra{ChainID: big.NewInt(10002), Cursor: types.XShardCursor{RootBlockHeight: 1}, XShardGasLimit: 1_000_000 / params.XShardGasLimitDivisor}).Encode(),
 		Alloc:     alloc,
 	}
 	// The PoSW engine prepares the difficulty, before the builder executes transactions.
@@ -316,7 +331,7 @@ func TestBuildQKCBlockDifficulty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := qkcTestEngine{pow}
+	engine := qkcTestEngine{Engine: pow}
 	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), genesis, engine, nil)
 	if err != nil {
 		t.Fatal(err)

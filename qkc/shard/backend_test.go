@@ -19,6 +19,7 @@ package shard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"math/big"
 	"reflect"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -54,19 +56,26 @@ func (c *backendClusterClient) SendShardBlockHeaderToMaster(ctx context.Context,
 	return c.report(ctx, header, amount)
 }
 
-// TestBackendLifecycle checks binding the existing chain, separate root
-// initialization and root-coinbase-chain-only stake queries. Init must not
-// propagate genesis again; the caller owns all shared resources.
+// TestBackendLifecycle checks binding the supplied chain and client with Ethash
+// or simulated PoSW, and separate root initialization without propagating genesis
+// again. Root-chain stake queries are restricted to the root-coinbase chain, and
+// missing query headers must produce an error identifying the requested hash.
 func TestBackendLifecycle(t *testing.T) {
 	for _, chainID := range []int64{10001, 10002} {
 		t.Run(big.NewInt(chainID).String(), func(t *testing.T) {
 			config := *params.NewTestQuarkChainConfig(chainID, 10001, 10002)
+			if chainID == 10002 {
+				config.QuarkChain.ConsensusType = params.ConsensusSimulate
+			}
 			alloc := core.SystemContractAllocs()
 			maps.Copy(alloc, core.PoSWStakingContractAllocs(&config))
 			genesis := &core.Genesis{
 				Config:   &config,
 				GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
-				ExtraData: (&types.QKCExtra{ChainID: big.NewInt(chainID)}).Encode(), Alloc: alloc,
+				ExtraData: (&types.QKCExtra{
+					ChainID: big.NewInt(chainID), Cursor: pos(1, 0, 0),
+					XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+				}).Encode(), Alloc: alloc,
 			}
 			db := rawdb.NewMemoryDatabase()
 			t.Cleanup(func() { db.Close() })
@@ -80,7 +89,15 @@ func TestBackendLifecycle(t *testing.T) {
 					return nil
 				},
 			}
-			engine, err := posw.New(&config, genesis.ToBlock().Header())
+			var (
+				engine consensus.Engine
+				err    error
+			)
+			if chainID == 10002 {
+				engine, err = posw.NewSimulate(&config, genesis.ToBlock().Header())
+			} else {
+				engine, err = posw.New(&config, genesis.ToBlock().Header())
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,6 +114,13 @@ func TestBackendLifecycle(t *testing.T) {
 			}
 			if s.chain != shardChain || s.clusterClient != client {
 				t.Fatal("New must borrow the supplied chain and client")
+			}
+			wantEngine := reflect.TypeOf(&posw.PoSW{})
+			if chainID == 10002 {
+				wantEngine = reflect.TypeOf(&posw.PoSWSimulate{})
+			}
+			if reflect.TypeOf(s.chain.chain.Engine()) != wantEngine || genesis.Config != &config {
+				t.Fatalf("New must preserve %v and the supplied genesis configuration", wantEngine)
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
@@ -128,6 +152,66 @@ func TestBackendLifecycle(t *testing.T) {
 				t.Fatal("non-root-coinbase chain served root-chain stakes")
 			}
 		})
+	}
+}
+
+func TestBackendChainRejectsInvalidGenesis(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*core.Genesis)
+		want   string
+	}{
+		{"extra-data", func(g *core.Genesis) { g.ExtraData = []byte{0} }, "invalid extra-data"},
+		{"balance overflow", func(g *core.Genesis) {
+			g.Alloc[common.Address{1}] = types.Account{Balance: new(big.Int).Lsh(common.Big1, 256)}
+		}, "balance must be a nonnegative uint256"},
+	} {
+		for _, stored := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stored=%t", test.name, stored), func(t *testing.T) {
+				config := params.NewTestQuarkChainConfig(10001)
+				genesis := &core.Genesis{
+					Config:   config,
+					GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+					ExtraData: (&types.QKCExtra{
+						ChainID: config.ChainID, Cursor: pos(1, 0, 0),
+						XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
+					}).Encode(),
+					Alloc: core.SystemContractAllocs(),
+				}
+				maps.Copy(genesis.Alloc, core.PoSWStakingContractAllocs(config))
+				db := rawdb.NewMemoryDatabase()
+				defer db.Close()
+				engine, err := posw.New(config, genesis.ToBlock().Header())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer engine.Close()
+				// The caller constructs and validates the chain before binding a backend.
+				if stored {
+					chain, err := core.NewBlockChain(db, genesis, engine, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					chain.Stop()
+				}
+				genesisHash, headHash := rawdb.ReadCanonicalHash(db, 0), rawdb.ReadHeadBlockHash(db)
+				test.change(genesis)
+				chain, err := core.NewBlockChain(db, genesis, engine, nil)
+				if chain != nil {
+					chain.Stop()
+					t.Fatal("created a chain with invalid genesis")
+				}
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("error %v, want %q", err, test.want)
+				}
+				if rawdb.ReadCanonicalHash(db, 0) != genesisHash || rawdb.ReadHeadBlockHash(db) != headHash {
+					t.Fatal("invalid genesis changed the chain database")
+				}
+				if genesis.Config != config {
+					t.Fatal("NewBlockChain modified the caller's genesis configuration")
+				}
+			})
+		}
 	}
 }
 

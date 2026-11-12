@@ -197,7 +197,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if chainConfig.QuarkChain != nil {
 		config.SyncMode = ethconfig.FullSync
 	}
-	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb)
+	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
 	}

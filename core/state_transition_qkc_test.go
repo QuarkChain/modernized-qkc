@@ -76,14 +76,14 @@ func testDepositExecution(t *testing.T, amsterdam bool) {
 	config.ChainID = big.NewInt(10002)
 	ethConfig := config
 	config.QuarkChain = params.NewTestQuarkChainConfig(10002, 10001, 10002).QuarkChain
-	gspec := &Genesis{
-		Config: &config,
-		Alloc: withSystemContracts(types.GenesisAlloc{
-			sender:   {Balance: big.NewInt(params.Ether)},
-			storer:   {Code: program.New().Op(vm.CALLVALUE).Push(0).Op(vm.SSTORE).Bytes()},
-			reverter: {Code: program.New().Push(0).Push(0).Op(vm.REVERT).Bytes()},
-		}),
-	}
+	config.TerminalTotalDifficulty = nil
+	config.MergeNetsplitBlock = nil
+	gspec := quarkChainGenesis(&config, params.GenesisGasLimit)
+	gspec.Alloc = withSystemContracts(types.GenesisAlloc{
+		sender:   {Balance: big.NewInt(params.Ether)},
+		storer:   {Code: program.New().Op(vm.CALLVALUE).Push(0).Op(vm.SSTORE).Bytes()},
+		reverter: {Code: program.New().Push(0).Push(0).Op(vm.REVERT).Bytes()},
+	})
 	maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(&config))
 	deposits := []*types.DepositTx{
 		// A move to an EOA.
@@ -184,7 +184,9 @@ func testDepositExecution(t *testing.T, amsterdam bool) {
 	}
 
 	// A chain that is not a QuarkChain shard rejects the deposits.
-	ethChain, err := NewBlockChain(rawdb.NewMemoryDatabase(), &Genesis{Config: &ethConfig, Alloc: gspec.Alloc}, engine, nil)
+	ethGenesis := *gspec
+	ethGenesis.Config = &ethConfig
+	ethChain, err := NewBlockChain(rawdb.NewMemoryDatabase(), &ethGenesis, engine, nil)
 	if err != nil {
 		t.Fatalf("failed to create Ethereum chain: %v", err)
 	}

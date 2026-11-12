@@ -99,7 +99,9 @@ func TestValidateXShardDepositsGasAccounting(t *testing.T) {
 	config := *params.NewTestQuarkChainConfig(10002, 10001, 10002)
 	alloc := SystemContractAllocs()
 	maps.Copy(alloc, PoSWStakingContractAllocs(params.NewTestQuarkChainConfig(10002)))
-	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), &Genesis{Config: &config, Alloc: alloc}, qkcTestEngine{beacon.New(ethash.NewFaker())}, nil)
+	genesis := quarkChainGenesis(&config, params.GenesisGasLimit)
+	genesis.Alloc = alloc
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), genesis, qkcTestEngine{beacon.New(ethash.NewFaker())}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,12 +208,8 @@ func TestValidateXShardDeposits(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			config := *params.NewTestQuarkChainConfig(10002, 10001, 10002)
-			gspec := &Genesis{
-				Config:    &config,
-				GasLimit:  gasLimit,
-				ExtraData: (&types.QKCExtra{}).Encode(),
-				Alloc:     withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),
-			}
+			gspec := quarkChainGenesis(&config, gasLimit)
+			gspec.Alloc = withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}})
 			maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(&config))
 			engine := qkcTestEngine{beacon.New(ethash.NewFaker())}
 			extra := types.QKCExtra{

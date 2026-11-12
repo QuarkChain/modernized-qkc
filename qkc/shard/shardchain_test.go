@@ -84,9 +84,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	gspec := &core.Genesis{
 		Config:     env.config,
 		Difficulty: common.Big0,
+		Mixhash:    common.BigToHash(common.Big1),
+		GasLimit:   params.GenesisGasLimit,
 		BaseFee:    big.NewInt(params.InitialBaseFee),
-		ExtraData:  (&types.QKCExtra{ChainID: big.NewInt(10001)}).Encode(),
-		Alloc:      core.SystemContractAllocs(),
+		ExtraData: (&types.QKCExtra{
+			ChainID: big.NewInt(10001), Cursor: pos(1, 0, 0),
+			XShardGasLimit: params.GenesisGasLimit / params.XShardGasLimitDivisor,
+		}).Encode(),
+		Alloc: core.SystemContractAllocs(),
 	}
 	maps.Copy(gspec.Alloc, core.PoSWStakingContractAllocs(&config))
 	env.genDb, _, _ = core.GenerateChainWithGenesis(gspec, env.engine, 0, nil)

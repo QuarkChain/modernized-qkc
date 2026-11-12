@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
@@ -233,14 +234,22 @@ type Config struct {
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.
-// Clique is allowed for now to live standalone, but ethash is forbidden and can
-// only exist on already merged networks.
-func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database) (consensus.Engine, error) {
+// QuarkChain selects Ethash or simulated PoSW; Ethereum networks must have transitioned to proof of stake.
+func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, genesis *core.Genesis) (consensus.Engine, error) {
 	if config.QuarkChain != nil {
-		// Shard genesis must be initialized in the DB before starting the node.
-		header := rawdb.ReadHeader(db, rawdb.ReadCanonicalHash(db, 0), 0)
-		if header == nil {
-			return nil, errors.New("missing shard genesis header")
+		// PoSW needs the genesis gas limit before the blockchain is constructed.
+		// Prefer the stored header on restart, including when no genesis is supplied.
+		var header *types.Header
+		if hash := rawdb.ReadCanonicalHash(db, 0); hash != (common.Hash{}) {
+			header = rawdb.ReadHeader(db, hash, 0)
+		} else if genesis != nil {
+			if err := genesis.ValidateQuarkChain(); err != nil {
+				return nil, err
+			}
+			header = genesis.ToBlock().Header()
+		}
+		if config.QuarkChain.ConsensusType == params.ConsensusSimulate {
+			return posw.NewSimulate(config, header)
 		}
 		return posw.New(config, header)
 	}
