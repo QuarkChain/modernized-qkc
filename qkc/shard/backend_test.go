@@ -51,7 +51,7 @@ func (c *backendClusterClient) BroadcastXShardTxList(ctx context.Context, chainI
 	return c.broadcast(ctx, chainID, hash, list)
 }
 
-func (c *backendClusterClient) SendMinorBlockHeaderToMaster(ctx context.Context, header *types.Header, amount *uint256.Int) error {
+func (c *backendClusterClient) SendShardBlockHeaderToMaster(ctx context.Context, header *types.Header, amount *uint256.Int) error {
 	return c.report(ctx, header, amount)
 }
 
