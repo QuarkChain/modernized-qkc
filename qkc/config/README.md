@@ -26,24 +26,24 @@ by Git. With this binary on `PATH`, a configuration copied to `shard.toml` start
 
 ### Milestone 1: simulated internal mining
 
-`--ms1` enables simulated mining with real block validation, mocked cluster
-delivery and P2P disabled. Build with `make geth qkc`, then use three terminals:
+`--m1` enables simulated mining with real block validation and master/slave TCP;
+cross-shard delivery is mocked and P2P disabled. Build with `make geth qkc`, then use three terminals:
 
 ```sh
 # Terminal 1
-build/bin/geth --config qkc/config/devnet/shard-100001.toml --ms1
+build/bin/geth --config qkc/config/devnet/shard-100001.toml --m1
 
 # Terminal 2
-build/bin/geth --config qkc/config/devnet/shard-100002.toml --ms1
+build/bin/geth --config qkc/config/devnet/shard-100002.toml --m1
 
 # Terminal 3
-build/bin/qkc ms1
+build/bin/qkc m1
 ```
 
-The driver reads IPC endpoints from both shard TOMLs and sends the
-[R0 fixture](devnet/root.toml) via `ms1_initRoot`, starting both miners.
-It displays the root's included shard header heights alongside current shard heads
-until Ctrl-C. Exiting the driver leaves mining running.
+The driver reads `PrivateHost` / `PrivatePort` and chain IDs from both shard TOMLs
+(`--config` overrides them, repeat for each shard). After identity PINGs it sends the
+[R0 fixture](devnet/root.toml) via PING, starting both miners. It displays R0's included
+header heights alongside heights reported by the shards. Ctrl-C shuts down all three processes.
 Use fresh data directories for each run. Regenerate R0 if either shard genesis changes.
 
 ### Test accounts

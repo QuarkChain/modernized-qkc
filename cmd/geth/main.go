@@ -139,7 +139,7 @@ var (
 		utils.GpoMaxGasPriceFlag,
 		utils.GpoIgnoreGasPriceFlag,
 		configFileFlag,
-		ms1Flag, // Temporary milestone 1 test harness.
+		m1Flag, // Temporary milestone 1 test harness.
 		utils.BeaconApiFlag,
 		utils.BeaconApiHeaderFlag,
 		utils.BeaconThresholdFlag,

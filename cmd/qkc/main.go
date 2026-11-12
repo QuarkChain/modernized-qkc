@@ -30,8 +30,8 @@ func newApp() *cli.App {
 	app := flags.NewApp("the QuarkChain command line interface")
 	app.Name = "qkc"
 	app.Flags = debug.Flags
-	// ms1 is a temporary local-mining test driver.
-	app.Commands = []*cli.Command{checkQKCConfigCommand, ms1Command}
+	// m1 is a temporary local-mining test driver.
+	app.Commands = []*cli.Command{checkQKCConfigCommand, m1Command}
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)
 		return debug.Setup(ctx)

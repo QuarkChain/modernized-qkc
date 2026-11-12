@@ -18,25 +18,29 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/big"
+	"net"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus/posw"
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/qkc/comm"
+	"github.com/ethereum/go-ethereum/qkc/masterconn"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
-	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/holiman/uint256"
 )
 
-func ms1TestNode(t *testing.T, id int) (*eth.Ethereum, *ms1Service, *rpc.Client) {
+func m1TestNode(t *testing.T, id int) (*eth.Ethereum, *m1Service, *node.Node) {
 	t.Helper()
 	cfg := gethConfig{Eth: ethconfig.Defaults, Node: defaultNodeConfig()}
 	if err := loadConfig(fmt.Sprintf("../../qkc/config/devnet/shard-%d.toml", id), &cfg); err != nil {
@@ -44,6 +48,7 @@ func ms1TestNode(t *testing.T, id int) (*eth.Ethereum, *ms1Service, *rpc.Client)
 	}
 	cfg.Node.DataDir = t.TempDir()
 	cfg.Node.HTTPHost, cfg.Node.WSHost, cfg.Node.IPCPath = "", "", ""
+	cfg.Node.PrivatePort = 0 // Let the OS choose an isolated cluster port.
 	cfg.Node.P2P.ListenAddr, cfg.Node.P2P.DiscAddr = "", ""
 	cfg.Node.P2P.MaxPeers = 0
 	cfg.Node.P2P.NoDial, cfg.Node.P2P.NoDiscovery = true, true
@@ -59,21 +64,42 @@ func ms1TestNode(t *testing.T, id int) (*eth.Ethereum, *ms1Service, *rpc.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := newMS1Service(backend, cfg.Node.CoinbaseAddress)
+	service, err := newM1Service(stack, backend)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stack.RegisterAPIs([]rpc.API{{Namespace: "ms1", Service: &ms1API{service}}})
 	stack.RegisterLifecycle(service)
 	if err := stack.Start(); err != nil {
 		t.Fatal(err)
 	}
-	client := stack.Attach()
-	t.Cleanup(client.Close)
-	return backend, service, client
+	return backend, service, stack
 }
 
-func TestMS1Mining(t *testing.T) {
+type m1HeaderHandler func(*big.Int, *types.Header, *uint256.Int) error
+
+func (f m1HeaderHandler) AddShardBlockHeader(id *big.Int, header *types.Header, amount *uint256.Int) error {
+	return f(id, header, amount)
+}
+
+func m1TestConnection(t *testing.T, service *m1Service, handler m1HeaderHandler) *masterconn.SlaveConn {
+	t.Helper()
+	socket, err := net.DialTimeout("tcp", service.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := masterconn.NewSlaveConn(masterconn.SlaveConnConfig{
+		Conn: socket, RemoteChainID: service.chainID, Handler: handler, ShutdownMaster: func() {},
+	})
+	if err != nil {
+		socket.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(peer.Close)
+	peer.Start()
+	return peer
+}
+
+func TestM1Mining(t *testing.T) {
 	data, err := os.ReadFile("../../qkc/config/devnet/root.toml")
 	if err != nil {
 		t.Fatal(err)
@@ -91,13 +117,9 @@ func TestMS1Mining(t *testing.T) {
 	if root.Hash() != fixture.Hash {
 		t.Fatal("fixture hash mismatch")
 	}
-	encoded, err := root.MarshalSSZ()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for index, id := range []int{100001, 100002} {
 		t.Run(fmt.Sprint(id), func(t *testing.T) {
-			mining, service, miningRPC := ms1TestNode(t, id)
+			mining, service, stack := m1TestNode(t, id)
 			engine, ok := mining.Engine().(*posw.PoSWSimulate)
 			if !ok {
 				t.Fatalf("unexpected engine %T", mining.Engine())
@@ -116,43 +138,64 @@ func TestMS1Mining(t *testing.T) {
 			wrongHeaders[index] = types.CopyHeader(wrongHeaders[index])
 			wrongHeaders[index].Root[0] ^= 1
 			wrongRoot := qkctypes.NewRootBlock(root.Header(), wrongHeaders, nil)
-			wrongData, _ := wrongRoot.MarshalSSZ()
-			var hash common.Hash
-			if err := miningRPC.CallContext(ctx, &hash, "ms1_initRoot", hexutil.Bytes(wrongData)); err == nil {
+			if err := service.CreateShards(wrongRoot); err == nil {
 				t.Fatal("accepted a mismatched shard genesis")
 			}
 			if service.backend.RootTip() != (common.Hash{}) {
 				t.Fatal("failed initialization changed the root tip")
 			}
-			heads := make(chan core.ChainHeadEvent, 16)
-			sub := mining.BlockChain().SubscribeChainHeadEvent(heads)
-			defer sub.Unsubscribe()
-			if err := miningRPC.CallContext(ctx, &hash, "ms1_initRoot", hexutil.Bytes(encoded)); err != nil {
+			type report struct {
+				header *types.Header
+				amount *uint256.Int
+			}
+			reports := make(chan report, 16)
+			var rejectReports atomic.Bool
+			peer := m1TestConnection(t, service, func(source *big.Int, header *types.Header, amount *uint256.Int) error {
+				if source.Int64() != int64(id) {
+					return fmt.Errorf("unexpected source chain %s", source)
+				}
+				if rejectReports.Load() {
+					return &comm.RemoteError{Code: 7}
+				}
+				select {
+				case reports <- report{header, amount}:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			})
+			if err := peer.SendPing(ctx, nil); err != nil {
 				t.Fatal(err)
 			}
-			if hash != root.Hash() {
+			if service.backend.RootTip() != (common.Hash{}) {
+				t.Fatal("identity-only PING initialized the shard")
+			}
+			if err := peer.SendPing(ctx, root); err != nil {
+				t.Fatal(err)
+			}
+			if service.backend.RootTip() != root.Hash() {
 				t.Fatal("initialized another root")
 			}
-			for mining.BlockChain().CurrentBlock().Number.Uint64() < 3 {
+			received := make(map[uint64]report)
+			for len(received) < 3 {
 				select {
-				case <-heads:
+				case reported := <-reports:
+					received[reported.header.Number.Uint64()] = reported
 				case <-ctx.Done():
-					t.Fatal("simulated mining did not produce three blocks:", ctx.Err())
+					t.Fatal("simulated mining did not report three blocks:", ctx.Err())
 				}
 			}
 			// Retrying initialization on a running shard must not rewind its head.
-			if err := miningRPC.CallContext(ctx, &hash, "ms1_initRoot", hexutil.Bytes(encoded)); err != nil {
+			if err := peer.SendPing(ctx, root); err != nil {
 				t.Fatal(err)
 			}
 			if mining.BlockChain().CurrentBlock().Number.Uint64() < 3 {
 				t.Fatal("repeated initialization rewound the head")
 			}
-			if err := miningRPC.CallContext(ctx, &hash, "ms1_initRoot", hexutil.Bytes(wrongData)); err == nil {
+			if err := service.CreateShards(wrongRoot); err == nil {
 				t.Fatal("replaced an initialized root")
 			}
-			if err := service.Stop(); err != nil {
-				t.Fatal(err)
-			}
+			service.miner.StopLocalMining()
 			for number := uint64(1); number <= 3; number++ {
 				block := mining.BlockChain().GetBlockByNumber(number)
 				if block == nil || block.ParentHash() != mining.BlockChain().GetCanonicalHash(number-1) {
@@ -171,6 +214,14 @@ func TestMS1Mining(t *testing.T) {
 				if committed, err := qkcrawdb.IsShardBlockCommitted(mining.ChainDb(), block.Hash()); err != nil || !committed {
 					t.Fatalf("block %d did not complete the backend import path: %v", number, err)
 				}
+				reported, ok := received[number]
+				if !ok || reported.header.Hash() != block.Hash() {
+					t.Fatalf("reported header %d differs from the canonical block", number)
+				}
+				amount, err := mining.BlockChain().GetCoinbaseAmount(block.Hash())
+				if err != nil || !reported.amount.Eq(amount) {
+					t.Fatalf("reported coinbase amount %d differs: %v", number, err)
+				}
 			}
 			// Invalid headers still fail through the same Shard backend/importer.
 			head := mining.BlockChain().CurrentBlock()
@@ -185,6 +236,29 @@ func TestMS1Mining(t *testing.T) {
 			}
 			if mining.BlockChain().CurrentBlock().Hash() != head.Hash() {
 				t.Fatal("invalid block changed the canonical head")
+			}
+			// A rejected report must reach the importer and leave delivery uncommitted.
+			rejectReports.Store(true)
+			err = service.backend.InsertMinedBlock(candidate)
+			var remoteErr *comm.RemoteError
+			if !errors.As(err, &remoteErr) || remoteErr.Code != 7 {
+				t.Fatalf("master rejection was not propagated: %v", err)
+			}
+			if committed, err := qkcrawdb.IsShardBlockCommitted(mining.ChainDb(), candidate.Hash()); err != nil || committed {
+				t.Fatalf("rejected header report was marked committed: %v", err)
+			}
+			rejectReports.Store(false)
+			// Closing qkc's side must shut down geth, including its local miner.
+			if err := service.miner.StartLocalMining(); err != nil {
+				t.Fatal(err)
+			}
+			peer.Close()
+			closed := make(chan struct{})
+			go func() { stack.Wait(); close(closed) }()
+			select {
+			case <-closed:
+			case <-ctx.Done():
+				t.Fatal("master disconnect did not shut down the shard")
 			}
 		})
 	}

@@ -171,8 +171,8 @@ func loadBaseConfig(ctx *cli.Context) gethConfig {
 // makeConfigNode loads geth configuration and creates a blank node instance.
 func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 	cfg := loadBaseConfig(ctx)
-	// Temporary MS1 test setup; see ms1.go for scope and removal conditions.
-	if err := configureMS1(ctx, &cfg); err != nil {
+	// Temporary M1 test setup; see m1.go for scope and removal conditions.
+	if err := configureM1(ctx, &cfg); err != nil {
 		utils.Fatalf("%v", err)
 	}
 	stack, err := node.New(&cfg.Node)
@@ -266,9 +266,9 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 
 	// Add Ethereum service.
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
-	// Temporary MS1 service, enabled explicitly for local mining tests.
-	if ctx.Bool(ms1Flag.Name) {
-		if err := registerMS1(stack, eth); err != nil {
+	// Temporary M1 service, enabled explicitly for local mining tests.
+	if ctx.Bool(m1Flag.Name) {
+		if err := registerM1(stack, eth); err != nil {
 			utils.Fatalf("Failed to register milestone 1: %v", err)
 		}
 	}
