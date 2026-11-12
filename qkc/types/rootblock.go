@@ -50,6 +50,9 @@ type RootBlockHeader struct {
 }
 
 const (
+	// Match pyquarkchain's BLOCK_EXTRA_DATA_SIZE_LIMIT for root extra data.
+	maxRootExtraDataSize = 1024
+
 	// unsealedFixedSize is the size of the fixed part of the SSZ encoding of
 	// the header without the seal, the offset of Extra included.
 	unsealedFixedSize = 4 + 4 + 32 + 32 + 20 + 32 + 8 + 32 + 32 + 4
@@ -58,6 +61,29 @@ const (
 	// header with the seal.
 	sealedFixedSize = unsealedFixedSize + 8 + 32 + 65
 )
+
+// SanityCheck checks fixed root fields without reading configuration or a parent.
+// These are version zero, positive difficulty, TD >= difficulty and the Extra limit.
+// Genesis is allowed here; normal import rejects it. Parent-dependent height,
+// time, exact difficulty, rewards and the seal are checked by consensus.
+func (h *RootBlockHeader) SanityCheck() error {
+	if h == nil {
+		return fmt.Errorf("missing root block header")
+	}
+	if h.Version != 0 {
+		return fmt.Errorf("unsupported root block version: %d", h.Version)
+	}
+	if h.Difficulty.IsZero() {
+		return fmt.Errorf("root difficulty must be positive")
+	}
+	if h.TotalDifficulty.Cmp(&h.Difficulty) < 0 {
+		return fmt.Errorf("root total difficulty is less than base difficulty")
+	}
+	if len(h.Extra) > maxRootExtraDataSize {
+		return fmt.Errorf("root extra data exceeds 1024 bytes")
+	}
+	return nil
+}
 
 // Hash returns the block hash of the header, which is the keccak256 hash of its
 // SSZ encoding.
