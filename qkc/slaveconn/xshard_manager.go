@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/comm"
 	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
@@ -105,8 +106,11 @@ func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, 
 
 // DialToSlave establishes an outbound cross-shard connection to the slave
 // described by slaveInfo. Its ChainID identifies the chain hosted by that slave.
-func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) error {
-	remoteChainID := wire.ChainIDFromSSZ(slaveInfo.ChainID)
+func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo comm.SlaveInfo) error {
+	if err := validateXshardChainID(slaveInfo.ChainID); err != nil {
+		return err
+	}
+	remoteChainID := new(big.Int).Set(slaveInfo.ChainID)
 	if _, ok := p.configuredChainIDs[remoteChainID.String()]; !ok {
 		return fmt.Errorf("slave chain ID %d is not configured", remoteChainID)
 	}
@@ -115,7 +119,7 @@ func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo wire.Slav
 		return nil
 	}
 
-	addr := net.JoinHostPort(string(slaveInfo.Host), strconv.Itoa(int(slaveInfo.Port)))
+	addr := net.JoinHostPort(slaveInfo.Host, strconv.Itoa(int(slaveInfo.Port)))
 	// Dialer.Timeout keeps bounding the dial when ctx is never cancelled.
 	nc, err := (&net.Dialer{Timeout: defaultDialTimeout}).DialContext(ctx, "tcp", addr)
 	if err != nil {

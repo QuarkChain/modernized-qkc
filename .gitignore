@@ -23,6 +23,9 @@
 /build/bin/
 /geth*.zip
 
+# Local QKC chain databases and node runtime files
+/qkc-data/
+
 # used by the build/ci.go archive + upload tool
 /geth*.tar.gz
 /geth*.tar.gz.sig

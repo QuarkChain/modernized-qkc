@@ -78,7 +78,8 @@ func TestGetCoinbaseAmount(t *testing.T) {
 				refunder:  {Code: program.New().Push(0).Push(0).Op(vm.SSTORE).Bytes(), Storage: map[common.Hash]common.Hash{{}: common.HexToHash("0x01")}},
 			})
 			maps.Copy(alloc, PoSWStakingContractAllocs(&config))
-			genesis := &Genesis{Config: &config, Alloc: alloc, GasLimit: 12_000_000, Difficulty: new(big.Int), ExtraData: (&types.QKCExtra{ChainID: config.ChainID}).Encode()}
+			genesis := quarkChainGenesis(&config, 12_000_000)
+			genesis.Alloc = alloc
 			poswEngine, err := posw.New(&config, genesis.ToBlock().Header())
 			if err != nil {
 				t.Fatal(err)
@@ -227,7 +228,7 @@ func TestGetCoinbaseAmountErrors(t *testing.T) {
 	config := genesisConfig(10001)
 	db := rawdb.NewMemoryDatabase()
 	defer db.Close()
-	genesis := &Genesis{Config: config, Alloc: PoSWStakingContractAllocs(config), GasLimit: 12_000_000, Difficulty: new(big.Int)}
+	genesis := quarkChainGenesis(config, 12_000_000)
 	chain, err := NewBlockChain(db, genesis, ethash.NewFaker(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +317,8 @@ func TestLockedStakesParentState(t *testing.T) {
 	}
 	alloc[params.RootStakingContractAddress] = rootContract
 	alloc[funded] = types.Account{Balance: big.NewInt(10000)}
-	genesis := &Genesis{Config: genesisConfig(10001), GasLimit: 12000000, Difficulty: new(big.Int), Alloc: alloc}
+	genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
+	genesis.Alloc = alloc
 	db := rawdb.NewMemoryDatabase()
 	defer db.Close()
 	chain, err := NewBlockChain(db, genesis, ethash.NewFaker(), DefaultConfig().WithStateScheme(rawdb.HashScheme))
@@ -393,7 +395,7 @@ func TestRootChainStakesCoinbaseChainOnly(t *testing.T) {
 func TestLockedStakesErrors(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	defer db.Close()
-	genesis := &Genesis{Config: genesisConfig(10001), GasLimit: 12000000, Difficulty: new(big.Int), Alloc: PoSWStakingContractAllocs(params.NewTestQuarkChainConfig(10001))}
+	genesis := quarkChainGenesis(genesisConfig(10001), 12_000_000)
 	chain, err := NewBlockChain(db, genesis, ethash.NewFaker(), DefaultConfig().WithStateScheme(rawdb.HashScheme))
 	if err != nil {
 		t.Fatal(err)

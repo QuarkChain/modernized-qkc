@@ -127,6 +127,8 @@ func TestQuarkChainConfigEqual(t *testing.T) {
 		want   bool
 	}{
 		{"unchanged", func(c *QuarkChainConfig) {}, true},
+		{"consensusType", func(c *QuarkChainConfig) { c.ConsensusType = ConsensusSimulate }, false},
+		{"explicit ethash", func(c *QuarkChainConfig) { c.ConsensusType = ConsensusEthash }, false},
 		{"chainIds order", func(c *QuarkChainConfig) { c.ChainIDs[0], c.ChainIDs[1] = c.ChainIDs[1], c.ChainIDs[0] }, false},
 		{"chainIds", func(c *QuarkChainConfig) { c.ChainIDs[1] = big.NewInt(10003) }, false},
 		{"posw", func(c *QuarkChainConfig) { c.PoSW.CoinbaseAmount.SetInt64(100) }, false},
@@ -186,6 +188,62 @@ func TestQuarkChainConfigTaxValidation(t *testing.T) {
 		if err := config.CheckConfigForkOrder(); err != nil {
 			t.Fatalf("valid tax %s rejected: %v", tax, err)
 		}
+	}
+}
+
+func TestQuarkChainConsensusType(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   ConsensusType
+		wantErr bool
+	}{
+		{"legacy empty", "", false},
+		{"ethash", ConsensusEthash, false},
+		{"simulate", ConsensusSimulate, false},
+		{"none", "NONE", true},
+		{"unknown", "unknown", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := NewTestQuarkChainConfig(10001)
+			config.QuarkChain.ConsensusType = test.value
+			if err := config.CheckConfigForkOrder(); (err != nil) != test.wantErr {
+				t.Fatalf("CheckConfigForkOrder() error = %v, want error = %v", err, test.wantErr)
+			}
+			if err := test.value.Check(); (err != nil) != (test.wantErr || test.value == "") {
+				t.Fatalf("unexpected ConsensusType.Check() result for %q: %v", test.value, err)
+			}
+		})
+	}
+}
+
+func TestQuarkChainRejectsUBT(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		genesis bool
+		time    *uint64
+		wantErr bool
+	}{
+		{"disabled", false, nil, false},
+		{"genesis flag", true, nil, true},
+		{"time zero", false, newUint64(0), true},
+		{"future time", false, newUint64(100), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := NewTestQuarkChainConfig(10001)
+			// Keep fork ordering valid so it cannot mask the QKC restriction.
+			config.ShanghaiTime = newUint64(0)
+			config.EnableUBTAtGenesis, config.UBTTime = test.genesis, test.time
+			if test.wantErr {
+				require.ErrorContains(t, config.CheckQuarkChain(), "quarkchain does not support UBT")
+				require.ErrorContains(t, config.CheckConfigForkOrder(), "quarkchain does not support UBT")
+			} else {
+				require.NoError(t, config.CheckQuarkChain())
+				require.NoError(t, config.CheckConfigForkOrder())
+			}
+			config.QuarkChain = nil
+			require.NoError(t, config.CheckQuarkChain())
+			require.NoError(t, config.CheckConfigForkOrder())
+		})
 	}
 }
 

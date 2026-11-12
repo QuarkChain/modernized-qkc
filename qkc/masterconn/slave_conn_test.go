@@ -141,9 +141,9 @@ func (h *businessHandler) GetUnconfirmedHeaders() ([]*types.Header, error) {
 	return []*types.Header{testHeader()}, nil
 }
 
-type slaveDialerFunc func(context.Context, wire.SlaveInfo) error
+type slaveDialerFunc func(context.Context, comm.SlaveInfo) error
 
-func (f slaveDialerFunc) DialToSlave(ctx context.Context, info wire.SlaveInfo) error {
+func (f slaveDialerFunc) DialToSlave(ctx context.Context, info comm.SlaveInfo) error {
 	return f(ctx, info)
 }
 
@@ -165,9 +165,9 @@ func TestSlaveConnRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	targets := make(chan wire.SlaveInfo, 1)
+	targets := make(chan comm.SlaveInfo, 1)
 	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{Conn: remote, LocalChainID: wantID, Handler: h, ShutdownSlave: noopShutdown,
-		SlaveDialer: slaveDialerFunc(func(_ context.Context, info wire.SlaveInfo) error { targets <- info; return nil })})
+		SlaveDialer: slaveDialerFunc(func(_ context.Context, info comm.SlaveInfo) error { targets <- info; return nil })})
 	if err != nil {
 		sc.Close()
 		remote.Close()
@@ -198,7 +198,7 @@ func TestSlaveConnRPC(t *testing.T) {
 	if err := sc.SendConnectToSlaves(ctx, []comm.SlaveInfo{{Host: "127.0.0.1", Port: 1234, ChainID: wantID}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-targets; string(got.Host) != "127.0.0.1" || got.Port != 1234 || wire.ChainIDFromSSZ(got.ChainID).Cmp(wantID) != 0 {
+	if got := <-targets; got.Host != "127.0.0.1" || got.Port != 1234 || got.ChainID.Cmp(wantID) != 0 {
 		t.Fatal("slave endpoint changed")
 	}
 	stakes, err := sc.SendGetRootChainStakes(ctx, h.address, h.blockHash)
@@ -243,8 +243,8 @@ func TestSlaveConnRejectsWrongIdentity(t *testing.T) {
 			if err := sc.SendPing(slaveTestContext(t), nil); err == nil || !strings.Contains(err.Error(), "chain ID mismatch") {
 				t.Fatalf("expected identity mismatch, got %v", err)
 			}
-			if !sc.IsClosed() {
-				t.Fatal("identity mismatch left connection open")
+			if sc.IsClosed() {
+				t.Fatal("identity mismatch closed owner-managed connection")
 			}
 		})
 	}

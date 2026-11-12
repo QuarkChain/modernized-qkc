@@ -17,11 +17,19 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 var customGenesisTests = []struct {
@@ -94,6 +102,254 @@ func TestCustomGenesis(t *testing.T) {
 			"--exec", tt.query, "console")
 		geth.ExpectRegexp(tt.result)
 		geth.ExpectExit()
+	}
+}
+
+// TestLoadShardGenesisConfig checks validation at the TOML file boundary,
+// before a node or database is opened.
+func TestLoadShardGenesisConfig(t *testing.T) {
+	input, err := os.ReadFile(filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline := string(input)
+	extra := regexp.MustCompile(`(?m)^ExtraData = .*`).FindString(inline)
+	if extra == "" {
+		t.Fatal("example is missing ExtraData")
+	}
+	for _, test := range []struct {
+		name string
+		from string
+		to   string
+		want string
+	}{
+		{name: "ethash"},
+		{name: "simulate", from: "POW_ETHASH", to: "POW_SIMULATE"},
+		{name: "omitted balance", from: `Balance = "1000000000000000000000000"`},
+		{name: "consensus", from: "POW_ETHASH", to: "NONE", want: "invalid ConsensusType"},
+		{name: "number", from: "Nonce = 0", to: "Nonce = 0\nNumber = 1", want: "number, parent hash and gas used must be zero"},
+		{name: "nonce", from: "Nonce = 0", to: "Nonce = 1", want: "difficulty and nonce must be zero"},
+		{name: "difficulty", from: `Difficulty = "0"`, to: `Difficulty = "1"`, want: "difficulty and nonce must be zero"},
+		{name: "missing difficulty", from: `Difficulty = "0"`, want: "difficulty and nonce must be zero"},
+		{name: "PoW difficulty", from: `MinimumDifficulty = "1"`, to: `MinimumDifficulty = "2"`, want: "below minimum difficulty"},
+		{name: "gas limit", from: "GasLimit = 12000000", to: "GasLimit = 17999", want: "invalid gas limit"},
+		{name: "cross-shard gas", from: "GasLimit = 12000000", to: "GasLimit = 13000000", want: "invalid cross-shard gas limits"},
+		{name: "extra-data", from: extra, to: "ExtraData = [0]", want: "invalid extra-data"},
+		{name: "chain ID", from: `ChainID = "100001"`, to: `ChainID = "100002"`, want: "invalid version or chain ID"},
+		{name: "negative balance", from: `Balance = "1000000000000000000000000"`, to: `Balance = "-1"`, want: "balance must be a nonnegative uint256"},
+		{name: "large balance", from: `Balance = "1000000000000000000000000"`, to: `Balance = "115792089237316195423570985008687907853269984665640564039457584007913129639936"`, want: "balance must be a nonnegative uint256"},
+		{name: "base fee", from: "Nonce = 0", to: "Nonce = 0\nBaseFee = \"-1\"", want: "base fee requires London"},
+		{name: "blob gas", from: "Nonce = 0", to: "Nonce = 0\nBlobGasUsed = 0", want: "blob gas fields require Cancun"},
+		{name: "slot", from: "Nonce = 0", to: "Nonce = 0\nSlotNumber = 0", want: "slot number requires Amsterdam"},
+		{name: "merge", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nTerminalTotalDifficulty = \"0\"", want: "Ethereum Merge transition"},
+		{name: "UBT", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nEnableUBTAtGenesis = true", want: "does not support UBT"},
+		{name: "UBT at genesis", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nShanghaiTime = 0\nUBTTime = 0", want: "does not support UBT"},
+		{name: "future UBT", from: `ChainID = "100001"`, to: "ChainID = \"100001\"\nShanghaiTime = 0\nUBTTime = 1", want: "does not support UBT"},
+		{name: "staking code", from: "Code = [96", to: "Code = [0", want: "unexpected genesis code hash"},
+		{name: "database only", from: inline, to: strings.Split(inline, "[Eth.Genesis]")[0]},
+		{name: "ethereum", from: inline, to: "[Eth.Genesis]\nDifficulty = \"0\"\n[Eth.Genesis.Config]\nChainID = \"1337\"\nTerminalTotalDifficulty = \"0\"\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := inline
+			if test.from != "" {
+				if !strings.Contains(inline, test.from) {
+					t.Fatalf("example is missing %q", test.from)
+				}
+				config = strings.Replace(inline, test.from, test.to, 1)
+			}
+			file := filepath.Join(t.TempDir(), "shard.toml")
+			if err := os.WriteFile(file, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var cfg gethConfig
+			err := loadConfig(file, &cfg)
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), file) {
+				t.Fatalf("loadConfig: got %v, want %q with the config filename", err, test.want)
+			}
+		})
+	}
+}
+
+// TestShardGenesisJSONValidation checks the JSON entry points that bypass TOML validation.
+func TestShardGenesisJSONValidation(t *testing.T) {
+	t.Parallel()
+	example := filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml")
+	var cfg gethConfig
+	if err := loadConfig(example, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Eth.Genesis.ExtraData = []byte{0}
+	input, err := json.Marshal(cfg.Eth.Genesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesisFile := filepath.Join(t.TempDir(), "genesis.json")
+	if err := os.WriteFile(genesisFile, input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"init", "override", "override without config"} {
+		t.Run(entry, func(t *testing.T) {
+			datadir := t.TempDir()
+			args := []string{"--datadir", datadir, "--cache", "16",
+				"--http.port", "0", "--authrpc.port", "0", "--port", "0",
+				"--maxpeers", "0", "--nodiscover", "--discovery.dns", "", "--nat", "none", "--ipcdisable"}
+			if entry != "override without config" {
+				args = append(args, "--config", example)
+			}
+			if entry == "init" {
+				args = append(args, "init", genesisFile)
+			} else {
+				args = append(args, "--override.genesis", genesisFile, "--exec", "eth.chainId()", "console")
+			}
+			geth := runGeth(t, args...)
+			geth.ExpectRegexp("Fatal: .*invalid extra-data.*\n")
+			geth.ExpectExit()
+			if geth.ExitStatus() == 0 {
+				t.Fatal("invalid JSON genesis was accepted")
+			}
+			// Reopen the failed initialization to ensure it did not persist a genesis.
+			nodeConfig := defaultNodeConfig()
+			nodeConfig.DataDir = datadir
+			stack, err := node.New(&nodeConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stack.Close()
+			db, err := stack.OpenDatabaseWithOptions("chaindata", node.DatabaseOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if rawdb.ReadCanonicalHash(db, 0) != (common.Hash{}) || rawdb.ReadHeadBlockHash(db) != (common.Hash{}) {
+				t.Fatal("invalid JSON genesis changed the canonical chain")
+			}
+		})
+	}
+}
+
+func TestShardGenesisUBTOverride(t *testing.T) {
+	t.Parallel()
+	contents, err := os.ReadFile(filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enable Shanghai so fork ordering does not mask the QKC UBT restriction.
+	inline := strings.Replace(string(contents), `ChainID = "100001"`, "ChainID = \"100001\"\nShanghaiTime = 0", 1)
+	withoutGenesis, _, ok := strings.Cut(inline, "[Eth.Genesis]")
+	if !ok {
+		t.Fatal("example is missing the Genesis table")
+	}
+	datadir := t.TempDir()
+	configFile := filepath.Join(t.TempDir(), "shard.toml")
+	for _, tc := range []struct {
+		name     string
+		config   string
+		override string
+	}{
+		{name: "initialize", config: inline},
+		{name: "database only UBT at genesis", config: withoutGenesis, override: "0"},
+		{name: "database only future UBT", config: withoutGenesis, override: "1"},
+		{name: "restart after rejection", config: withoutGenesis},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(configFile, []byte(tc.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--config", configFile, "--datadir", datadir,
+				"--cache", "16", "--http.port", "0", "--authrpc.port", "0",
+				"--port", "0", "--maxpeers", "0", "--nodiscover", "--discovery.dns", "",
+				"--nat", "none", "--ipcdisable"}
+			if tc.override != "" {
+				args = append(args, "--override.ubt", tc.override)
+			}
+			args = append(args, "--exec", "eth.chainId()", "console")
+			geth := runGeth(t, args...)
+			if tc.override != "" {
+				geth.ExpectRegexp("Fatal: .*quarkchain does not support UBT.*\n")
+			} else {
+				geth.Expect("\"0x186a1\"\n")
+			}
+			geth.ExpectExit()
+			if (geth.ExitStatus() != 0) != (tc.override != "") {
+				t.Fatalf("unexpected exit status %d", geth.ExitStatus())
+			}
+		})
+	}
+}
+
+// TestShardGenesis exercises native TOML initialization and database-only restart.
+func TestShardGenesis(t *testing.T) {
+	t.Parallel()
+	example := filepath.Join("..", "..", "qkc", "config", "devnet", "shard-100001.toml")
+	var cfg gethConfig
+	if err := loadConfig(example, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config == nil || cfg.Eth.Genesis.Config.QuarkChain == nil {
+		t.Fatal("example is missing shard genesis configuration")
+	}
+	contents, err := os.ReadFile(example)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline := string(contents)
+	withoutGenesis, _, ok := strings.Cut(inline, "[Eth.Genesis]")
+	if !ok {
+		t.Fatal("example is missing the Genesis table")
+	}
+	datadir := t.TempDir()
+	configFile := filepath.Join(t.TempDir(), "shard.toml")
+	query := fmt.Sprintf(`[eth.chainId(), net.version, eth.blockNumber,
+		eth.getBlock(0).hash, eth.getBlock(0).gasLimit,
+		eth.getCode(%q).length, eth.getCode(%q).length,
+		rpc.modules.engine === undefined,
+		eth.getBalance("0x71562b71999873DB5b286dF957af199Ec94617F7").eq("1000000000000000000000000"),
+		eth.getBalance("0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF").eq("1000000000000000000000000")].join(":")`,
+		params.RootStakingContractAddress.Hex(), params.ShardStakingContractAddress.Hex())
+	// Pin the devnet genesis, including its funded test accounts.
+	want := fmt.Sprintf("0x186a1:2:0:0x60735840571556edc1765b4d0e1b97d269557f0c716dbbf4755298daf24aac22:12000000:%d:%d:true:true:true",
+		2+len(params.PoSWStakingRuntimeCode)*2, 2+len(params.PoSWStakingRuntimeCode)*2)
+	for _, tc := range []struct {
+		name   string
+		config string
+		err    string
+	}{
+		{name: "initialize", config: inline},
+		{name: "restart", config: inline},
+		{name: "different genesis", config: strings.Replace(inline, "Timestamp = 0", "Timestamp = 1", 1), err: "database contains incompatible genesis"},
+		{name: "different rules", config: strings.Replace(inline, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", 1), err: "quarkchain config differs from stored config"},
+		{name: "different consensus", config: strings.Replace(inline, "POW_ETHASH", "POW_SIMULATE", 1), err: "quarkchain config differs from stored config"},
+		{name: "invalid consensus", config: strings.Replace(inline, "POW_ETHASH", "NONE", 1), err: "invalid ConsensusType"},
+		{name: "database only", config: withoutGenesis},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(configFile, []byte(tc.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			geth := runGeth(t, "--config", configFile, "--datadir", datadir,
+				"--cache", "16", "--http.port", "0", "--authrpc.port", "0",
+				"--port", "0", "--maxpeers", "0", "--nodiscover", "--discovery.dns", "",
+				"--nat", "none", "--ipcdisable", "--exec", query, "console")
+			if tc.err != "" {
+				geth.ExpectRegexp("Fatal: .*" + regexp.QuoteMeta(tc.err) + ".*\n")
+			} else {
+				geth.Expect(fmt.Sprintf("%q\n", want))
+			}
+			geth.ExpectExit()
+			if (geth.ExitStatus() != 0) != (tc.err != "") {
+				t.Fatalf("exit status %d, expected failure: %t", geth.ExitStatus(), tc.err != "")
+			}
+			if tc.err == "" {
+				logs := geth.StderrText()
+				if strings.Contains(logs, "Starting Geth on Ethereum mainnet") {
+					t.Fatalf("unexpected shard startup logs:\n%s", logs)
+				}
+			}
+		})
 	}
 }
 

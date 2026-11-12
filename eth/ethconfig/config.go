@@ -26,10 +26,13 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
@@ -231,9 +234,25 @@ type Config struct {
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.
-// Clique is allowed for now to live standalone, but ethash is forbidden and can
-// only exist on already merged networks.
-func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database) (consensus.Engine, error) {
+// QuarkChain selects Ethash or simulated PoSW; Ethereum networks must have transitioned to proof of stake.
+func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, genesis *core.Genesis) (consensus.Engine, error) {
+	if config.QuarkChain != nil {
+		// PoSW needs the genesis gas limit before the blockchain is constructed.
+		// Prefer the stored header on restart, including when no genesis is supplied.
+		var header *types.Header
+		if hash := rawdb.ReadCanonicalHash(db, 0); hash != (common.Hash{}) {
+			header = rawdb.ReadHeader(db, hash, 0)
+		} else if genesis != nil {
+			if err := genesis.ValidateQuarkChain(); err != nil {
+				return nil, err
+			}
+			header = genesis.ToBlock().Header()
+		}
+		if config.QuarkChain.ConsensusType == params.ConsensusSimulate {
+			return posw.NewSimulate(config, header)
+		}
+		return posw.New(config, header)
+	}
 	if config.TerminalTotalDifficulty == nil {
 		log.Error("Geth only supports PoS networks. Please transition legacy networks using Geth v1.13.x.")
 		return nil, errors.New("'terminalTotalDifficulty' is not set in genesis block")
