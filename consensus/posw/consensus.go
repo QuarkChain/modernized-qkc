@@ -73,10 +73,7 @@ func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	return &PoSW{EthashVerifier: NewEthashVerifier(), config: config, gasLimit: genesis.GasLimit}, nil
 }
 
-// NewSimulate keeps shard consensus rules while skipping Ethash verification.
-// TODO: In the New/Init PR, add ConsensusType to params.QuarkChainConfig and have
-// ShardBackend.New instantiate the selected engine, defaulting to PoSW. Nodes on
-// the same chain must agree because this choice changes which seals are valid.
+// NewSimulate creates a simulation engine with the same configuration checks as New.
 func NewSimulate(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	engine, err := New(config, genesis)
 	if err != nil {
