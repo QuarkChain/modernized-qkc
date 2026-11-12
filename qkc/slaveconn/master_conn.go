@@ -49,7 +49,7 @@ type MasterRequestHandler interface {
 
 // SlaveDialer establishes outbound connections to advertised slaves.
 type SlaveDialer interface {
-	DialToSlave(ctx context.Context, info wire.SlaveInfo) error
+	DialToSlave(ctx context.Context, info comm.SlaveInfo) error
 }
 
 // MasterConnConfig configures the slave's connection to its master.
@@ -150,7 +150,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 func (mc *MasterConn) watchConnection() {
 	<-mc.WaitUntilClosed()
 	mc.shutdownOnce.Do(func() {
-		mc.Logger().Error("master connection closed; shutting down slave")
+		mc.Logger().Info("master connection closed; shutting down slave")
 		mc.shutdownSlave()
 	})
 }
@@ -231,7 +231,8 @@ func (mc *MasterConn) handleConnectToSlaves(req wire.SSZMessage) (wire.SSZMessag
 		wg.Add(1)
 		go func(i int, info wire.SlaveInfo) {
 			defer wg.Done()
-			if err := mc.slaveDialer.DialToSlave(context.Background(), info); err != nil {
+			dialInfo := comm.SlaveInfo{Host: string(info.Host), Port: info.Port, ChainID: wire.ChainIDFromSSZ(info.ChainID)}
+			if err := mc.slaveDialer.DialToSlave(context.Background(), dialInfo); err != nil {
 				result.ResultList[i] = []byte(err.Error())
 			}
 		}(i, info)
