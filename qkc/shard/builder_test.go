@@ -62,7 +62,11 @@ func newMiningEnv(t *testing.T, chainID int64) (*testEnv, *txpool.TxPool, *miner
 	alloc[crypto.PubkeyToAddress(key.PublicKey)] = types.Account{Balance: big.NewInt(params.Ether)}
 	genesis := &core.Genesis{
 		Config: &config, GasLimit: 54000, Alloc: alloc,
-		ExtraData: (&types.QKCExtra{ChainID: big.NewInt(chainID), Cursor: pos(1, 0, 0)}).Encode(),
+		Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+		ExtraData: (&types.QKCExtra{
+			ChainID: big.NewInt(chainID), Cursor: pos(1, 0, 0),
+			XShardGasLimit: 54000 / params.XShardGasLimitDivisor,
+		}).Encode(),
 	}
 	// Build with the PoSW engine, which prepares the difficulty, without
 	// verifying the test seals.

@@ -29,6 +29,8 @@ func NewTestQuarkChainConfig(chainID int64, chainIDs ...int64) *ChainConfig {
 		}
 	}
 	config := *MergedTestChainConfig
+	config.TerminalTotalDifficulty = nil
+	config.MergeNetsplitBlock = nil
 	config.ChainID = big.NewInt(chainID)
 	config.QuarkChain = &QuarkChainConfig{
 		RewardTaxRate:         big.NewRat(1, 2),

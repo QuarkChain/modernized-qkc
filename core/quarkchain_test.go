@@ -55,10 +55,8 @@ func TestXShardOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gspec := &Genesis{
-		Config: &config,
-		Alloc:  withSystemContracts(types.GenesisAlloc{sender: {Balance: funds}}),
-	}
+	gspec := quarkChainGenesis(&config, params.GenesisGasLimit)
+	gspec.Alloc = withSystemContracts(types.GenesisAlloc{sender: {Balance: funds}})
 	maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(&config))
 	signer := types.LatestSigner(gspec.Config)
 

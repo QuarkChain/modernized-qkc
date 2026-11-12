@@ -2429,17 +2429,17 @@ func MakeGenesis(ctx *cli.Context) *core.Genesis {
 	return genesis
 }
 
-// MakeChain creates a chain manager from set command line flags.
-func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockChain, ethdb.Database) {
-	var (
-		gspec   = MakeGenesis(ctx)
-		chainDb = MakeChainDatabase(ctx, stack, readonly)
-	)
+// MakeChain creates a chain manager from the effective genesis and command line flags.
+func MakeChain(ctx *cli.Context, stack *node.Node, gspec *core.Genesis, readonly bool) (*core.BlockChain, ethdb.Database) {
+	if ctx.Bool(DeveloperFlag.Name) {
+		Fatalf("Developer chains are ephemeral")
+	}
+	chainDb := MakeChainDatabase(ctx, stack, readonly)
 	config, _, err := core.LoadChainConfig(chainDb, gspec)
 	if err != nil {
 		Fatalf("%v", err)
 	}
-	engine, err := ethconfig.CreateConsensusEngine(config, chainDb)
+	engine, err := ethconfig.CreateConsensusEngine(config, chainDb, gspec)
 	if err != nil {
 		Fatalf("%v", err)
 	}

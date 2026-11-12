@@ -120,10 +120,8 @@ func TestDepositAfterTransaction(t *testing.T) {
 		sender = crypto.PubkeyToAddress(key.PublicKey)
 		to     = common.HexToAddress("0xe0a")
 	)
-	gspec := &Genesis{
-		Config: &config,
-		Alloc:  withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}}),
-	}
+	gspec := quarkChainGenesis(&config, params.GenesisGasLimit)
+	gspec.Alloc = withSystemContracts(types.GenesisAlloc{sender: {Balance: big.NewInt(params.Ether)}})
 	maps.Copy(gspec.Alloc, PoSWStakingContractAllocs(&config))
 	signer := types.LatestSigner(gspec.Config)
 	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *BlockGen) {

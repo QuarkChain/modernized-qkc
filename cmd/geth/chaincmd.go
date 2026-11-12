@@ -386,7 +386,7 @@ func importChain(ctx *cli.Context) error {
 	// Start metrics export if enabled
 	utils.SetupMetrics(&cfg.Metrics)
 
-	chain, db := utils.MakeChain(ctx, stack, false)
+	chain, db := utils.MakeChain(ctx, stack, cfg.Eth.Genesis, false)
 	defer db.Close()
 
 	// Start periodically gathering memory profiles
@@ -461,10 +461,10 @@ func exportChain(ctx *cli.Context) error {
 		utils.Fatalf("This command requires an argument.")
 	}
 
-	stack, _ := makeConfigNode(ctx)
+	stack, cfg := makeConfigNode(ctx)
 	defer stack.Close()
 
-	chain, db := utils.MakeChain(ctx, stack, true)
+	chain, db := utils.MakeChain(ctx, stack, cfg.Eth.Genesis, true)
 	defer db.Close()
 	start := time.Now()
 
@@ -499,10 +499,10 @@ func importHistory(ctx *cli.Context) error {
 		utils.Fatalf("usage: %s", ctx.Command.ArgsUsage)
 	}
 
-	stack, _ := makeConfigNode(ctx)
+	stack, cfg := makeConfigNode(ctx)
 	defer stack.Close()
 
-	chain, db := utils.MakeChain(ctx, stack, false)
+	chain, db := utils.MakeChain(ctx, stack, cfg.Eth.Genesis, false)
 	defer db.Close()
 
 	var (
@@ -569,10 +569,10 @@ func exportHistory(ctx *cli.Context) error {
 		utils.Fatalf("usage: %s", ctx.Command.ArgsUsage)
 	}
 
-	stack, _ := makeConfigNode(ctx)
+	stack, cfg := makeConfigNode(ctx)
 	defer stack.Close()
 
-	chain, _ := utils.MakeChain(ctx, stack, true)
+	chain, _ := utils.MakeChain(ctx, stack, cfg.Eth.Genesis, true)
 	start := time.Now()
 
 	var (
@@ -739,11 +739,11 @@ func pruneHistory(ctx *cli.Context) error {
 		return errors.New("--history.chain=all is not valid for pruning. To restore history, use 'geth import-history'")
 	}
 
-	stack, _ := makeConfigNode(ctx)
+	stack, cfg := makeConfigNode(ctx)
 	defer stack.Close()
 
 	// Open the chain database.
-	chain, chaindb := utils.MakeChain(ctx, stack, false)
+	chain, chaindb := utils.MakeChain(ctx, stack, cfg.Eth.Genesis, false)
 	defer chaindb.Close()
 	defer chain.Stop()
 

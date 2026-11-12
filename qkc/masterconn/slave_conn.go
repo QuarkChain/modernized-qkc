@@ -109,6 +109,7 @@ func (sc *SlaveConn) RemoteChainID() *big.Int {
 // The first PING checks identity without a root tip. After all slaves connect
 // to each other, a second PING carries the root tip to initialize their shards.
 // A nil rootTip sends an identity-only PING.
+// The caller is responsible for setting an appropriate context deadline.
 // The owner must close the connection on any error and complete identity
 // verification before starting business activity.
 func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) error {
@@ -139,6 +140,7 @@ func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) 
 // pyquarkchain, success requires one empty result per requested slave. The owner
 // must call this on one slave at a time and await its response before sending
 // to the next slave; failure aborts cluster initialization without a retry.
+// The caller is responsible for setting an appropriate context deadline.
 func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []comm.SlaveInfo) error {
 	req := &wire.ConnectToSlavesRequest{SlaveInfoList: make([]wire.SlaveInfo, len(slaves))}
 	for i, slave := range slaves {

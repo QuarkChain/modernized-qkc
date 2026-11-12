@@ -484,7 +484,9 @@ func (c *ChainConfig) Description() string {
 
 	// Create some basic network config output
 	network := NetworkNames[c.ChainID.String()]
-	if network == "" {
+	if c.QuarkChain != nil {
+		network = "QuarkChain shard"
+	} else if network == "" {
 		network = "unknown"
 	}
 	banner += fmt.Sprintf("Chain ID:  %v (%s)\n", c.ChainID, network)
@@ -493,6 +495,8 @@ func (c *ChainConfig) Description() string {
 		banner += "Consensus: Beacon (proof-of-stake), merged from Ethash (proof-of-work)\n"
 	case c.Clique != nil:
 		banner += "Consensus: Beacon (proof-of-stake), merged from Clique (proof-of-authority)\n"
+	case c.QuarkChain != nil:
+		banner += fmt.Sprintf("Consensus: QuarkChain (%s)\n", c.QuarkChain.ConsensusType)
 	default:
 		banner += "Consensus: unknown\n"
 	}
