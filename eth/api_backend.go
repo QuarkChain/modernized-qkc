@@ -65,7 +65,7 @@ func (b *EthAPIBackend) CurrentBlock() *types.Header {
 }
 
 func (b *EthAPIBackend) SetHead(number uint64) error {
-	if b.eth.blockchain.Config().QuarkChain != nil {
+	if b.eth.isQKC() {
 		// Head changes must go through ShardChain to preserve root confirmations.
 		return errors.New("debug_setHead is not supported for QKC shards")
 	}

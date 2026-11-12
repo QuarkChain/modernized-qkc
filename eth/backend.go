@@ -192,8 +192,8 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-	// QKC currently uses full sync only. Check the loaded chain config
-	// so this also applies to restarts without a genesis file.
+	// QKC does not use geth sync: the handler and downloader are never started.
+	// Pin FullSync only to skip snap-specific setup checks (the default is SnapSync).
 	if chainConfig.QuarkChain != nil {
 		config.SyncMode = ethconfig.FullSync
 	}
@@ -338,7 +338,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// QuarkChain currently does not support blob transactions. Keep the native
 	// blob pool for non-QKC configs, including the existing Engine API tests.
 	pools := []txpool.SubPool{legacyPool}
-	if chainConfig.QuarkChain == nil {
+	if !eth.isQKC() {
 		if config.BlobPool.Datadir != "" {
 			config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
 		}
@@ -390,7 +390,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	eth.miner.SetPrioAddresses(config.TxPool.Locals)
 	// Only QKC chains use root/shard coordination. Non-QKC configurations remain
 	// usable by the original geth tests without attaching shard-only validation.
-	if chainConfig.QuarkChain != nil {
+	if eth.isQKC() {
 		// TODO(SlaveService): Replace the mock with a real ClusterClient implementation.
 		client := &shard.MockClusterClient{}
 		eth.clusterClient = client
@@ -400,7 +400,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			return nil, err
 		}
 		client.Shard = eth.shard
-		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: config.Miner.PendingFeeRecipient})
+		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
 	}
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
@@ -472,8 +472,9 @@ func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
 
 func (s *Ethereum) Miner() *miner.Miner { return s.miner }
 
-// Shard and PoWMiner are borrowed by the cluster and mining API services.
-// Those services must stop and drain their requests before Ethereum.Stop.
+// Shard and PoWMiner are owned by Ethereum and called by the cluster service
+// and MinerAPI. Ethereum.Stop must reject new calls and wait for in-flight
+// ones before closing the chain and database.
 func (s *Ethereum) Shard() *shard.Shard       { return s.shard }
 func (s *Ethereum) PoWMiner() *shard.PoWMiner { return s.powMiner }
 
@@ -492,10 +493,12 @@ func (s *Ethereum) SetSynced()                         { s.handler.enableSyncedF
 func (s *Ethereum) ArchiveMode() bool                  { return s.config.NoPruning }
 func (s *Ethereum) EngineMaxReorgDepth() uint64        { return s.config.EngineMaxReorgDepth }
 
+func (s *Ethereum) isQKC() bool { return s.blockchain.Config().QuarkChain != nil }
+
 // Protocols returns all the currently configured
 // network protocols to start.
 func (s *Ethereum) Protocols() []p2p.Protocol {
-	if s.shard != nil {
+	if s.isQKC() {
 		// TODO(M2): Enable QKC protocols after sync imports go through Shard/ShardChain.
 		return nil
 	}
@@ -512,7 +515,7 @@ func (s *Ethereum) Start() error {
 	// QKC skips geth discovery, handler and dropper startup; non-QKC configs
 	// keep the original networking behavior for the existing geth tests.
 	// TODO(M2): Integrate QKC sync here and update Protocols() and Stop() together.
-	if s.shard == nil {
+	if !s.isQKC() {
 		if err := s.setupDiscovery(); err != nil {
 			return err
 		}
@@ -520,7 +523,7 @@ func (s *Ethereum) Start() error {
 	// Regularly update shutdown marker
 	s.shutdownTracker.Start()
 
-	if s.shard == nil {
+	if !s.isQKC() {
 		// Start the networking layer.
 		s.handler.Start(s.p2pServer.MaxPeers)
 		// Start the connection manager with inclusion-based peer protection.
@@ -653,7 +656,7 @@ func (s *Ethereum) Stop() error {
 	// request handlers and mining, then close cluster connections before the
 	// chain resources and database below.
 	s.discmix.Close()
-	if s.shard == nil {
+	if !s.isQKC() {
 		s.dropper.Stop()
 		s.handler.txTracker.Stop()
 		s.handler.Stop()
