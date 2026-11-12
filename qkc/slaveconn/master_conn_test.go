@@ -20,7 +20,6 @@ package slaveconn
 import (
 	"context"
 	"errors"
-	"io"
 	"math/big"
 	"net"
 	"testing"
@@ -72,17 +71,12 @@ func masterTestPair(t *testing.T, h *masterTestHandler, headerCode uint32, chain
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote := conn.NewBaseConn(conn.Config{Transport: conn.NewTCPTransport(b, func(r io.Reader) (*wire.ClusterFrame, error) {
-		return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
-	}, wire.WriteClusterFrameWithPeerID),
-		Serializers: map[byte]*conn.OpSerializer{
-			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
-			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
-			byte(wire.ClusterOpGetRootChainStakesRequest):    conn.OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
-			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): conn.OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
-			byte(wire.ClusterOpAddShardBlockHeaderRequest):   conn.OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
-		}, Handlers: map[byte]conn.TypedHandler{byte(wire.ClusterOpAddShardBlockHeaderRequest): func(wire.SSZMessage) (wire.SSZMessage, error) {
+	transport, err := conn.NewMasterSlaveTransport(b, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := conn.NewBaseConn(conn.Config{Transport: transport,
+		Serializers: conn.ClusterSerializers(), Handlers: map[byte]conn.TypedHandler{byte(wire.ClusterOpAddShardBlockHeaderRequest): func(wire.SSZMessage) (wire.SSZMessage, error) {
 			return &wire.AddShardBlockHeaderResponse{ErrorCode: headerCode}, nil
 		}}})
 	mc.Start()
