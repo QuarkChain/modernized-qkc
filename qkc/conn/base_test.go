@@ -333,32 +333,25 @@ func serializerMissingCallback(missing string) *OpSerializer {
 // Keep the canonical serializer pairs consistent with the wire payload registry.
 // The registry itself does not carry request/response pairing information.
 func TestOpSerializerFor_WireRegistry(t *testing.T) {
-	serializers := map[wire.ClusterOp]*OpSerializer{
-		wire.ClusterOpPing:                         pingSer,
-		wire.ClusterOpConnectToSlavesRequest:       OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
-		wire.ClusterOpAddRootBlockRequest:          OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
-		wire.ClusterOpAddShardBlockHeaderRequest:   OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
-		wire.ClusterOpAddXshardTxListRequest:       OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
-		wire.ClusterOpGetRootChainStakesRequest:    OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
-		wire.ClusterOpGetUnconfirmedHeadersRequest: OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
-	}
 	covered := make(map[wire.ClusterOp]bool)
-	for requestOp, ser := range serializers {
-		for _, tc := range []struct {
-			op      wire.ClusterOp
-			message any
-		}{
-			{requestOp, ser.NewRequest()},
-			{wire.ClusterOp(ser.ResponseOpCode), ser.NewResponse()},
-		} {
-			registered, err := wire.NewClusterMessage(tc.op)
-			if err != nil {
-				t.Fatal(err)
+	for _, serializers := range []map[byte]*OpSerializer{MasterSlaveSerializers(), XshardSerializers()} {
+		for requestOp, ser := range serializers {
+			for _, tc := range []struct {
+				op      wire.ClusterOp
+				message any
+			}{
+				{wire.ClusterOp(requestOp), ser.NewRequest()},
+				{wire.ClusterOp(ser.ResponseOpCode), ser.NewResponse()},
+			} {
+				registered, err := wire.NewClusterMessage(tc.op)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reflect.TypeOf(tc.message) != reflect.TypeOf(registered) {
+					t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", tc.op, tc.message, registered)
+				}
+				covered[tc.op] = true
 			}
-			if reflect.TypeOf(tc.message) != reflect.TypeOf(registered) {
-				t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", tc.op, tc.message, registered)
-			}
-			covered[tc.op] = true
 		}
 	}
 	for op := int(wire.ClusterOpBase); op <= math.MaxUint8; op++ {

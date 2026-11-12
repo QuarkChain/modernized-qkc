@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"sync"
@@ -76,22 +75,14 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localChainID, remoteChain
 	if outbound {
 		remoteChainID = new(big.Int).Set(remoteChainID)
 	}
-	if maxPayloadSize == 0 {
-		maxPayloadSize = wire.MaxFramePayloadLen
+	transport, err := conn.NewXshardTransport(nc, maxPayloadSize)
+	if err != nil {
+		return nil, err
 	}
 	xc := &XshardConn{handler: handler, localChainID: new(big.Int).Set(localChainID), remoteChainID: remoteChainID, outbound: outbound, pingReceived: make(chan struct{})}
 	xc.BaseConn = conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(
-			nc,
-			func(r io.Reader) (*wire.ClusterFrame, error) {
-				return wire.ReadClusterFrame(r, maxPayloadSize)
-			},
-			wire.WriteClusterFrame,
-		),
-		Serializers: map[byte]*conn.OpSerializer{
-			byte(wire.ClusterOpPing):                   conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			byte(wire.ClusterOpAddXshardTxListRequest): conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
-		},
+		Transport:   transport,
+		Serializers: conn.XshardSerializers(),
 		// Connections are established only between trusted cluster slaves. We do
 		// not gate business handlers on handshake completion because unvalidated
 		// peers cannot reach this listener in the current deployment.
