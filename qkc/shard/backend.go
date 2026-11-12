@@ -21,19 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/eth/ethconfig"
-	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/miner"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -42,71 +37,23 @@ import (
 
 var _ MinerBackend = (*Shard)(nil)
 
-// Shard runs one shard, like eth.Ethereum, pyquarkchain's cluster.shard.Shard,
-// and goquarkchain's ShardBackend. It sets up the shard's components, imports
-// blocks, sends cross-shard lists, and reports block headers to master.
+// Shard imports blocks, sends cross-shard lists and reports headers to master.
 // ShardChain handles chain rules, root confirmations, and head selection.
 //
-// New creates the blockchain and consensus engine. Init restores the root tip
-// and shard head from master's root checkpoint. Stop releases owned resources.
-// For now, the caller provides and closes the DB. The caller also manages the
-// cluster client and stops incoming requests before Stop. The slave layer
-// manages shared connections, RPC listeners, and the set of shards.
-//
-// TODO: Complete New/Init to create and manage the shard DB,
-// txpool, builder, PoWMiner, and sync worker. Start mining only after Init and
-// sync are ready. Stop running tasks and chain components before closing the DB.
+// Ethereum owns the chain and cluster client. It must stop incoming requests
+// and wait for in-flight calls before closing those shared resources.
 type Shard struct {
 	chain         *ShardChain
-	engine        consensus.Engine // Owned engine; nil when the chain is borrowed.
 	clusterClient ClusterClient
-	stopOnce      sync.Once
-	stopErr       error
 }
 
 // minedBlockDeliveryTimeout bounds RPC delivery for mining submissions.
 const minedBlockDeliveryTimeout = 30 * time.Second
 
-// New constructs a shard without selecting a root tip. chainConfig is
-// authoritative; it is attached to a copy of genesis without changing the caller's
-// genesis. The same borrowed database stores chain data, roots and received deposits.
-// TODO: In the later New/Init work, accept a user-level shard.Config instead of
-// genesis, db and cache. Open the DB, load genesis and derive core.BlockChainConfig
-// here as eth.New does: DB state scheme, genesis-based history policy and
-// datadir-relative journal paths.
-func New(chainConfig *params.ChainConfig, genesis *core.Genesis, db ethdb.Database, cache *core.BlockChainConfig, client ClusterClient) (*Shard, error) {
-	if chainConfig == nil || chainConfig.QuarkChain == nil {
-		return nil, errNotQuarkChain
-	}
-	if genesis == nil {
-		return nil, errors.New("missing shard genesis")
-	}
-	if db == nil {
-		return nil, errors.New("missing shard database")
-	}
-	if client == nil {
-		return nil, errors.New("missing cluster client")
-	}
-	genesisCopy := *genesis
-	genesisCopy.Config = chainConfig
-	engine, err := ethconfig.CreateConsensusEngine(chainConfig, db, &genesisCopy)
-	if err != nil {
-		return nil, err
-	}
-	chain, err := core.NewBlockChain(db, &genesisCopy, engine, cache)
-	if err != nil {
-		engine.Close()
-		return nil, err
-	}
-	// TODO: Initialize the builder and transaction pool in the unified New/Init flow.
-	return &Shard{chain: NewShardChain(db, chain, nil), engine: engine, clusterClient: client}, nil
-}
-
-// NewWithChain wraps an existing shard chain and its bound builder. The caller
-// owns the blockchain, engine and database and must stop mining and requests
-// before closing them. Stop does not close these borrowed resources.
-func NewWithChain(chain *ShardChain, client ClusterClient) (*Shard, error) {
-	if chain == nil {
+// New binds the existing chain and client without taking ownership of them.
+// Init separately selects the root checkpoint supplied by master.
+func New(chain *ShardChain, client ClusterClient) (*Shard, error) {
+	if chain == nil || chain.chain == nil {
 		return nil, errors.New("missing shard chain")
 	}
 	if chain.chain.Config().QuarkChain == nil {
@@ -127,17 +74,6 @@ func (s *Shard) Init(root *qkctypes.RootBlock) error {
 	// TODO: Implement the one-block rewind in RootChain restart recovery and
 	// have master pass the recovered checkpoint here. This is RootChain's work.
 	return s.chain.Init(root)
-}
-
-// Stop releases owned resources once. The caller retains the database and client.
-func (s *Shard) Stop() error {
-	s.stopOnce.Do(func() {
-		if s.engine != nil {
-			s.chain.chain.Stop()
-			s.stopErr = s.engine.Close()
-		}
-	})
-	return s.stopErr
 }
 
 // CreateBlockToMine builds an unsealed candidate on the shard head, paying

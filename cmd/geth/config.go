@@ -264,11 +264,16 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		utils.Fatalf("failed to setup OpenTelemetry: %v", err)
 	}
 
+	// M1 supplies its temporary cluster client before Ethereum assembles the shard.
+	var m1 *m1Service
+	if ctx.Bool(m1Flag.Name) {
+		m1 = newM1Service(stack, &cfg.Eth)
+	}
 	// Add Ethereum service.
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
 	// Temporary M1 service, enabled explicitly for local mining tests.
-	if ctx.Bool(m1Flag.Name) {
-		if err := registerM1(stack, eth); err != nil {
+	if m1 != nil {
+		if err := m1.register(eth); err != nil {
 			utils.Fatalf("Failed to register milestone 1: %v", err)
 		}
 	}
@@ -299,8 +304,10 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		utils.RegisterEthStatsService(stack, backend, cfg.Ethstats.URL)
 	}
 
-	if backend.ChainConfig().QuarkChain != nil {
-		// Shards do not use Ethereum sync overrides or the Beacon Engine API.
+	// QKC uses PoSW; skip native sync overrides, Engine API and beacon clients.
+	// TODO(M2): When enabling QKC P2P and sync, move this check below
+	// utils.RegisterSyncOverrideService. Keep Engine API and beacon clients disabled.
+	if eth.BlockChain().Config().QuarkChain != nil {
 		return stack
 	}
 

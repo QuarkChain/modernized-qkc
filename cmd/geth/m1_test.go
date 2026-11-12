@@ -60,15 +60,14 @@ func m1TestNode(t *testing.T, id int) (*eth.Ethereum, *m1Service, *node.Node) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { stack.Close() })
+	service := newM1Service(stack, &cfg.Eth)
 	backend, err := eth.New(stack, &cfg.Eth)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := newM1Service(stack, backend)
-	if err != nil {
+	if err := service.register(backend); err != nil {
 		t.Fatal(err)
 	}
-	stack.RegisterLifecycle(service)
 	if err := stack.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -124,9 +123,8 @@ func TestM1Mining(t *testing.T) {
 			if !ok {
 				t.Fatalf("unexpected engine %T", mining.Engine())
 			}
-			// Stopping the borrowed wrapper must leave geth's resources usable.
-			if err := service.backend.Stop(); err != nil {
-				t.Fatal(err)
+			if service.backend != mining.Shard() || service.miner != mining.PoWMiner() {
+				t.Fatal("M1 must reuse Ethereum's shard and miner")
 			}
 			if mining.BlockChain().CurrentBlock().Number.Sign() != 0 || service.backend.RootTip() != (common.Hash{}) {
 				t.Fatal("mining started before root initialization")

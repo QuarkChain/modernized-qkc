@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
@@ -65,17 +66,6 @@ func configureM1(ctx *cli.Context, cfg *gethConfig) error {
 	return nil
 }
 
-func registerM1(stack *node.Node, backend *eth.Ethereum) error {
-	service, err := newM1Service(stack, backend)
-	if err != nil {
-		return err
-	}
-	// Ethereum was registered first, so mining stops before its chain is closed.
-	stack.RegisterLifecycle(service)
-	log.Warn("Milestone 1 enabled: cross-shard delivery is mocked")
-	return nil
-}
-
 type m1Service struct {
 	mu       sync.Mutex
 	stack    *node.Node
@@ -87,26 +77,31 @@ type m1Service struct {
 	running  bool
 }
 
-func newM1Service(stack *node.Node, backend *eth.Ethereum) (*m1Service, error) {
+// Supply the demo's communication and search dependencies before eth.New.
+// Ethereum constructs and owns the single Shard/PoWMiner pair.
+func newM1Service(stack *node.Node, cfg *ethconfig.Config) *m1Service {
+	service := &m1Service{stack: stack}
+	cfg.QKCClusterClient = service
+	// The one-second mean search delay is a demo setting.
+	cfg.QKCMiningSearch = shard.NewSimulatedSearch(time.Second)
+	return service
+}
+
+func (s *m1Service) register(backend *eth.Ethereum) error {
 	config := backend.BlockChain().Config()
 	if config.QuarkChain == nil {
-		return nil, errors.New("--m1 requires a QuarkChain shard")
+		return errors.New("--m1 requires a QuarkChain shard")
 	}
-	chain := shard.NewShardChain(backend.ChainDb(), backend.BlockChain(), backend.Miner())
-	service := &m1Service{stack: stack, chainID: config.ChainID}
-	s, err := shard.NewWithChain(chain, service)
-	if err != nil {
-		return nil, err
-	}
-	service.backend = s
+	s.backend = backend.Shard()
+	s.chainID = config.ChainID
 	if config.QuarkChain.ConsensusType == params.ConsensusSimulate {
-		// The one-second mean search delay is a demo setting.
-		service.miner = shard.NewPoWMiner(s, shard.PoWMinerConfig{
-			Coinbase: stack.Config().CoinbaseAddress,
-			Search:   shard.NewSimulatedSearch(time.Second),
-		})
+		s.miner = backend.PoWMiner()
 	}
-	return service, nil
+	// Reverse lifecycle order closes M1's connections before Ethereum stops
+	// its miner and shared chain resources.
+	s.stack.RegisterLifecycle(s)
+	log.Warn("Milestone 1 enabled: cross-shard delivery is mocked")
+	return nil
 }
 
 func (s *m1Service) Start() error {
@@ -163,9 +158,6 @@ func (s *m1Service) Stop() error {
 		s.master.Close()
 	}
 	s.mu.Unlock()
-	if s.miner != nil {
-		s.miner.StopLocalMining()
-	}
 	return nil
 }
 

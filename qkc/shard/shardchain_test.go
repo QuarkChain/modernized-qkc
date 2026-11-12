@@ -932,7 +932,8 @@ func TestShouldUpdateHeadConfirmedBarrier(t *testing.T) {
 
 // TestInsertRootBlockConfirms checks that root blocks extending the root tip
 // become the root tip, record the latest shard block they confirm, and keep
-// the head, and that known root blocks are ignored. Fork a is a in the code.
+// the head. Re-inserting the current root tip does not switch it. Fork a is a
+// in the code.
 //
 //	root chain    r0 <----- r1 <------ r2 <-- r3*
 //	                        :          :
@@ -952,7 +953,7 @@ func TestInsertRootBlockConfirms(t *testing.T) {
 	env.checkLastConfirmed(r1, a[0])
 	env.checkHead(a[0])
 
-	// Known root blocks are ignored.
+	// Equal total difficulty keeps the current root tip.
 	env.insertRoot(r1, false)
 	env.checkRootTip(r1)
 
@@ -1224,6 +1225,21 @@ func TestInsertRootBlockConfirmsFork(t *testing.T) {
 	env.insertRoot(r2, false)
 	env.checkRootTip(r2)
 	env.checkHead(b[0])
+
+	// Master may restart from r1 and rebroadcast r2 even to shards that already
+	// stored it. Init restores r1's confirmation; replay must select r2 again.
+	env.chain.Stop()
+	env.reopenChain()
+	env.sc = NewShardChain(env.db, env.chain, nil)
+	if err := env.sc.Init(r1); err != nil {
+		t.Fatal(err)
+	}
+	env.checkRootTip(r1)
+	env.checkHead(a[0])
+	env.insertRoot(r2, true)
+	env.checkRootTip(r2)
+	env.checkLastConfirmed(r2, b[0])
+	env.checkHead(b[0])
 }
 
 // Missing local blocks for recorded confirmations are shard inconsistencies,
@@ -1249,8 +1265,11 @@ func TestInsertShardBlockForkChoiceError(t *testing.T) {
 	if env.chain.HasBlock(fork.Hash(), fork.NumberU64()) {
 		t.Fatal("block inserted despite fork-choice inconsistency")
 	}
-	// Known roots are ignored without rereading their stored confirmation.
+	// A known root that cannot switch the tip skips validation and DB writes.
 	env.insertRoot(root, false)
+	if hash := qkcrawdb.ReadLastConfirmedBlockHash(env.db, root.Hash()); hash != (common.Hash{0xff}) {
+		t.Fatalf("known root confirmation rewritten: %x", hash)
+	}
 	env.checkRootTip(root)
 	env.checkHead(blocks[1])
 }

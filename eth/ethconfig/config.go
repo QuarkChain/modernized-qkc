@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
 )
@@ -92,6 +93,13 @@ type Config struct {
 	// The genesis block, which is inserted if the database is empty.
 	// If nil, the Ethereum main net block is used.
 	Genesis *core.Genesis `toml:",omitempty"`
+
+	// Runtime-only QKC dependencies, supplied before New assembles the shard.
+	// A supplied client's service must stop requests and close connections before
+	// Ethereum.Stop closes shared resources. Nil selects the default mock client.
+	QKCClusterClient shard.ClusterClient `toml:"-"`
+	// Nil leaves local mining disabled. Mining must be started after Shard.Init.
+	QKCMiningSearch shard.NonceSearch `toml:"-"`
 
 	// Network ID separates blockchains on the peer-to-peer networking level. When left
 	// zero, the chain ID is used as network ID.

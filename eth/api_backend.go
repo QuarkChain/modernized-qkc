@@ -65,6 +65,10 @@ func (b *EthAPIBackend) CurrentBlock() *types.Header {
 }
 
 func (b *EthAPIBackend) SetHead(number uint64) error {
+	if b.eth.isQKC() {
+		// Head changes must go through ShardChain to preserve root confirmations.
+		return errors.New("debug_setHead is not supported for QKC shards")
+	}
 	// Reject rewinding to a point before the snap-sync pivot. The earliest
 	// recoverable state is the pivot block, so a target below it would simply
 	// reset the chain to genesis, which is almost never the intent behind a
@@ -100,6 +104,8 @@ func (b *EthAPIBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumb
 	if number == rpc.LatestBlockNumber {
 		return b.eth.blockchain.CurrentBlock(), nil
 	}
+	// TODO(QKC): Define safe/finalized semantics for shard chains in a follow-up,
+	// then update both HeaderByNumber and BlockByNumber to use those definitions.
 	if number == rpc.FinalizedBlockNumber {
 		block := b.eth.blockchain.CurrentFinalBlock()
 		if block == nil {

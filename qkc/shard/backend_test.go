@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -55,9 +56,10 @@ func (c *backendClusterClient) SendShardBlockHeaderToMaster(ctx context.Context,
 	return c.report(ctx, header, amount)
 }
 
-// TestBackendLifecycle checks Ethash and simulated PoSW construction, separate root initialization,
-// and root-coinbase-chain-only stake queries. Stop and failed construction must leave the
-// caller's database usable, and Init must not propagate genesis again.
+// TestBackendLifecycle checks binding the supplied chain and client with Ethash
+// or simulated PoSW, and separate root initialization without propagating genesis
+// again. Root-chain stake queries are restricted to the root-coinbase chain, and
+// missing query headers must produce an error identifying the requested hash.
 func TestBackendLifecycle(t *testing.T) {
 	for _, chainID := range []int64{10001, 10002} {
 		t.Run(big.NewInt(chainID).String(), func(t *testing.T) {
@@ -68,6 +70,7 @@ func TestBackendLifecycle(t *testing.T) {
 			alloc := core.SystemContractAllocs()
 			maps.Copy(alloc, core.PoSWStakingContractAllocs(&config))
 			genesis := &core.Genesis{
+				Config:   &config,
 				GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
 				ExtraData: (&types.QKCExtra{
 					ChainID: big.NewInt(chainID), Cursor: pos(1, 0, 0),
@@ -86,17 +89,38 @@ func TestBackendLifecycle(t *testing.T) {
 					return nil
 				},
 			}
-			s, err := New(&config, genesis, db, nil, client)
+			var (
+				engine consensus.Engine
+				err    error
+			)
+			if chainID == 10002 {
+				engine, err = posw.NewSimulate(&config, genesis.ToBlock().Header())
+			} else {
+				engine, err = posw.New(&config, genesis.ToBlock().Header())
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { s.Stop() })
+			t.Cleanup(func() { engine.Close() })
+			chain, err := core.NewBlockChain(db, genesis, engine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(chain.Stop)
+			shardChain := NewShardChain(db, chain, nil)
+			s, err := New(shardChain, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.chain != shardChain || s.clusterClient != client {
+				t.Fatal("New must borrow the supplied chain and client")
+			}
 			wantEngine := reflect.TypeOf(&posw.PoSW{})
 			if chainID == 10002 {
 				wantEngine = reflect.TypeOf(&posw.PoSWSimulate{})
 			}
-			if reflect.TypeOf(s.engine) != wantEngine || genesis.Config != nil {
-				t.Fatalf("New must select %v without mutating the supplied genesis", wantEngine)
+			if reflect.TypeOf(s.chain.chain.Engine()) != wantEngine || genesis.Config != &config {
+				t.Fatalf("New must preserve %v and the supplied genesis configuration", wantEngine)
 			}
 			if s.RootTip() != (common.Hash{}) {
 				t.Fatal("New selected a root before Init")
@@ -127,35 +151,11 @@ func TestBackendLifecycle(t *testing.T) {
 			} else if err == nil {
 				t.Fatal("non-root-coinbase chain served root-chain stakes")
 			}
-			if err := s.Stop(); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Stop(); err != nil {
-				t.Fatal(err)
-			}
-			badGenesis := *genesis
-			badGenesis.GasLimit++
-			var mismatch *core.GenesisMismatchError
-			if failed, err := New(&config, &badGenesis, db, nil, client); failed != nil || !errors.As(err, &mismatch) {
-				t.Fatalf("mismatched genesis: backend %v, error %v", failed, err)
-			}
-			if err := db.Put([]byte("caller-owned"), []byte{1}); err != nil {
-				t.Fatalf("Stop or failed New closed the borrowed database: %v", err)
-			}
-			// Reconstruct from the same database; Init remains a separate step.
-			reopened, err := New(&config, genesis, db, nil, client)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reopened.Stop()
-			if err := reopened.Init(root); err != nil {
-				t.Fatal(err)
-			}
 		})
 	}
 }
 
-func TestBackendRejectsInvalidGenesis(t *testing.T) {
+func TestBackendChainRejectsInvalidGenesis(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		change func(*core.Genesis)
@@ -170,31 +170,36 @@ func TestBackendRejectsInvalidGenesis(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/stored=%t", test.name, stored), func(t *testing.T) {
 				config := params.NewTestQuarkChainConfig(10001)
 				genesis := &core.Genesis{
+					Config:   config,
 					GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
 					ExtraData: (&types.QKCExtra{
 						ChainID: config.ChainID, Cursor: pos(1, 0, 0),
 						XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
 					}).Encode(),
-					Alloc: core.PoSWStakingContractAllocs(config),
+					Alloc: core.SystemContractAllocs(),
 				}
+				maps.Copy(genesis.Alloc, core.PoSWStakingContractAllocs(config))
 				db := rawdb.NewMemoryDatabase()
 				defer db.Close()
-				client := &backendClusterClient{}
+				engine, err := posw.New(config, genesis.ToBlock().Header())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer engine.Close()
+				// The caller constructs and validates the chain before binding a backend.
 				if stored {
-					shard, err := New(config, genesis, db, nil, client)
+					chain, err := core.NewBlockChain(db, genesis, engine, nil)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := shard.Stop(); err != nil {
-						t.Fatal(err)
-					}
+					chain.Stop()
 				}
 				genesisHash, headHash := rawdb.ReadCanonicalHash(db, 0), rawdb.ReadHeadBlockHash(db)
 				test.change(genesis)
-				shard, err := New(config, genesis, db, nil, client)
-				if shard != nil {
-					shard.Stop()
-					t.Fatal("created a shard with invalid genesis")
+				chain, err := core.NewBlockChain(db, genesis, engine, nil)
+				if chain != nil {
+					chain.Stop()
+					t.Fatal("created a chain with invalid genesis")
 				}
 				if err == nil || !strings.Contains(err.Error(), test.want) {
 					t.Fatalf("error %v, want %q", err, test.want)
@@ -202,8 +207,8 @@ func TestBackendRejectsInvalidGenesis(t *testing.T) {
 				if rawdb.ReadCanonicalHash(db, 0) != genesisHash || rawdb.ReadHeadBlockHash(db) != headHash {
 					t.Fatal("invalid genesis changed the chain database")
 				}
-				if genesis.Config != nil {
-					t.Fatal("New modified the caller's genesis configuration")
+				if genesis.Config != config {
+					t.Fatal("NewBlockChain modified the caller's genesis configuration")
 				}
 			})
 		}
