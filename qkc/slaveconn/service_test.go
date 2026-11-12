@@ -41,6 +41,11 @@ import (
 	"github.com/holiman/uint256"
 )
 
+var (
+	_ ShardBackend        = (*shard.Shard)(nil)
+	_ shard.ClusterClient = (*Service)(nil)
+)
+
 type serviceBackend struct {
 	inits    atomic.Int32
 	initErr  error
@@ -342,20 +347,42 @@ func TestServiceAssembly(t *testing.T) {
 	}
 }
 
-func TestServiceInitializationRetry(t *testing.T) {
-	backend := &serviceBackend{initErr: errors.New("checkpoint unavailable")}
-	shutdown := make(chan struct{})
-	s := newTestService(t, 1, backend, func() { close(shutdown) })
-	root := qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{})
-	if err := s.CreateShards(root); err == nil {
-		t.Fatal("initialization failure ignored")
-	}
-	backend.initErr = nil
-	if err := s.CreateShards(root); err != nil {
-		t.Fatal(err)
-	}
-	if backend.inits.Load() != 2 {
-		t.Fatal("initialization retry was not forwarded")
+func TestServiceInitializationErrorClosesConnection(t *testing.T) {
+	for _, initErr := range []error{errors.New("checkpoint unavailable"), &comm.RemoteError{Code: 9}} {
+		t.Run(initErr.Error(), func(t *testing.T) {
+			backend := &serviceBackend{initErr: initErr}
+			shutdown := make(chan struct{}, 1)
+			s := newTestService(t, 1, backend, func() {
+				select {
+				case shutdown <- struct{}{}:
+				default:
+				}
+			})
+			remote := serviceMaster(t, s, nil)
+			root := qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{})
+			data, err := root.MarshalSSZ()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := remote.SendRPC(ctx, byte(wire.ClusterOpPing), &wire.PingRequest{HasRootTip: true, RootTip: data}); err == nil {
+				t.Fatal("initialization failure accepted")
+			}
+			select {
+			case <-remote.WaitUntilClosed():
+			case <-ctx.Done():
+				t.Fatal("initialization failure did not close connection")
+			}
+			select {
+			case <-shutdown:
+			case <-ctx.Done():
+				t.Fatal("initialization failure did not request shutdown")
+			}
+			if backend.inits.Load() != 1 {
+				t.Fatal("initialization was not forwarded once")
+			}
+		})
 	}
 }
 
@@ -380,10 +407,9 @@ func TestServiceFailureShutdown(t *testing.T) {
 			am := serviceMaster(t, a, nil)
 			serviceMaster(t, b, nil)
 			addr := b.Addr().(*net.TCPAddr)
-			id, _ := wire.ChainIDToSSZ(big.NewInt(2))
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := a.DialToSlave(ctx, wire.SlaveInfo{Host: []byte("127.0.0.1"), Port: uint16(addr.Port), ChainID: id}); err != nil {
+			if err := a.DialToSlave(ctx, comm.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: big.NewInt(2)}); err != nil {
 				t.Fatal(err)
 			}
 			peer := a.xshardManager.Lookup(big.NewInt(2))

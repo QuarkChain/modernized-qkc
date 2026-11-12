@@ -28,18 +28,18 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
-	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/holiman/uint256"
 )
 
-// ShardBackend is the business state borrowed by Service. Its methods must be
-// safe for concurrent calls. Service never creates or closes the backend.
-// Return *comm.RemoteError for an explicit protocol error code; other errors
-// close the connection. The existing shard.Shard satisfies this interface implicitly.
+// ShardBackend supplies concurrent-safe business operations borrowed by Service.
+// Init errors close the master connection. Other methods may return
+// *comm.RemoteError as a protocol rejection; all other errors close the connection.
 type ShardBackend interface {
+	// The owner observes successful initialization through the backend before
+	// starting local business activity.
 	Init(*qkctypes.RootBlock) error
+	// The result reports whether the root became the tip; Service ignores it.
 	AddRootBlock(*qkctypes.RootBlock) (bool, error)
 	GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error)
 	GetUnconfirmedHeaderList() ([]*types.Header, error)
@@ -54,18 +54,19 @@ type ServiceConfig struct {
 	ConfiguredChainIDs []*big.Int
 	MaxPayloadSize     uint32
 	Logger             log.Logger
-	// Shutdown requests the owning node's shutdown. It is required and must be
-	// concurrency-safe, idempotent and return promptly: it must only start an
-	// asynchronous node shutdown, never synchronously call Stop or Node.Close.
-	// Multiple connection failures and normal Close callbacks may invoke it.
+	// Shutdown requests asynchronous node shutdown on disconnect or listener failure,
+	// and may also run during normal Stop. It must be prompt, concurrent-safe and
+	// idempotent. The owner closes Service; Master's owner stops the cluster.
 	Shutdown func()
 }
 
-// Service owns the slave's listener and cluster connections. The owner creates
-// it first, passes it to Shard as ClusterClient, binds the Shard, then starts it.
-// Only the owner manages execution resources and node shutdown.
-// The first accepted connection must be Master; Master must connect to every
-// slave before instructing any slave to dial another, as required by the manager.
+// Service owns the slave listener and cluster connections, not shard resources.
+// Assembly is NewService -> shard.New(client=Service) -> BindShard -> Start.
+// Master must connect to every slave first (the first connection is treated as
+// Master), then await each slave's interconnection command in turn, aborting on
+// failure. PING(rootTip) initializes the shard afterward; Service trusts this order.
+// Outbound RPC callers supply context deadlines and handle errors. Only connection
+// closure or listener failure requests shutdown; RPC rejection/timeout alone does not.
 type Service struct {
 	cfg           ServiceConfig
 	backend       ShardBackend
@@ -79,8 +80,6 @@ type Service struct {
 }
 
 var (
-	_ ShardBackend         = (*shard.Shard)(nil)
-	_ shard.ClusterClient  = (*Service)(nil)
 	_ MasterRequestHandler = (*Service)(nil)
 	_ XshardRequestHandler = (*Service)(nil)
 	_ SlaveDialer          = (*Service)(nil)
@@ -150,8 +149,10 @@ func (s *Service) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Stop closes the listener and connections.
-// It does not cancel or wait for running backend calls, or close the backend.
+// Stop closes the listener and connections. It neither cancels nor joins backend
+// calls or in-progress TCP dials; late dial results are closed by the manager.
+// The owner/backend must stop admission and drain business calls before releasing
+// shard resources. Stop may trigger Shutdown, including after it returns.
 func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
@@ -170,9 +171,6 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-// shutdown immediately reports connection/listener failure to the owner.
-// The owner schedules node shutdown asynchronously. Service.Stop performs
-// the communication resource cleanup.
 func (s *Service) shutdown() {
 	s.cfg.Shutdown()
 }
@@ -213,7 +211,9 @@ func (s *Service) acceptLoop(listener net.Listener) {
 }
 
 // DialToSlave connects a slave advertised by Master through the connection manager.
-func (s *Service) DialToSlave(ctx context.Context, info wire.SlaveInfo) error {
+// It reuses known connections and does not retry or reconnect after failure.
+// Command failures are returned to Master, whose owner must abort cluster startup.
+func (s *Service) DialToSlave(ctx context.Context, info comm.SlaveInfo) error {
 	return s.xshardManager.DialToSlave(ctx, info)
 }
 
