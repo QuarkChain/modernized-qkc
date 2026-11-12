@@ -1,22 +1,19 @@
 # Shard 与 eth.Ethereum 集成设计
 
-> 状态：设计草案，供 review；已对照 qkc `8e5020cc7` 更新，图中的目标结构尚未全部实现。基于当前单 slave 托管单 chain 的连接模型。   
-> 定位：整体集成设计，明确模块职责、归属和主要调用流程；接口细节由各模块后续设计确定。
-> 范围：Shard backend、ShardChain 与 Ethereum 的集成，复用已有 qkc/config 部署配置。Root chain PoSW 实现、Genesis 文件加载实现和多 chain/slave 拓扑不在本设计中。   
+> 状态：设计草案，供 review；已对照 qkc `8e5020cc7` 更新，图中的目标结构尚未全部实现。基于当前单 slave 托管单 chain 的连接模型。
+> 范围：Shard backend、ShardChain 与 Ethereum 的集成，复用已有 qkc/config 部署配置。Root chain PoSW 实现、Genesis 文件加载实现和多 chain/slave 拓扑不在本设计中。
 > 阶段：QKC 同步模块在 M2 实现，不属于 M1；M1 不创建或等待同步任务，缺失数据直接返回错误。
 
-## 1. 要求和模块图
+## 1. 设计结论与模块图
 
-尽量复用 geth 已有代码，将 Shard、ShardChain、SlaveService 和 PoSW 共识接入 geth 的启动与执行流程，完成集成。使用 `eth.Ethereum` 管理链与通信组件的创建、启动和关闭，使用 `node.Node` 管理已注册服务的生命周期；Shard 通过 SlaveService 实现的 `ClusterClient` 接口与集群通信，并明确各层职责。
+**保留 `Ethereum.blockchain`，由 Ethereum 保存一个 Shard 对象。Shard 负责导入、广播和上报的执行顺序，ShardChain 负责链规则。**
 
-| 要求 | 职责与约束 |
+| 必须保持的规则 | 具体要求 |
 | --- | --- |
-| 尽量复用已有流程 | 复用 geth 的启动、数据库、RPC、交易池和区块构建流程，以及现有 Shard、ShardChain 和 PoSW 实现，避免重复实现 |
-| Ethereum 管理组件和资源 | 由 `eth.New` 创建 SlaveService、DB、BlockChain、ShardChain、Shard、Engine、txpool、builder 和 PoWMiner，并完成接口绑定；由 Ethereum 负责启动和关闭，构造失败时清理已创建的资源，借用方不重复关闭 |
-| Node 管理服务生命周期 | 通过 `node.Node` 已有的 Lifecycle 流程管理 Ethereum；Ethereum 再管理 SlaveService，后者不单独注册 Lifecycle。SlaveService 管理监听器和连接，Node 不增加 QKC 业务逻辑 |
-| 明确模块职责 | Shard 协调导入、广播和 master 上报；ShardChain 负责 root 约束、确认关系和链头选择；BlockChain 负责执行、状态和区块数据；SlaveService / ClusterClient 负责集群通信；PoSW 负责共识校验和奖励 |
-| 统一通过 ShardChain 更新链状态 | 运行时的 shard/root 区块导入、canonical head、root tip 和确认关系更新统一经 ShardChain 处理，其他入口不能绕过它直接导入或修改链头 |
-| 减少 geth 改动 | 修改尽量集中在 QKC 分支和专用方法、文件中，复用已有接口，不做无关重构；QKC 的调用限制仅在 QKC 模式生效，保留普通 geth 行为 |
+| 一个 BlockChain | Ethereum、ShardChain、builder 共享同一个实例，不重复构造 |
+| 明确谁创建和关闭资源 | Ethereum 创建和关闭链、引擎、txpool、builder，启动和停止挖矿；M2 再接入同步任务。SlaveService 创建和关闭监听器及连接 |
+| 统一通过 ShardChain 更新链头 | 当前主链的链头（canonical head）和 root tip 由 ShardChain 更新，外部调用不能直接修改它们 |
+| 保留普通 geth 行为 | 以下修改和调用限制仅在 QKC 模式生效 |
 
 ![模块关系与改动分类](assets/shard-ethereum/modules.svg)
 
@@ -29,9 +26,7 @@ config:
   layout: elk
 ---
 flowchart TB
-    %% The saved SVG uses fixed positions and orthogonal routes from the reviewed reference image.
-    %% This Mermaid source records the same modules and relationships; preserve the SVG layout when editing.
-    %% SVG footer: these three lines appear below node.Node at 14px.
+    %% SVG footer: append these three lines below node.Node after Mermaid export, at 14px.
     %% caption: 外框：管理范围；如 node.Node 管理已注册服务；Ethereum 内部以最近一层容器表示创建和管理归属。
     %% caption: 实线：调用关系；虚线：同步数据来源，请求由同步模块发起。
     %% caption: “复用”：沿用已有实现；“新增”：需要新实现的模块或接口；“修改”：调整现有实现。
@@ -41,21 +36,19 @@ flowchart TB
 
     subgraph NODE["node.Node【复用】 · 启动和关闭已注册服务"]
         direction LR
-        %% Layout-only group for the existing JSON-RPC server and its handlers.
+        %% Layout-only group; the services remain registered directly with node.Node.
         subgraph ENTRY[" "]
             direction LR
+            MC["slaveconn.MasterConn<br/>【新增】Master 连接"]:::create
+            XC["XshardConnManager<br/>【复用】跨 shard 连接"]:::reuse
             RPC["Node JSON-RPC Server<br/>【复用】"]:::reuse
             API["EthAPIBackend<br/>【修改】处理 QKC 相关请求"]:::modify
-            MiningAPI["MinerAPI<br/>【修改】GetWork / SubmitWork"]:::modify
+            MiningAPI["QKC Mining RPC<br/>【新增】GetWork / SubmitWork"]:::create
+            Service["SlaveServer / SlaveService<br/>【新增】处理请求与实现 ClusterClient"]:::create
         end
 
         subgraph ETH["eth.Ethereum【修改】 · 创建组件、启动任务和关闭资源"]
             direction TB
-            subgraph SLAVE["SlaveService【新增】 · 管理监听器与连接"]
-                MC["slaveconn.MasterConn<br/>【新增】Master 连接"]:::create
-                XC["XshardConnManager<br/>【复用】跨 shard 连接"]:::reuse
-                Service["请求处理与 ClusterClient<br/>【新增】TCP 监听与业务转发"]:::create
-            end
             S["shard.Shard<br/>【修改】构造与资源归属<br/>【复用】导入、广播与上报"]:::modify
             SC["ShardChain<br/>【复用】root 规则与链头选择"]:::reuse
             BC["core.BlockChain<br/>【复用】执行、状态、区块数据"]:::reuse
@@ -70,6 +63,8 @@ flowchart TB
     Client --> RPC
     RPC --> API
     RPC --> MiningAPI
+    %% Invisible edge keeps the service beside the RPC handlers; it is not a call.
+    RPC ~~~ Service
     API -->|普通查询| BC
     API -->|提交交易| Pool
     API -->|QKC 专用操作| S
@@ -99,12 +94,11 @@ flowchart TB
     style NODE fill:#FFFFFF,color:#1F2937,stroke:#BCC1C7,stroke-width:1.8px,rx:12px,ry:12px
     style ENTRY fill:transparent,stroke:none
     style ETH fill:#FBF5E7,color:#4A3308,stroke:#C6AE78,stroke-width:1.8px,rx:12px,ry:12px
-    style SLAVE fill:#F3F7FC,color:#102E4A,stroke:#8BA9C8,stroke-width:1.5px,rx:12px,ry:12px
 ```
 
 </details>
 
-统一使用 `SlaveService` 表示通信组件，由 Ethereum 创建和管理；它包含 TCP 监听器、MasterConn 和 XshardConnManager，并实现 Shard 使用的 `ClusterClient` 接口。`ClusterClient` 不再单独表示一个组件。绿色模块沿用已有实现，由所属组件创建和管理；例如 QKC 模式不启用 blobpool，由 Ethereum 的初始化分支控制。
+`SlaveServer` 与 `SlaveService` 在此表示同一个组件，不再增加一层。绿色模块只需由启动代码创建，并把对象传给调用它的组件，核心算法不变；例如 QKC 模式不启用 blobpool，由 Ethereum 的初始化分支控制。
 
 `Shard` 标为“修改”是因为其 `New` 改为接收已有的 ShardChain/ClusterClient，链和引擎由 Ethereum 创建和关闭；现有导入、广播、上报和重试流程继续复用。
 
@@ -112,14 +106,13 @@ flowchart TB
 
 | 模块 | 持有/管理 | 业务调用 |
 | --- | --- | --- |
-| cmd/geth 启动代码 | 加载配置，创建 Node 和 Ethereum，传入配置与 Genesis 加载结果 | 不执行链规则，不装配 Shard 与 SlaveService 的互相引用 |
+| cmd/qkc 启动代码（待添加） | 复用部署配置流程，创建 Node、SlaveService、Ethereum，传入所需对象并注册服务 | 不执行链规则 |
 | node.Node | 已注册的 Lifecycle（含 Start/Stop 方法的接口）、JSON-RPC/P2P 基础服务 | 调用 Start/Stop，不处理 QKC 业务 |
-| Ethereum | SlaveService、DB、BlockChain、ShardChain、engine、txpool、builder、Shard、PoWMiner；同步任务在 M2 接入 | 统一创建、绑定接口、启动和关闭；SlaveService 不单独注册 Lifecycle |
+| Ethereum | DB、BlockChain、engine、txpool、builder、Shard、PoWMiner；同步任务在 M2 接入 | 统一创建这些组件，并负责启动和关闭 |
 | Shard | 使用外部创建的 ShardChain、ClusterClient，不负责关闭它们 | 导入、广播、上报、保存完成标记（commit marker）、处理挖矿请求 |
 | ShardChain | 引用同一 BlockChain、builder；维护 root tip/确认关系 | Init、InsertShardBlock、InsertRootBlock、BuildBlock、未确认 headers |
 | SlaveService | 监听器、MasterConn、XshardConnManager、Shard 业务接口 | 解析消息，调用对应业务方法并返回响应；实现 ClusterClient |
-| EthAPIBackend | 引用 Ethereum，访问其 BlockChain、txpool 和 Shard | 复用普通查询、交易提交和订阅路径；QKC 专用操作调用 Shard |
-| MinerAPI | 引用 Ethereum，使用其 builder 和 PoWMiner | 保留已有矿工设置接口；新增 GetWork / SubmitWork，转发到 PoWMiner |
+| RPC 请求处理代码 | 引用业务接口或 PoWMiner | 转换参数和结果，不重复实现导入和重试逻辑 |
 
 **调用示例：**
 
@@ -130,17 +123,28 @@ flowchart TB
 | Master 下发 root、查询未确认 headers/stakes | SlaveService → Shard → ShardChain/BlockChain |
 | 收到跨 shard deposits | SlaveService → Shard.AddXshardTxList |
 | 导入完整 shard block | Shard.AddShardBlock |
-| 远程矿工提交 seal | MinerAPI → PoWMiner.SubmitWork |
+| 远程矿工提交 seal | QKC Mining RPC → PoWMiner.SubmitWork |
 
-避免 Go 包互相 import：`eth` 引用 `qkc/shard` 和通信服务包；SlaveService 通过 Shard 业务方法接口调用 Shard，Shard 通过 `ClusterClient` 调用通信服务。**由 Ethereum 创建 SlaveService，将其作为 ClusterClient 传给 Shard，再将 Shard 业务接口绑定到服务；全部绑定完成后才开始监听。通信服务不 import `eth.Ethereum`。** TCP 长连接由 SlaveService 自己管理，不接入 JSON-RPC Server。
+避免 Go 包互相 import：`eth` 引用 `qkc/shard`；SlaveService 通过 Shard 业务方法接口调用 Shard，Shard 通过 `ClusterClient` 调用通信服务。**通信服务不 import `eth.Ethereum`；cmd 把 Shard 对象传给服务，把 ClusterClient 传给 Shard。**
 
 ## 3. 创建、连接和启动组件
 
-**入口选择：** 确定使用 `cmd/geth`。
+**入口选择：** `cmd/qkc` 已有 Master/Slave 角色选择和部署配置；`cmd/geth` 的启动流程更完整，但接入 QKC 需要增加角色和配置分支，并跳过 beacon、Engine API 等默认流程。因此选用 `cmd/qkc`，复用 `cmd/utils`、`node` 和 `eth.Ethereum`。
 
-主要修改 [cmd/geth/config.go](../cmd/geth/config.go) 中的 `makeConfigNode`（第 166 行）和 `makeFullNode`（第 226 行），实际组件创建仍在 [eth.New — eth/backend.go:139](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/backend.go:139) 的 QKC 分支完成。图中的新增方法名为示例，参数和返回值需要在实现前确认。
+启动入口放在已有的 [cmd/qkc](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/qkc/main.go:29)：当前只有 `checkconfig`，尚未创建节点或启动服务，需补充 Slave 的启动流程。参考 [makeFullNode — cmd/geth/config.go:226](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/geth/config.go:226) 的结构，实际组件创建仍在 [eth.New — eth/backend.go:139](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/backend.go:139) 的 QKC 分支完成。图中的新增方法名为示例，参数和返回值需要在实现前确认。
 
-启动时还须校验所选 ChainID 与 Genesis/数据库实际加载的 `ChainConfig.ChainID` 一致，并执行链配置校验。
+复用已有 [cmd/qkc 配置处理流程](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/qkc/config.go:62)：`LoadCluster → SelectNode → 应用显式 CLI 参数 → cluster.Validate`。这只校验部署配置；`GenesisFile` 仅记录路径，不读取 Genesis，也不校验共识规则或链成员。
+
+| 已有配置 | 使用位置 |
+| --- | --- |
+| `NodeConfig.Node` | `node.New`：数据目录、数据库类型、对外 RPC 等进程设置 |
+| `NodeConfig.Eth` | Ethereum：数据库缓存、交易池、builder 等执行设置；仍由 backend 推导 `core.BlockChainConfig` |
+| `PrivateHost / PrivatePort` | SlaveService：Master 和其他 shards 使用的内部 TCP 端点 |
+| `CoinbaseAddress` | `PoWMinerConfig.Coinbase`：本地挖矿收益地址 |
+| `GenesisFile` | 独立的 Genesis 加载流程，结果交给 Ethereum 初始化 |
+| `NodeConfig.ChainID`、`ClusterConfig.NetworkID` | 前者选择 shard 进程；后者是独立的正数 `uint64` 网络 ID，部署校验将它写入 `Eth.NetworkId` |
+
+启动时还须校验所选 ChainID 与 Genesis/数据库实际加载的 `ChainConfig.ChainID` 一致，并执行链配置校验。部署中的 `Slaves` 提供进程和地址；广播成员及 root 奖励链以链配置中的 `QuarkChain.ChainIDs` 为准，不能用 `Slaves` 的排列顺序替代。
 
 ![创建、连接和启动组件](assets/shard-ethereum/startup.svg)
 
@@ -148,52 +152,53 @@ flowchart TB
 <summary>组件创建与启动 Mermaid 源码</summary>
 
 ```mermaid
----
-config:
-  sequence:
-    width: 210
-    actorMargin: 56
-    messageMargin: 22
----
 sequenceDiagram
-    participant CMD as cmd/geth
+    participant CMD as cmd/qkc 启动代码（待添加）
+    participant CFG as qkc/config（复用）
     participant N as node.Node
-    participant E as Ethereum
     participant SS as SlaveService
+    participant E as Ethereum
     participant S as Shard
-    CMD->>CMD: 加载并校验配置
+    CMD->>CFG: LoadCluster；SelectNode
+    CFG-->>CMD: NodeConfig、ClusterConfig
+    CMD->>CMD: 应用显式 CLI 参数
+    CMD->>CFG: cluster.Validate
+    CFG-->>CMD: 部署配置通过
     CMD->>CMD: 单独加载 Genesis
     CMD->>N: node.New，使用 NodeConfig.Node
-    CMD->>E: 创建 Ethereum，传入配置和 Genesis 加载结果
+    CMD->>SS: 按 PrivateHost/Port 创建服务，取得 ClusterClient
+    Note over SS: 尚未监听，不处理入站业务
+    CMD->>E: 创建 Ethereum，传入 Eth 配置和运行时对象
     E->>E: 打开 DB，校验链配置与所选 ChainID
-    E->>SS: 创建服务，持有监听配置和连接管理器
-    Note over SS: 尚未监听；实现 ClusterClient
     E->>E: nowrap: posw.New(chainConfig, genesisHeader)
     E->>E: nowrap: 创建 BlockChain，传入 engine
     E->>E: 创建 txpool
     E->>E: nowrap: 创建 builder，传入同一 engine
     E->>E: NewShardChain：绑定已有链、builder 和 inbox
-    E->>S: 创建 Shard，传入 ShardChain 和 ClusterClient
-    E->>SS: 绑定 Shard 业务接口
+    E->>S: 创建 Shard，传入已有组件
     E->>E: 创建 PoWMiner
     opt M2：接入 QKC 同步
         E->>E: 创建同步任务
     end
     E->>N: RegisterAPIs；RegisterLifecycle(Ethereum)
+    CMD->>SS: 传入 Shard 对象和停止任务的函数
+    CMD->>N: RegisterLifecycle(SlaveService)
     CMD->>N: Start
     N->>N: 打开 RPC 等通用端点
     N->>E: Start
-    E->>SS: Start，开始监听与连接处理
-    SS-->>E: 监听已启动
     E-->>N: 返回，不阻塞等待 Master
+    N->>SS: Start，开始监听与连接处理
+    SS-->>N: 监听已启动
     N-->>CMD: stack.Start 返回
     Note over E,SS: M1：Init 成功且所需连接建立后允许挖矿；M2 还须等待同步完成
 ```
 
 </details>
 
-- [Node.Start:163](/D:/code/src/github.com/ping-ke/modernized-qkc/node/node.go:163) 先打开端点，再启动 Lifecycle。Ethereum.Start 启动内部 SlaveService，但不等待 Master 握手或 Init 完成；未就绪时拒绝挖矿请求。
-- 创建组件失败时，由创建者关闭已经成功创建的资源；Ethereum.Start 失败也需回收本次已启动的组件，Node 不会对启动失败的 Lifecycle 调用 Stop。这次不改 core 内部创建失败时的处理方式。
+- [node.Node.RegisterLifecycle:548](/D:/code/src/github.com/ping-ke/modernized-qkc/node/node.go:548) 已满足注册需求，不新增 QKC 字段或 Start 分支。
+- [Node.Start:163](/D:/code/src/github.com/ping-ke/modernized-qkc/node/node.go:163) 先打开端点，再按注册顺序启动 Lifecycle。**Ethereum.Start 不能等待排在它后面的 SlaveService 完成握手。**
+- BaseConn 同时执行多个 handlers（请求处理函数）。服务层需防止多个 handler 同时修改初始化状态，并检查当前请求是否允许执行；不能假定执行顺序与网络接收顺序相同。
+- 创建组件失败时，由创建者关闭已经成功创建的资源。这次只把创建和关闭职责移到对应模块，不改 core 内部创建失败时的处理方式。
 
 ## 4. Init shard：Master checkpoint 驱动
 
@@ -203,13 +208,6 @@ sequenceDiagram
 <summary>Init shard Mermaid 源码</summary>
 
 ```mermaid
----
-config:
-  sequence:
-    width: 210
-    actorMargin: 56
-    messageMargin: 22
----
 sequenceDiagram
     participant M as Master
     participant SS as SlaveService
@@ -239,18 +237,16 @@ sequenceDiagram
 
 </details>
 
-复用 [Shard.Init:109](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:109)、[ShardChain.Init:156](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/shardchain.go:156)。不重复上报 genesis header；Master 负责选择恢复 checkpoint。
+复用 [Shard.Init:109](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:109)、[ShardChain.Init:156](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/shardchain.go:156)。不重复上报 genesis header；Master 负责选择恢复 checkpoint。重连不能不加判断地重复调用一次性 Init，应区分首次初始化与后续同步。
 
-### QKC 业务就绪条件
-
-Ethereum 协调各组件的生命周期，各业务入口根据初始化、连接、同步和停止状态决定是否接受请求。具体检查位置由各模块后续设计确定。
-
-| 节点状态 | 业务入口限制 |
+| 状态 | 允许的动作 |
 | --- | --- |
-| 已开始监听，尚未完成准备 | 允许握手、建立跨 shard 连接、必要查询和接收 deposit 列表；不允许挖矿 |
-| root 已 Init、正在同步（M2） | 允许同步模块通过 Shard 导入缺失区块；矿工请求返回尚未就绪的错误 |
+| 对象已创建、监听已启动 | 握手、建立跨 shard 连接、必要查询；服务保存 Shard 引用并检查请求来源后，可接收 deposit 列表 |
+| root 已 Init、正在同步（M2） | 同步模块可调用 Shard 导入缺失区块；矿工请求返回尚未就绪的错误 |
 | Init 成功、所需连接已建立；M2 还须同步完成 | 开放 GetWork/SubmitWork、本地挖矿和正常新块入口 |
-| 正在停止 | 拒绝新任务，取消并等待在途请求和任务结束后再关闭资源 |
+| 正在停止 | 拒绝新工作，取消并等待已经开始但尚未结束的工作 |
+
+M1 仅支持所需数据已在本地的场景，不自动补齐缺失数据。M2 同步模块导入缺失区块时只要求 root 已 Init，不能要求整轮同步已经完成。接收 deposit 列表也不应等到可以挖矿后才开始。
 
 ## 5. 挖矿与完整区块接收：两个入口
 
@@ -263,10 +259,10 @@ Ethereum 协调各组件的生命周期，各业务入口根据初始化、连�
 flowchart LR
     Local["本地挖矿循环"]:::reuse
     Remote["远程矿工"]:::external
-    RPC["MinerAPI<br/>【修改】GetWork / SubmitWork"]:::modify
+    RPC["QKC Mining RPC<br/>【新增】复用 Node JSON-RPC"]:::create
     Pow["PoWMiner<br/>GetWork / SubmitWork"]:::reuse
     Insert["Shard.InsertMinedBlock<br/>带投递超时"]:::reuse
-    Network["QKC 同步模块<br/>【待M2实现接入】"]:::deferred
+    Network["QKC 完整区块接收入口<br/>【待接入】M2 再接入同步模块"]:::create
     Add["Shard.AddShardBlock<br/>统一业务入口"]:::reuse
     Local -->|搜索 nonce 后 SubmitWork| Pow
     Remote -->|取得 work，提交 sealHash / nonce / mixHash| RPC
@@ -274,22 +270,23 @@ flowchart LR
     Pow -->|从缓存候选填入 seal| Insert
     Insert --> Add
     Network -->|完整 shard block| Add
-    classDef modify fill:#F4E6C5,color:#4A3308,stroke:#BEA56A,stroke-width:1.5px,rx:8px,ry:8px;
-    classDef reuse fill:#DFEBDD,color:#203D25,stroke:#91AC8C,stroke-width:1.5px,rx:8px,ry:8px;
-    classDef external fill:#EAECEE,color:#1F2937,stroke:#BCC1C7,stroke-width:1.5px,rx:8px,ry:8px;
-    classDef deferred fill:#F1F3F5,color:#4B5563,stroke:#B8BFC7,stroke-width:1.5px,rx:8px,ry:8px;
+    classDef create fill:#DCE9F7,color:#102E4A,stroke:#8BA9C8,rx:8px,ry:8px;
+    classDef reuse fill:#DFEBDD,color:#203D25,stroke:#91AC8C,rx:8px,ry:8px;
+    classDef external fill:#EAECEE,color:#1F2937,stroke:#BCC1C7,rx:8px,ry:8px;
 ```
 
 </details>
 
-复用现有 [MinerAPI — eth/api_miner.go](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/api_miner.go:26)，增加 `GetWork`、`SubmitWork`，通过 Node JSON-RPC 转发到 PoWMiner：
+远程矿工 RPC 的请求处理代码建议放在 `eth/api_qkc_miner.go`，由 [Ethereum.APIs:414](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/backend.go:414) 条件注册。现有 [eth/api_miner.go](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/api_miner.go:27) 没有 PoW GetWork/SubmitWork。
+
+业务参数示例，**不是最终 JSON-RPC 协议**：
 
 ```text
-MinerAPI.GetWork    → PoWMiner.GetWork
-MinerAPI.SubmitWork → PoWMiner.SubmitWork
+qkc_getWork(coinbase)                         → PoWMiner.GetWork
+qkc_submitWork(sealHash, nonce, mixHash)      → PoWMiner.SubmitWork
 ```
 
-业务实现复用 [PoWMiner](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/pow_miner.go:144)。远程矿工提交已取得 work 的 seal，完整区块由同步入口接收。接口参数、编码和注册细节由该模块的后续设计确定。
+业务实现复用 [PoWMiner.GetWork:144](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/pow_miner.go:144) 和 `SubmitWork`。远程矿工不提交任意完整区块；网络同步入口不依赖本机 work 缓存。
 
 ## 6. Add shard block：导入、广播、上报
 
@@ -299,13 +296,6 @@ MinerAPI.SubmitWork → PoWMiner.SubmitWork
 <summary>Add shard block Mermaid 源码</summary>
 
 ```mermaid
----
-config:
-  sequence:
-    width: 210
-    actorMargin: 56
-    messageMargin: 22
----
 sequenceDiagram
     participant C as 导入调用方
     participant S as Shard
@@ -347,7 +337,7 @@ sequenceDiagram
 
 </details>
 
-沿用 [Shard.AddShardBlock:243](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:243) 的顺序和重试规则：任何阶段失败即返回；已入库但没有完成标记的区块仍须重试广播和上报。发送网络 RPC 时已释放 `ShardChain.mu`。区块已入库但上报失败时，链头可能已经前进，重复 SubmitWork 可能会被当作过期 work 拒绝；后续同步/重试需要按区块 hash 补发。
+沿用 [Shard.AddShardBlock:243](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:243) 的顺序和重试规则：任何阶段失败即返回；已入库但没有完成标记的区块仍须重试广播和上报。发送网络 RPC 时已释放 `ShardChain.mu`。区块已入库但上报失败时，链头可能已经前进，重复 SubmitWork 会被当作过期 work 拒绝；后续同步/重试需要按区块 hash 补发。
 
 ## 7. Add root block：根据 root 更新 shard 链头
 
@@ -357,13 +347,6 @@ sequenceDiagram
 <summary>Add root block Mermaid 源码</summary>
 
 ```mermaid
----
-config:
-  sequence:
-    width: 210
-    actorMargin: 56
-    messageMargin: 22
----
 sequenceDiagram
     participant M as Master
     participant SS as SlaveService
@@ -401,15 +384,14 @@ sequenceDiagram
 
 ## 8. 停止任务与关闭资源
 
-Node 调用 `Ethereum.Stop`：
+1. `node.Node.Close` 停止外部 RPC，再按注册的相反顺序停止服务。
+2. `SlaveService.Stop` 拒绝新连接和业务请求。
+3. 调用启动代码传入的停止任务函数，标记正在停止并停止挖矿；M2 另停同步和重试任务。
+4. 发出取消通知，等待已开始的请求、区块构建、导入和发送结束。
+5. SlaveService 关闭 Master 与跨 shard 连接。
+6. `Ethereum.Stop` 关闭交易池、索引、BlockChain 和共识引擎，最后关闭 DB；已经停止的任务直接跳过，资源只关闭一次。
 
-1. Ethereum 标记正在停止，让内部 SlaveService 拒绝新连接和业务请求。
-2. 取消请求和任务的 context，停止并等待挖矿；M2 还需停止同步任务。
-3. SlaveService 等待已开始的请求处理结束；Ethereum 等待区块构建、导入和发送结束。
-4. Ethereum 让 SlaveService 关闭 Master 与跨 shard 连接。
-5. Ethereum 关闭交易池、索引、BlockChain 和共识引擎，最后关闭 DB；已经停止的任务直接跳过，资源只关闭一次。
-
-SlaveService 不单独注册到 Node，也不再接收 cmd 传入的停止任务函数。`BaseConn.Close` 不取消或等待已经开始的请求处理函数；SlaveService 必须取消并等待这些请求结束，之后 Ethereum 才能关闭数据库。连接异常需要停止整个 slave 时，请求处理函数发出停机通知后返回，由其他 goroutine 执行 `Node.Close`，避免关闭流程与当前请求互相等待。
+cmd 把 Ethereum 的 QKC 停止方法作为函数参数传给 SlaveService。该方法允许重复调用：已经停止的任务直接跳过，不重复关闭资源，通信服务也不用 import `eth`。`BaseConn.Close` 不取消或等待已经开始的请求处理函数；SlaveService 需要发出取消通知并等待这些请求结束，之后 Ethereum 才能关闭数据库。
 
 ## 9. 入口改动清单：仅 QKC 模式
 
@@ -417,9 +399,9 @@ SlaveService 不单独注册到 Node，也不再接收 cmd 传入的停止任务
 
 | 入口 | 目标行为 | 当前代码位置 |
 | --- | --- | --- |
-| Engine API：newPayload、forkchoiceUpdated 等 | cmd/geth 的 QKC 分支跳过注册；不能直接导入、选 head 或设 safe/finalized | [catalyst.Register:52](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/catalyst/api.go:52)、[cmd/geth/config.go](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/geth/config.go:296) |
+| Engine API：newPayload、forkchoiceUpdated 等 | cmd/qkc 启动流程不注册；不能直接导入、选 head 或设 safe/finalized | geth 参考：[catalyst.Register:52](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/catalyst/api.go:52)、[cmd/geth/config.go](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/geth/config.go:296) |
 | 原生 eth/snap downloader、区块导入调用 | M1 不启用，QKC 同步在 M2 实现。若要继续使用它的交易广播功能，需要确保不会同时启用原有区块导入调用 | [downloader.InsertChain 调用:942](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/downloader/downloader.go:942) |
-| simulated beacon、beacon light sync、sync override | cmd/geth 的 QKC 分支不启用 | [cmd/geth/config.go](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/geth/config.go:296)、[eth/syncer/syncer.go](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/syncer/syncer.go:172) |
+| simulated beacon、beacon light sync、sync override | cmd/qkc 启动流程不启用 | geth 参考：[cmd/geth/config.go](/D:/code/src/github.com/ping-ke/modernized-qkc/cmd/geth/config.go:296)、[eth/syncer/syncer.go](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/syncer/syncer.go:172) |
 | debug_setHead / EthAPIBackend.SetHead | 返回不支持；未来维护操作必须遵守 root 约束 | [EthAPIBackend.SetHead:67](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/api_backend.go:67) |
 | admin_importChain、普通 CLI import | 支持 QKC 链规则前拒绝执行；不能直接 InsertChain，也不能按 HasBlock 跳过尚未完成的广播和上报 | [AdminAPI.ImportChain:93](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/api_admin.go:93) |
 | ResetWithGenesisBlock 等运行时重置 | 禁止直接绕过 root/确认关系执行 | [Ethereum.ResetWithGenesisBlock:438](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/backend.go:438) |
@@ -435,18 +417,24 @@ SlaveService 不单独注册到 Node，也不再接收 cmd 传入的停止任务
 
 以下是模块级工作清单，不代表已实现，也不展开成逐提交执行计划。
 
-- [ ] **W01 · cmd/geth 启动代码**：在 `makeConfigNode` / `makeFullNode` 增加 QKC 分支，复用 `qkc/config` 的部署配置处理，接入 CLI 覆盖和独立的 Genesis 加载结果。创建 stack，调用 Ethereum 构造函数并启动 Node；Shard 与 SlaveService 的接口绑定由 Ethereum 完成。Node 本身不新增 QKC 逻辑，普通 geth 流程保持原行为。
-- [ ] **W02 · Ethereum 创建组件**：使用已有 `NodeConfig.Eth`，加载并校验实际链配置、核对所选 ChainID。由 `eth.New` 的 QKC 分支创建 SlaveService，调用 `posw.New(chainConfig, genesisHeader)` 创建并持有 Engine；随后创建单个 BlockChain、legacy txpool 和 builder，将同一个 Engine 实例传给 BlockChain 和 builder；再创建 `NewShardChain`、Shard、PoWMiner。将 SlaveService 作为 ClusterClient 传给 Shard，再绑定 Shard 业务接口。Ethereum 统一启动和关闭，不额外注册 SlaveService Lifecycle。不能沿用仅支持 beacon 的 [CreateConsensusEngine](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/ethconfig/config.go:236) 分支；现有普通 geth 调用继续可用。
+- [ ] **W01 · cmd/qkc 启动代码**：补充 Slave 启动流程，复用现有配置解析、进程选择、CLI 覆盖和部署校验，接入独立的 Genesis 加载结果。创建 stack 和 SlaveService，把 ClusterClient 等运行时对象传给 Ethereum，再把 Shard 对象和停止任务函数传给 SlaveService，注册 Lifecycle。Node 本身不新增 QKC 逻辑；`cmd/geth.makeFullNode` 仅作参考。
+- [ ] **W02 · Ethereum 创建组件**：使用已有 `NodeConfig.Eth`，加载并校验实际链配置、核对所选 ChainID。由 `eth.New` 的 QKC 分支调用 `posw.New(chainConfig, genesisHeader)` 创建并持有 Engine，`Ethereum.Stop` 负责关闭。随后创建单个 BlockChain、legacy txpool 和 builder，将同一个 Engine 实例传给 BlockChain 和 builder；再创建 `NewShardChain`、Shard、PoWMiner。不能沿用仅支持 beacon 的 [CreateConsensusEngine](/D:/code/src/github.com/ping-ke/modernized-qkc/eth/ethconfig/config.go:236) 分支。如何传入 ClusterClient 等运行时参数需在 review 时确定；现有普通 geth 调用继续可用。
 - [ ] **W03 · Shard 使用已有组件**：调整 [Shard.New:76](/D:/code/src/github.com/ping-ke/modernized-qkc/qkc/shard/backend.go:76)，接收外部创建的 ShardChain/ClusterClient；移除其中的 `posw.New` 和 BlockChain 创建代码，以及 `Shard.Stop` 中的链、引擎关闭逻辑和仅用于关闭的字段。Shard 若无其他清理工作则删除 `Stop`。同步更新职责注释和 TODO，保留 AddShardBlock 的完成标记、广播、上报与重试顺序。
-- [ ] **W04 · SlaveService**：建议新增 `qkc/slave/service.go`，由 Ethereum 创建和管理；持有监听器、MasterConn、XshardConnManager 和 Shard 业务接口。实现监听、请求处理、停止接收和关闭连接；检查是否允许挖矿、是否正在停止；取消并等待已开始的请求。实现 `shard.ClusterClient`，并把现有 `slaveconn.XshardHandler` 收到的请求转换成 Shard 方法调用；绑定完成后才能开始监听。
+- [ ] **W04 · SlaveService**：建议新增 `qkc/slave/service.go`。实现 Start/Stop、监听和请求处理；检查是否允许挖矿、是否正在停止；取消并等待已开始的请求。实现 `shard.ClusterClient`，并把现有 `slaveconn.XshardHandler` 收到的请求转换成 Shard 方法调用。
 - [ ] **W05 · Master 连接**：建议新增 `qkc/slaveconn/master_conn.go`。复用 BaseConn/wire，处理 Ping/Init、ConnectToSlaves、AddRootBlock、header 上报及查询。复用现有 XshardConnManager，保留已登记跨 shard 连接异常断开时的 shutdownSlave 策略；遵守当前 Master 逐个请求建立连接的协议顺序。
 - [ ] **W06 · 补齐消息与错误转换**：新增未确认 headers 查询等缺失 wire 消息及 handlers。对带 ErrorCode 响应的业务 RPC，业务失败编码为 response.ErrorCode；非 nil handler error 会关闭连接。Ping/Pong 没有 ErrorCode，Init 失败按握手失败处理，不能返回成功 PONG。沿用已有 Data 内层编码约定；更新生成代码及对应已有测试。
-- [ ] **W07 · 远程矿工 API**：扩展现有 `eth/api_miner.go` 的 MinerAPI，增加 GetWork / SubmitWork，复用 Node JSON-RPC，调用 Ethereum 持有的 PoWMiner；未完成 Init、所需连接尚未就绪或正在停止时返回错误，M2 再增加同步就绪检查。
+- [ ] **W07 · 远程矿工 API**：建议新增 `eth/api_qkc_miner.go`，按模式注册并调用现有 PoWMiner。Init 或所需连接尚未完成时返回明确错误；M2 再增加同步就绪检查。不新建一套 RPC server。
 - [ ] **W08 · QKC 同步入口（M2，不属于 M1）**：新增同步任务及数据获取接口，补齐所需 shard blocks、roots 和 deposit 列表；经 Shard 导入。同步具体请求/来源协议在 M2 明确，不能把“原生 geth sync 已禁用”当作“QKC 同步已实现”。
 - [ ] **W09 · 禁止绕过 ShardChain 的调用**：逐项核对第 9 节。尤其检查调用 handler/Downloader/SyncProgress 的地方、pending 构建和 BlobTxType；验证普通 geth 分支保持原行为。
-- [ ] **W10 · 停止顺序与资源关闭**：由 Ethereum 按第 8 节统一执行；等待已开始的请求处理、构建、导入结束后再关资源，Shard 不关闭借用的 ClusterClient。验证构造和启动失败的清理，避免重复关闭或请求处理函数等待自身退出。
+- [ ] **W10 · 停止顺序与资源关闭**：按第 8 节执行停机顺序；等待已开始的请求处理、构建、导入结束后再关资源，外部共享 ClusterClient 不由 Shard 关闭。
 - [ ] **W11 · 必要验证**：优先扩展现有测试，覆盖：所选 ChainID 与实际链配置不匹配时拒绝启动；同一链和 builder 对象被共用；Init 前拒绝挖矿但允许握手和 deposit 接收，M2 再补同步场景；本地挖矿、远程矿工和网络完整区块三种来源；没有完成标记时重试；关闭时等待已开始的调用；危险入口在 QKC 模式被拒绝、普通 geth 行为不变；handler/blobpool 未创建时不发生空指针错误。避免重复搭建链测试环境。
 
-M2 后续设计需明确同步的数据来源、请求方式和完成条件，作为 W08 及挖矿就绪检查的依据，不阻塞 M1。
+### 实现前需要确认的问题
+
+| 待确认 | 为什么影响实现 |
+| --- | --- |
+| 远程矿工 API 名称、参数编码及旧矿工兼容要求 | 决定 QKC Mining RPC 的对外协议；本文 `qkc_getWork` 等只是示例 |
+| QKC 同步从哪里取数据、使用哪些请求、何时算同步完成（M2） | 决定 W08 及 M2 的挖矿就绪条件，不阻塞 M1；不能直接使用 geth handler 的 synced 标记 |
+| 如何把 ClusterClient 传给构造函数 | 决定 `eth.New` 的具体修改；ClusterClient 是程序启动时创建的对象，不写入配置文件 |
 
 代码链接指向当前本地工作区，代码修改后行号可能变化。图的 Mermaid 源码保留在各节折叠区，修改时同步更新对应 SVG。本文仅记录设计，不修改业务代码、不引入项目依赖。
