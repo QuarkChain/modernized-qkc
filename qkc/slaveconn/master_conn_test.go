@@ -44,7 +44,7 @@ type masterTestHandler struct {
 
 type testSlaveDialer struct{}
 
-func (testSlaveDialer) DialToSlave(context.Context, wire.SlaveInfo) error { return nil }
+func (testSlaveDialer) DialToSlave(context.Context, comm.SlaveInfo) error { return nil }
 
 func (h *masterTestHandler) CreateShards(root *types.RootBlock) error { h.roots <- root; return nil }
 func (h *masterTestHandler) AddRootBlock(req *types.RootBlock) error {
