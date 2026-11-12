@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"sync"
@@ -28,9 +29,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/comm"
 	"github.com/ethereum/go-ethereum/qkc/conn"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/holiman/uint256"
@@ -39,6 +44,7 @@ import (
 type serviceBackend struct {
 	inits    atomic.Int32
 	initErr  error
+	rootErr  error
 	roots    atomic.Int32
 	deposits chan common.Hash
 	entered  chan struct{}
@@ -48,7 +54,7 @@ type serviceBackend struct {
 func (b *serviceBackend) Init(*qkctypes.RootBlock) error { b.inits.Add(1); return b.initErr }
 func (b *serviceBackend) AddRootBlock(*qkctypes.RootBlock) (bool, error) {
 	b.roots.Add(1)
-	return false, errors.New("unknown root parent")
+	return false, b.rootErr
 }
 func (b *serviceBackend) GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error) {
 	return uint256.NewInt(42), common.Address{1}, nil
@@ -140,7 +146,7 @@ func initializeService(t *testing.T, remote *conn.BaseConn) []byte {
 }
 
 func TestServiceClusterRoundTrip(t *testing.T) {
-	aBackend := &serviceBackend{}
+	aBackend := &serviceBackend{rootErr: &comm.RemoteError{Code: 9}}
 	bBackend := &serviceBackend{deposits: make(chan common.Hash, 1)}
 	shutdown := make(chan struct{})
 	a, b := newTestService(t, 1, aBackend, func() { close(shutdown) }), newTestService(t, 2, bBackend, noopShutdown)
@@ -192,7 +198,7 @@ func TestServiceClusterRoundTrip(t *testing.T) {
 	}
 
 	result := serviceRPC(t, am, wire.ClusterOpAddRootBlockRequest, &wire.AddRootBlockRequest{RootBlock: root}).(*wire.AddRootBlockResponse)
-	if result.ErrorCode == 0 || aBackend.roots.Load() != 1 {
+	if result.ErrorCode != 9 || aBackend.roots.Load() != 1 {
 		t.Fatal("backend failure was not returned")
 	}
 	// Business rejection must leave the connection usable.
@@ -213,10 +219,29 @@ func TestServiceClusterRoundTrip(t *testing.T) {
 	}
 }
 
-func TestServiceStopWaitsForBackend(t *testing.T) {
+func TestServiceBackendErrorClosesConnection(t *testing.T) {
+	backend := &serviceBackend{rootErr: errors.New("unknown root parent")}
+	s := newTestService(t, 1, backend, noopShutdown)
+	remote := serviceMaster(t, s, nil)
+	root := initializeService(t, remote)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := remote.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), &wire.AddRootBlockRequest{RootBlock: root}); err == nil {
+		t.Fatal("backend failure was not returned")
+	}
+	select {
+	case <-remote.WaitUntilClosed():
+	case <-ctx.Done():
+		t.Fatal("backend failure did not close connection")
+	}
+}
+
+func TestServiceStopDoesNotWaitForBackend(t *testing.T) {
 	backend := &serviceBackend{entered: make(chan struct{}), release: make(chan struct{})}
-	shutdown := make(chan struct{})
-	s := newTestService(t, 1, backend, func() { close(shutdown) })
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(backend.release) }) }
+	defer release()
+	s := newTestService(t, 1, backend, noopShutdown)
 	done := make(chan error, 1)
 	go func() { done <- s.AddXshardTxList(common.Hash{}, nil) }()
 	select {
@@ -227,33 +252,25 @@ func TestServiceStopWaitsForBackend(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() { s.Stop(); close(stopped) }()
 	select {
-	case <-s.ctx.Done():
+	case <-stopped:
 	case <-time.After(5 * time.Second):
-		t.Fatal("stop did not cancel lifecycle")
+		t.Fatal("Stop waited for running backend call")
 	}
 	select {
-	case <-stopped:
-		t.Fatal("Stop returned while backend still uses resources")
+	case <-done:
+		t.Fatal("running backend call was interrupted")
 	default:
 	}
-	if err := s.AddXshardTxList(common.Hash{}, nil); err == nil {
-		t.Fatal("new request admitted during stop")
-	}
-	close(backend.release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+	release()
 	select {
-	case <-stopped:
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop did not finish")
+		t.Fatal("backend call did not finish after release")
 	}
-	if err := s.CreateShards(qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{})); err == nil {
-		t.Fatal("late initialization admitted after Stop")
-	}
-	if backend.inits.Load() != 0 {
-		t.Fatal("late request reached backend")
-	}
+
 }
 
 func TestServiceStopClosesPendingRPC(t *testing.T) {
@@ -369,7 +386,7 @@ func TestServiceFailureShutdown(t *testing.T) {
 			if err := a.DialToSlave(ctx, wire.SlaveInfo{Host: []byte("127.0.0.1"), Port: uint16(addr.Port), ChainID: id}); err != nil {
 				t.Fatal(err)
 			}
-			peer := a.xshard.Lookup(big.NewInt(2))
+			peer := a.xshardManager.Lookup(big.NewInt(2))
 			// Keep a business request running while communication shuts down.
 			// Cleanup also releases it if an assertion fails.
 			var releaseOnce sync.Once
@@ -404,14 +421,9 @@ func TestServiceFailureShutdown(t *testing.T) {
 				t.Fatal("owner not notified while backend was still running")
 			}
 			select {
-			case <-a.ctx.Done():
-			case <-ctx.Done():
-				t.Fatal("failure did not stop service")
-			}
-			select {
 			case <-done:
-				t.Fatal("owner closed before business request finished")
-			default:
+			case <-ctx.Done():
+				t.Fatal("owner did not stop service while backend was still running")
 			}
 			release()
 			select {
@@ -435,12 +447,71 @@ func TestServiceFailureShutdown(t *testing.T) {
 			}
 			a.shutdown()
 			a.Stop()
-			if err := a.AddXshardTxList(common.Hash{}, nil); err == nil {
-				t.Fatal("late deposit handler admitted after Stop")
-			}
 			if calls.Load() != 1 {
 				t.Fatalf("owner shutdown calls: %d", calls.Load())
 			}
 		})
+	}
+}
+
+func TestServiceWithShard(t *testing.T) {
+	chainID := big.NewInt(10001)
+	config := params.NewTestQuarkChainConfig(10001, 10001)
+	s, err := NewService(ServiceConfig{
+		ListenAddr: "127.0.0.1:0", LocalChainID: chainID,
+		ConfiguredChainIDs: []*big.Int{chainID}, Shutdown: noopShutdown,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := rawdb.NewMemoryDatabase()
+	t.Cleanup(func() { db.Close() })
+	alloc := core.SystemContractAllocs()
+	maps.Copy(alloc, core.PoSWStakingContractAllocs(config))
+	backend, err := shard.New(config, &core.Genesis{
+		GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+		ExtraData: (&types.QKCExtra{ChainID: chainID}).Encode(), Alloc: alloc,
+	}, db, nil, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { backend.Stop() })
+	t.Cleanup(func() { s.Stop() })
+	if err := s.BindShard(backend); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	remote := serviceMaster(t, s, nil)
+	if backend.RootTip() != (common.Hash{}) {
+		t.Fatal("identity PING initialized shard")
+	}
+	root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+		Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
+	}, qkctypes.ShardBlockHeaders{backend.CurrentBlock()}, nil)
+	encoded, err := root.MarshalSSZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceRPC(t, remote, wire.ClusterOpPing, &wire.PingRequest{HasRootTip: true, RootTip: encoded})
+	if backend.RootTip() != root.Hash() {
+		t.Fatal("root PING did not initialize real shard")
+	}
+	headers := serviceRPC(t, remote, wire.ClusterOpGetUnconfirmedHeadersRequest, &wire.GetUnconfirmedHeadersRequest{}).(*wire.GetUnconfirmedHeadersResponse)
+	if headers.ErrorCode != 0 || len(headers.HeaderList) != 0 {
+		t.Fatalf("genesis headers: %+v", headers)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var remoteErr *comm.RemoteError
+	if err := s.SendShardBlockHeaderToMaster(ctx, backend.CurrentBlock(), nil); !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
+		t.Fatalf("real shard header report: %v", err)
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.GetUnconfirmedHeaderList(); err != nil {
+		t.Fatalf("Service.Stop closed borrowed shard: %v", err)
 	}
 }

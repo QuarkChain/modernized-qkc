@@ -36,7 +36,8 @@ import (
 
 // ShardBackend is the business state borrowed by Service. Its methods must be
 // safe for concurrent calls. Service never creates or closes the backend.
-// The existing shard.Shard satisfies this interface implicitly.
+// Return *comm.RemoteError for an explicit protocol error code; other errors
+// close the connection. The existing shard.Shard satisfies this interface implicitly.
 type ShardBackend interface {
 	Init(*qkctypes.RootBlock) error
 	AddRootBlock(*qkctypes.RootBlock) (bool, error)
@@ -66,16 +67,13 @@ type ServiceConfig struct {
 // The first accepted connection must be Master; Master must connect to every
 // slave before instructing any slave to dial another, as required by the manager.
 type Service struct {
-	cfg      ServiceConfig
-	backend  ShardBackend
-	xshard   *XshardConnManager
-	master   *MasterConn
-	listener net.Listener
+	cfg           ServiceConfig
+	backend       ShardBackend
+	xshardManager *XshardConnManager
+	master        *MasterConn
+	listener      net.Listener
 
-	mu       sync.Mutex // protects lifecycle and admission to wg
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
+	mu       sync.Mutex // protects lifecycle
 	stopOnce sync.Once
 	stopping bool
 }
@@ -87,6 +85,8 @@ var (
 	_ XshardRequestHandler = (*Service)(nil)
 	_ SlaveDialer          = (*Service)(nil)
 )
+
+// -- Communication lifecycle and topology ------------------------------------
 
 // NewService creates an inactive service without opening a listener or invoking
 // the backend. LocalChainID is copied; the manager records configured IDs.
@@ -100,13 +100,12 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = log.Root()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{cfg: cfg, ctx: ctx, cancel: cancel}
+	s := &Service{cfg: cfg}
 	manager, err := NewXshardConnManager(cfg.LocalChainID, cfg.ConfiguredChainIDs, cfg.MaxPayloadSize, s, s.shutdown, cfg.Logger)
 	if err != nil {
 		return nil, err
 	}
-	s.xshard = manager
+	s.xshardManager = manager
 	s.cfg.LocalChainID = new(big.Int).Set(cfg.LocalChainID)
 	return s, nil
 }
@@ -138,7 +137,6 @@ func (s *Service) Start() error {
 		return err
 	}
 	s.listener = listener
-	s.wg.Add(1)
 	go s.acceptLoop(listener)
 	return nil
 }
@@ -152,38 +150,34 @@ func (s *Service) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Stop rejects new work, cancels dials and closes the listener and connections,
-// then waits for admitted calls and connection workers. Closing communication
-// does not close the backend: its owner may release chain resources after Stop.
-// Stop must not be called from a backend method running in a service request.
+// Stop closes the listener and connections.
+// It does not cancel or wait for running backend calls, or close the backend.
 func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
 		s.stopping = true
-		s.cancel()
 		listener, master := s.listener, s.master
 		s.mu.Unlock()
+
 		if listener != nil {
 			listener.Close()
 		}
-		s.xshard.Close()
+		s.xshardManager.Close()
 		if master != nil {
 			master.Close()
 		}
-		s.wg.Wait()
 	})
 	return nil
 }
 
 // shutdown immediately reports connection/listener failure to the owner.
-// The owner schedules node shutdown outside this goroutine, since the caller
-// may itself be counted in wg. Service.Stop performs the resource cleanup.
+// The owner schedules node shutdown asynchronously. Service.Stop performs
+// the communication resource cleanup.
 func (s *Service) shutdown() {
 	s.cfg.Shutdown()
 }
 
 func (s *Service) acceptLoop(listener net.Listener) {
-	defer s.wg.Done()
 	for {
 		nc, err := listener.Accept()
 		if err != nil {
@@ -212,114 +206,23 @@ func (s *Service) acceptLoop(listener net.Listener) {
 			s.master = mc
 			mc.Start()
 		} else {
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				s.xshard.HandleInbound(nc)
-			}()
+			go s.xshardManager.HandleInbound(nc)
 		}
 		s.mu.Unlock()
 	}
 }
 
-// begin synchronizes admission with Stop. Chain initialization and readiness
-// belong to the backend and its owner, not to this communication service.
-func (s *Service) begin() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.listener == nil || s.stopping {
-		return errors.New("slave service is not running")
-	}
-	s.wg.Add(1)
-	return nil
-}
-
-// businessError preserves explicit codes and translates ordinary backend
-// rejections into a generic nonzero response, keeping the connection usable.
-func (s *Service) businessError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var remote *comm.RemoteError
-	if errors.As(err, &remote) {
-		return err
-	}
-	s.cfg.Logger.Debug("slave business request rejected", "err", err)
-	return &comm.RemoteError{Code: 1}
-}
-
-// CreateShards handles Master's PING(rootTip) after slave interconnection.
-// The single Shard already exists; Init establishes its root checkpoint.
-func (s *Service) CreateShards(root *qkctypes.RootBlock) error {
-	if err := s.begin(); err != nil {
-		return err
-	}
-	defer s.wg.Done()
-	return s.backend.Init(root)
-}
-
-func (s *Service) AddRootBlock(root *qkctypes.RootBlock) error {
-	if err := s.begin(); err != nil {
-		return s.businessError(err)
-	}
-	defer s.wg.Done()
-	_, err := s.backend.AddRootBlock(root)
-	return s.businessError(err)
-}
-
-func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (*comm.RootChainStakesResult, error) {
-	if err := s.begin(); err != nil {
-		return nil, s.businessError(err)
-	}
-	defer s.wg.Done()
-	stakes, signer, err := s.backend.GetRootChainStakes(address, hash)
-	if err != nil {
-		return nil, s.businessError(err)
-	}
-	return &comm.RootChainStakesResult{Stakes: stakes, Signer: signer}, nil
-}
-
-func (s *Service) GetUnconfirmedHeaders() ([]*types.Header, error) {
-	if err := s.begin(); err != nil {
-		return nil, s.businessError(err)
-	}
-	defer s.wg.Done()
-	headers, err := s.backend.GetUnconfirmedHeaderList()
-	return headers, s.businessError(err)
-}
-
-func (s *Service) AddXshardTxList(hash common.Hash, deposits []*types.DepositTx) error {
-	if err := s.begin(); err != nil {
-		return s.businessError(err)
-	}
-	defer s.wg.Done()
-	return s.businessError(s.backend.AddXshardTxList(hash, deposits))
-}
-
-// DialToSlave binds topology requests to the service lifecycle even though
-// MasterConn currently supplies context.Background to its dialer.
+// DialToSlave connects a slave advertised by Master through the connection manager.
 func (s *Service) DialToSlave(ctx context.Context, info wire.SlaveInfo) error {
-	if err := s.begin(); err != nil {
-		return err
-	}
-	defer s.wg.Done()
-	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(s.ctx, cancel)
-	defer func() { stop(); cancel() }()
-	if s.ctx.Err() != nil {
-		cancel()
-	}
-	return s.xshard.DialToSlave(ctx, info)
+	return s.xshardManager.DialToSlave(ctx, info)
 }
+
+// -- Business calls into communication (shard.ClusterClient) ------------------
 
 // BroadcastXShardTxList implements shard.ClusterClient for the current topology
 // of one host per chain. Empty deposit lists are sent and require an ACK too.
 func (s *Service) BroadcastXShardTxList(ctx context.Context, chainID *big.Int, hash common.Hash, deposits []*types.DepositTx) error {
-	if err := s.begin(); err != nil {
-		return err
-	}
-	defer s.wg.Done()
-	c := s.xshard.Lookup(chainID)
+	c := s.xshardManager.Lookup(chainID)
 	if c == nil {
 		return fmt.Errorf("no xshard connection for chain %v", chainID)
 	}
@@ -329,10 +232,6 @@ func (s *Service) BroadcastXShardTxList(ctx context.Context, chainID *big.Int, h
 // SendShardBlockHeaderToMaster implements shard.ClusterClient. Success means
 // that Master returned a zero ErrorCode, not merely that the write completed.
 func (s *Service) SendShardBlockHeaderToMaster(ctx context.Context, header *types.Header, amount *uint256.Int) error {
-	if err := s.begin(); err != nil {
-		return err
-	}
-	defer s.wg.Done()
 	s.mu.Lock()
 	master := s.master
 	s.mu.Unlock()
@@ -340,4 +239,34 @@ func (s *Service) SendShardBlockHeaderToMaster(ctx context.Context, header *type
 		return errors.New("master connection is not established")
 	}
 	return master.SendAddShardBlockHeader(ctx, header, amount)
+}
+
+// -- Request handlers calling business methods -------------------------------
+
+// CreateShards handles Master's PING(rootTip) after slave interconnection.
+// The single Shard already exists; Init establishes its root checkpoint.
+func (s *Service) CreateShards(root *qkctypes.RootBlock) error {
+	return s.backend.Init(root)
+}
+
+func (s *Service) AddRootBlock(root *qkctypes.RootBlock) error {
+	_, err := s.backend.AddRootBlock(root)
+	return err
+}
+
+func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (*comm.RootChainStakesResult, error) {
+	stakes, signer, err := s.backend.GetRootChainStakes(address, hash)
+	if err != nil {
+		return nil, err
+	}
+	return &comm.RootChainStakesResult{Stakes: stakes, Signer: signer}, nil
+}
+
+func (s *Service) GetUnconfirmedHeaders() ([]*types.Header, error) {
+	headers, err := s.backend.GetUnconfirmedHeaderList()
+	return headers, err
+}
+
+func (s *Service) AddXshardTxList(hash common.Hash, deposits []*types.DepositTx) error {
+	return s.backend.AddXshardTxList(hash, deposits)
 }
