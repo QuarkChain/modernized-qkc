@@ -77,6 +77,8 @@ linters:
       - path: (.+)\.go$
         text: 'SA1029: should not use built-in type string as key for value'
     paths:
+      # methodical-ssz omits the standard generated-code header.
+      - qkc/wire/messages_ssz.go
       - core/genesis_alloc.go
       - third_party$
       - builtin$

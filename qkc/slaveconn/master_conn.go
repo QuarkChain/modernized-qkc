@@ -150,11 +150,7 @@ func (mc *MasterConn) SendAddShardBlockHeader(ctx context.Context, header *types
 	}
 	request := &wire.AddShardBlockHeaderRequest{ShardBlockHeader: headerData}
 	if coinbaseAmount != nil {
-		encodedAmount, err := coinbaseAmount.MarshalSSZ()
-		if err != nil {
-			return fmt.Errorf("encode coinbase amount: %w", err)
-		}
-		copy(request.CoinbaseAmount[:], encodedAmount)
+		request.CoinbaseAmount = *coinbaseAmount
 	}
 	resp, err := mc.SendRPC(ctx, byte(wire.ClusterOpAddShardBlockHeaderRequest), request)
 	if err != nil {
@@ -198,11 +194,7 @@ func (mc *MasterConn) handlePing(req wire.SSZMessage) (wire.SSZMessage, error) {
 			return nil, err
 		}
 	}
-	chainID, err := wire.ChainIDToSSZ(mc.localChainID)
-	if err != nil {
-		return nil, err
-	}
-	return &wire.PongResponse{ChainID: chainID}, nil
+	return &wire.PongResponse{ChainID: *uint256.MustFromBig(mc.localChainID)}, nil
 }
 
 // handleConnectToSlaves connects to the slaves advertised by the master.
@@ -214,11 +206,11 @@ func (mc *MasterConn) handleConnectToSlaves(req wire.SSZMessage) (wire.SSZMessag
 		wg.Add(1)
 		go func(i int, info wire.SlaveInfo) {
 			defer wg.Done()
-			dialInfo := comm.SlaveInfo{Host: string(info.Host), Port: info.Port, ChainID: wire.ChainIDFromSSZ(info.ChainID)}
+			dialInfo := comm.SlaveInfo{Host: string(info.Host), Port: info.Port, ChainID: info.ChainID.ToBig()}
 			if err := mc.slaveDialer.DialToSlave(context.Background(), dialInfo); err != nil {
 				result.ResultList[i] = []byte(err.Error())
 			}
-		}(i, info)
+		}(i, *info)
 	}
 	wg.Wait()
 	return result, nil
@@ -257,11 +249,7 @@ func (mc *MasterConn) handleGetRootChainStakes(req wire.SSZMessage) (wire.SSZMes
 		return nil, errors.New("root chain stakes handler returned no result")
 	}
 	response.Signer = result.Signer
-	encoded, err := result.Stakes.MarshalSSZ()
-	if err != nil {
-		return nil, fmt.Errorf("encode root chain stakes: %w", err)
-	}
-	copy(response.Stakes[:], encoded)
+	response.Stakes = *result.Stakes
 	return response, nil
 }
 

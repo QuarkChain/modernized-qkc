@@ -48,7 +48,7 @@ func headerRequest(t *testing.T) *wire.AddShardBlockHeaderRequest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &wire.AddShardBlockHeaderRequest{ShardBlockHeader: encoded, CoinbaseAmount: [32]byte{9}}
+	return &wire.AddShardBlockHeaderRequest{ShardBlockHeader: encoded, CoinbaseAmount: uint256.Int{9}}
 }
 
 func newSlaveTestPair(t *testing.T, chainID *big.Int, handler SlaveRequestHandler, peerHandlers map[byte]conn.TypedHandler) (*SlaveConn, *conn.BaseConn) {
@@ -225,10 +225,7 @@ func TestSlaveConnRPC(t *testing.T) {
 func TestSlaveConnRejectsWrongIdentity(t *testing.T) {
 	for _, chainID := range []*big.Int{new(big.Int), big.NewInt(2), new(big.Int).Lsh(big.NewInt(1), 100)} {
 		t.Run(chainID.String(), func(t *testing.T) {
-			encoded, err := wire.ChainIDToSSZ(chainID)
-			if err != nil {
-				t.Fatal(err)
-			}
+			encoded := *uint256.MustFromBig(chainID)
 			sc, _ := newSlaveTestPair(t, big.NewInt(1), nil, map[byte]conn.TypedHandler{
 				byte(wire.ClusterOpPing): func(wire.SSZMessage) (wire.SSZMessage, error) {
 					return &wire.PongResponse{ChainID: encoded}, nil

@@ -14,35 +14,42 @@ hand.
 3. Register the opcode and message type in `NewClusterMessage` or
    `NewCommandMessage` in `protocol.go`. Register both request and response
    opcodes for an RPC.
-4. From the repository root, generate the codecs:
+4. From the repository root, generate the SSZ codecs:
 
    ```sh
    go generate ./qkc/wire
    ```
 
+   This generates `messages_ssz.go` using methodical-ssz and formats
+   it with goimports. Both tools use the versions recorded in `go.mod`.
+   Every struct declared in `messages.go` is included in generation.
+
 5. Add registry, SSZ round-trip, malformed-input, and golden-encoding cases to
    `messages_test.go`, then run `go test ./qkc/wire`.
+6. Commit `messages_ssz.go` together with the schema and test changes.
 
-The `go:generate` directive runs `sszgen` against `messages.go`. It scans the
-structs automatically. If a schema uses a named type from another package,
-the generator may need that type's source file in its `--include` option;
-`common/types.go` is already included for `common.Hash` and `common.Address`.
+`make qkc`, `make all`, and `make test` also regenerate the wire codecs
+automatically before building.
+
+Direct `go build`, `go test`, and `go run build/ci.go install` commands do not
+regenerate codecs. Run `go generate ./qkc/wire` first when using those commands
+after changing `messages.go`.
 
 ## Field rules
 
-- **Fixed values:** Use fixed-width integers and arrays, or `ssz-size:"N"` for
+- **Fixed values:** Use fixed-width unsigned integers and arrays, or `ssz-size:"N"` for
   a fixed-size slice. SSZ integers are little-endian; byte arrays are copied
   unchanged.
-- **Variable bytes and lists:** `[]byte` and `Data` are byte lists; `[]T` is a
-  list of `T`, and `[]Data` is a list of byte lists. Their lengths come from SSZ
-  offsets and the enclosing message boundary. Add a numeric `ssz-max` to each
-  variable-length field. For nested variable lists, provide one limit per
-  dimension and use `ssz-size:"?,?"`.
-- **Optional values:** SSZ has no implicit nullable Go pointer. Represent
-  presence explicitly in the schema and test both present and absent cases.
-- **Limits:** Prefer a protocol-defined `ssz-max` value. The current
-  `4294967295` tags are broad generator bounds, not intended message sizes;
-  the frame size limit still applies. See the TODO in `messages.go`.
+- **Byte lists:** Use `[]byte` or `Data` with `ssz-max:"N"`.
+- **Lists of byte lists:** Use `[][]byte` with `ssz-max:"N,M"` for the schema
+  bounds on element count and bytes per element. For `[]Data`, use `ssz-max:"N"` without
+  `ssz-size`; N is the schema bound for both dimensions.
+- **Container lists:** Use `[]*SlaveInfo` with `ssz-max:"N"`. Elements must be
+  non-nil.
+- **Optional values:** Encode presence explicitly, for example with a boolean.
+- **Limits:** Validate received lengths in handlers; generated decoders do not
+  enforce every byte-list bound. The existing `4294967295` tags are broad
+  schema bounds; network payloads are limited to 16 MiB.
 
 ### Encoded objects: `Data`
 
@@ -63,10 +70,10 @@ addresses. They are fixed byte arrays; do not reverse their byte order.
 
 ### Numeric uint256
 
-SSZ generation does not support `uint256.Int` directly in these message
-schemas. Represent it as `[UInt256Length]byte` and fill the array using
-`uint256.Int.MarshalSSZAppend(dst[:0])`. The resulting 32 bytes are
-little-endian. Do not apply this numeric byte order rule to hashes.
+Use `uint256.Int` for chain IDs, rewards and stakes. The generated SSZ codec
+encodes these values as 32 little-endian bytes. Convert validated `*big.Int`
+values with `uint256.MustFromBig` and convert back with `.ToBig()`. Shard chain
+IDs must be positive and fit in 256 bits.
 
 ### Network IDs
 
@@ -74,25 +81,3 @@ little-endian. Do not apply this numeric byte order rule to hashes.
 the uint256 chain ID. HELLO encodes it as eight little-endian bytes and has a
 98-byte fixed section. This format is incompatible with peers using the old
 four-byte NetworkID; all peers must use the same HELLO format.
-
-### Chain IDs
-
-Shard identity is the positive `params.ChainConfig.ChainID`, used by signatures,
-the EVM, headers, routing and cross-shard messages. There is no separate shard
-number. `quarkchain.chainIds` must be nonempty and include the local chain ID.
-Its first entry, `quarkchain.chainIds[0]`, receives root rewards and hosts root
-staking. Use the same ordered list on every shard; reordering it changes the
-consensus configuration and is rejected for an initialized chain.
-
-SSZ message `ChainID` fields use the numeric uint256 representation above.
-Use `ChainIDToSSZ` and `ChainIDFromSSZ` to convert between `*big.Int` and these
-fields. Encoding rejects nil, negative and oversized IDs; zero is preserved,
-and handlers must still enforce the positive-ID requirement for shards.
-Business interfaces and P2P frames use `*big.Int`; the P2P frame prefix and the
-QKC header extra encode the ID as 32 big-endian bytes. Zero is reserved for
-root traffic in P2P routing; `RootChainID()` returns an independent zero value
-for each frame. Cross-shard `send` and `SentMessage` use ABI
-`uint256` for the destination chain ID.
-
-These encodings replace the former 4-byte IDs and are incompatible with old
-frames, header extras and outbox ABIs. Use matching peers and new genesis data.
