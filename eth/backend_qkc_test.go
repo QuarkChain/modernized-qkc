@@ -51,8 +51,11 @@ func qkcBackendConfig() ethconfig.Config {
 	config.Genesis = &core.Genesis{
 		Config: chainConfig, Alloc: alloc, GasLimit: 12_000_000,
 		Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
-		ExtraData: (&types.QKCExtra{ChainID: chainConfig.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1}}).Encode(),
 	}
+	config.Genesis.ExtraData = (&types.QKCExtra{
+		ChainID: chainConfig.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+		XShardGasLimit: config.Genesis.GasLimit / params.XShardGasLimitDivisor,
+	}).Encode()
 	config.StateScheme, config.SyncMode = rawdb.HashScheme, ethconfig.FullSync
 	config.DatabaseCache, config.DatabaseHandles = 16, 16
 	config.TrieCleanCache, config.TrieDirtyCache, config.SnapshotCache = 16, 16, 0
@@ -292,11 +295,12 @@ func TestQKCBackendSyncMode(t *testing.T) {
 
 // Startup errors are returned to cmd/geth, which exits rather than retrying New.
 func TestQKCBackendConstructionErrors(t *testing.T) {
-	t.Run("missing genesis", func(t *testing.T) {
+	t.Run("invalid genesis", func(t *testing.T) {
 		config := qkcBackendConfig()
+		config.Genesis.ExtraData = []byte{0}
 		stack := qkcBackendNode(t, t.TempDir())
 		if backend, err := New(stack, &config); err == nil || backend != nil {
-			t.Fatalf("missing persisted genesis accepted: %v", err)
+			t.Fatalf("invalid genesis accepted: %v", err)
 		}
 	})
 	t.Run("invalid tracer", func(t *testing.T) {

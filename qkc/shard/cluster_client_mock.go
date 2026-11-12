@@ -41,7 +41,7 @@ func (*MockClusterClient) BroadcastXShardTxList(_ context.Context, chainID *big.
 	return nil
 }
 
-func (*MockClusterClient) SendMinorBlockHeaderToMaster(_ context.Context, header *types.Header, amount *uint256.Int) error {
+func (*MockClusterClient) SendShardBlockHeaderToMaster(_ context.Context, header *types.Header, amount *uint256.Int) error {
 	log.Info("Mock shard header report", "block", header.Hash(), "coinbaseAmount", amount)
 	return nil
 }
