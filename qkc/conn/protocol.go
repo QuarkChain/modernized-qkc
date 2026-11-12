@@ -25,9 +25,9 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
-// MasterSlaveSerializers returns an independent request/response registry for
-// master-slave connections. Both sides share the protocol; handlers differ.
-func MasterSlaveSerializers() map[byte]*OpSerializer {
+// ClusterSerializers returns an independent request/response registry shared by
+// all cluster connection types. Handlers define which requests each side accepts.
+func ClusterSerializers() map[byte]*OpSerializer {
 	return map[byte]*OpSerializer{
 		byte(wire.ClusterOpPing):                   OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 		byte(wire.ClusterOpConnectToSlavesRequest): OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
@@ -36,14 +36,7 @@ func MasterSlaveSerializers() map[byte]*OpSerializer {
 		byte(wire.ClusterOpGetUnconfirmedHeadersRequest): OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
 		byte(wire.ClusterOpGetRootChainStakesRequest):    OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
 		byte(wire.ClusterOpAddShardBlockHeaderRequest):   OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
-	}
-}
-
-// XshardSerializers returns an independent registry for slave-to-slave RPCs.
-func XshardSerializers() map[byte]*OpSerializer {
-	return map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing):                   OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-		byte(wire.ClusterOpAddXshardTxListRequest): OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+		byte(wire.ClusterOpAddXshardTxListRequest):       OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
 	}
 }
 

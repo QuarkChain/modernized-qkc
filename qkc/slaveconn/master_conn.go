@@ -112,7 +112,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	mc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport:   transport,
 		Forwarder:   forwarder,
-		Serializers: conn.MasterSlaveSerializers(),
+		Serializers: conn.ClusterSerializers(),
 		Handlers: map[byte]conn.TypedHandler{
 			// Handlers process received requests only.
 			// Communication layer.

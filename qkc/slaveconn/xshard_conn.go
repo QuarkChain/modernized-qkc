@@ -82,7 +82,7 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localChainID, remoteChain
 	xc := &XshardConn{handler: handler, localChainID: new(big.Int).Set(localChainID), remoteChainID: remoteChainID, outbound: outbound, pingReceived: make(chan struct{})}
 	xc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport:   transport,
-		Serializers: conn.XshardSerializers(),
+		Serializers: conn.ClusterSerializers(),
 		// Connections are established only between trusted cluster slaves. We do
 		// not gate business handlers on handshake completion because unvalidated
 		// peers cannot reach this listener in the current deployment.
@@ -151,7 +151,7 @@ func (x *XshardConn) SendAddXshardTxList(ctx context.Context, shardBlockHash com
 func (x *XshardConn) handlePing(req wire.SSZMessage) (wire.SSZMessage, error) {
 	ping := req.(*wire.PingRequest)
 	id := wire.ChainIDFromSSZ(ping.ChainID)
-	if err := validateXshardChainID(id); err != nil {
+	if err := conn.ValidateSlaveChainID(id); err != nil {
 		return nil, err
 	}
 
@@ -243,11 +243,4 @@ func (x *XshardConn) sendPing(ctx context.Context) (*big.Int, error) {
 		return nil, fmt.Errorf("unexpected ping response %T", resp)
 	}
 	return wire.ChainIDFromSSZ(pong.ChainID), nil
-}
-
-func validateXshardChainID(id *big.Int) error {
-	if id == nil || id.Sign() <= 0 || id.BitLen() > 256 {
-		return fmt.Errorf("invalid xshard chain ID: %v", id)
-	}
-	return nil
 }

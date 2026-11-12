@@ -80,7 +80,7 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	}
 	sc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport:   transport,
-		Serializers: conn.MasterSlaveSerializers(),
+		Serializers: conn.ClusterSerializers(),
 		Handlers: map[byte]conn.TypedHandler{
 			byte(wire.ClusterOpAddShardBlockHeaderRequest): sc.handleAddShardBlockHeader,
 		},

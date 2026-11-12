@@ -76,7 +76,7 @@ func masterTestPair(t *testing.T, h *masterTestHandler, headerCode uint32, chain
 		t.Fatal(err)
 	}
 	remote := conn.NewBaseConn(conn.Config{Transport: transport,
-		Serializers: conn.MasterSlaveSerializers(), Handlers: map[byte]conn.TypedHandler{byte(wire.ClusterOpAddShardBlockHeaderRequest): func(wire.SSZMessage) (wire.SSZMessage, error) {
+		Serializers: conn.ClusterSerializers(), Handlers: map[byte]conn.TypedHandler{byte(wire.ClusterOpAddShardBlockHeaderRequest): func(wire.SSZMessage) (wire.SSZMessage, error) {
 			return &wire.AddShardBlockHeaderResponse{ErrorCode: headerCode}, nil
 		}}})
 	mc.Start()

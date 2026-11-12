@@ -334,24 +334,22 @@ func serializerMissingCallback(missing string) *OpSerializer {
 // The registry itself does not carry request/response pairing information.
 func TestOpSerializerFor_WireRegistry(t *testing.T) {
 	covered := make(map[wire.ClusterOp]bool)
-	for _, serializers := range []map[byte]*OpSerializer{MasterSlaveSerializers(), XshardSerializers()} {
-		for requestOp, ser := range serializers {
-			for _, tc := range []struct {
-				op      wire.ClusterOp
-				message any
-			}{
-				{wire.ClusterOp(requestOp), ser.NewRequest()},
-				{wire.ClusterOp(ser.ResponseOpCode), ser.NewResponse()},
-			} {
-				registered, err := wire.NewClusterMessage(tc.op)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if reflect.TypeOf(tc.message) != reflect.TypeOf(registered) {
-					t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", tc.op, tc.message, registered)
-				}
-				covered[tc.op] = true
+	for requestOp, ser := range ClusterSerializers() {
+		for _, tc := range []struct {
+			op      wire.ClusterOp
+			message any
+		}{
+			{wire.ClusterOp(requestOp), ser.NewRequest()},
+			{wire.ClusterOp(ser.ResponseOpCode), ser.NewResponse()},
+		} {
+			registered, err := wire.NewClusterMessage(tc.op)
+			if err != nil {
+				t.Fatal(err)
 			}
+			if reflect.TypeOf(tc.message) != reflect.TypeOf(registered) {
+				t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", tc.op, tc.message, registered)
+			}
+			covered[tc.op] = true
 		}
 	}
 	for op := int(wire.ClusterOpBase); op <= math.MaxUint8; op++ {

@@ -69,7 +69,7 @@ func newSlaveTestPair(t *testing.T, chainID *big.Int, handler SlaveRequestHandle
 	}
 	peer := conn.NewBaseConn(conn.Config{
 		Transport:   transport,
-		Serializers: conn.MasterSlaveSerializers(),
+		Serializers: conn.ClusterSerializers(),
 		Handlers:    peerHandlers,
 	})
 	t.Cleanup(func() { sc.Close(); peer.Close() })
