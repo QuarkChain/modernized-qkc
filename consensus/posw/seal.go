@@ -66,6 +66,10 @@ func (p *PoSW) VerifySeal(chain consensus.ChainHeaderReader, header *types.Heade
 	if err != nil {
 		return err
 	}
+	// Simulation keeps staking reads and their errors, and skips only Ethash.
+	if p.simulate {
+		return nil
+	}
 	return p.EthashVerifier.Verify(header.Number.Uint64(), hash, extra.Nonce.Uint64(), extra.MixHash, difficulty)
 }
 

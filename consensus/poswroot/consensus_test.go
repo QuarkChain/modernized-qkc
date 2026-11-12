@@ -737,4 +737,4 @@ func TestRealEthashIsChecked(t *testing.T) {
 	}
 }
 
-var _ consensus.RootChainReader = (*testChain)(nil)
+var _ RootChainReader = (*testChain)(nil)

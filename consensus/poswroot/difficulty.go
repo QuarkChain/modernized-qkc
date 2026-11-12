@@ -22,6 +22,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -37,7 +38,7 @@ type PoSWInfo struct {
 
 // verifySeal selects the effective staking difficulty, then checks Ethash outside
 // simulation. Header fields must already pass verifyHeader.
-func (p *PoSW) verifySeal(chain consensus.RootChainReader, header *qkctypes.RootBlockHeader) error {
+func (p *PoSW) verifySeal(chain RootChainReader, header *qkctypes.RootBlockHeader) error {
 	info, err := GetPoSWInfo(p.config, chain, header)
 	if err != nil {
 		return err
@@ -61,7 +62,7 @@ func (p *PoSW) verifySeal(chain consensus.RootChainReader, header *qkctypes.Root
 // config must pass Check; the header must be valid apart from its unverified seal.
 // Staking disabled or genesis returns nil without reading chain. Mined includes
 // the candidate as if it were added, even when quota is zero or the signature fails.
-func GetPoSWInfo(config *params.QuarkChainConfig, chain consensus.RootChainReader, header *qkctypes.RootBlockHeader) (*PoSWInfo, error) {
+func GetPoSWInfo(config *params.QuarkChainConfig, chain RootChainReader, header *qkctypes.RootBlockHeader) (*PoSWInfo, error) {
 	if !config.PoSW.StakingEnabled || header.Number == 0 {
 		return nil, nil
 	}
@@ -86,16 +87,11 @@ func GetPoSWInfo(config *params.QuarkChainConfig, chain consensus.RootChainReade
 	if stakes == nil {
 		return nil, errors.New("missing root staking result")
 	}
-	quota := new(big.Int).Div(stakes.ToBig(), config.PoSW.StakePerBlockAt(new(big.Int).SetUint64(uint64(header.Number))))
 	info := &PoSWInfo{
 		EffectiveDifficulty: header.Difficulty.ToBig(),
 		Signer:              signer,
-		Quota:               config.PoSW.WindowSize,
+		Quota:               posw.StakeQuota(config.PoSW, new(big.Int).SetUint64(uint64(header.Number)), stakes),
 		Mined:               1,
-	}
-	// Cap before converting: large stakes must not wrap a uint64 quota.
-	if quota.Cmp(new(big.Int).SetUint64(info.Quota)) < 0 {
-		info.Quota = quota.Uint64()
 	}
 	if config.PoSW.WindowSize > 1 {
 		parent, err := chain.GetRootHeader(header.ParentHash)
@@ -143,10 +139,6 @@ func GetPoSWInfo(config *params.QuarkChainConfig, chain consensus.RootChainReade
 	if err != nil || crypto.PubkeyToAddress(*pubkey) != signer {
 		return info, nil
 	}
-	info.EffectiveDifficulty.Div(info.EffectiveDifficulty, new(big.Int).SetUint64(config.PoSW.DiffDivider))
-	if info.EffectiveDifficulty.Sign() == 0 {
-		// A large divider must not turn PoW difficulty into zero.
-		info.EffectiveDifficulty.SetInt64(1)
-	}
+	info.EffectiveDifficulty = posw.DiscountDifficulty(config.PoSW.DiffDivider, info.EffectiveDifficulty)
 	return info, nil
 }

@@ -44,7 +44,7 @@ type PoSW struct {
 	simulate bool // Set only by NewSimulate; skips Ethash verification.
 }
 
-var _ consensus.RootEngine = (*PoSW)(nil)
+var _ RootEngine = (*PoSW)(nil)
 
 // New checks the root consensus settings and the shared shard network settings.
 func New(config *params.QuarkChainConfig) (*PoSW, error) {
@@ -79,7 +79,7 @@ func (p *PoSW) Author(header *qkctypes.RootBlockHeader) (common.Address, error) 
 
 // VerifyBlock validates a non-genesis root. Genesis and its shard confirmation
 // records are established by the root-chain initialization code.
-func (p *PoSW) VerifyBlock(chain consensus.RootChainReader, block *qkctypes.RootBlock) error {
+func (p *PoSW) VerifyBlock(chain RootChainReader, block *qkctypes.RootBlock) error {
 	if chain == nil {
 		return errors.New("missing root chain reader")
 	}
@@ -149,7 +149,7 @@ func (p *PoSW) verifyHeader(header, parent *qkctypes.RootBlockHeader) error {
 // verifyBody checks the shard commitment, known blocks and reward, then grouping,
 // confirmation links, timestamps, per-shard limits and root references.
 // Shards are responsible for validating their blocks' execution and PoW.
-func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootBlock, parent *qkctypes.RootBlockHeader) error {
+func (p *PoSW) verifyBody(chain RootChainReader, block *qkctypes.RootBlock, parent *qkctypes.RootBlockHeader) error {
 	// Match pyquarkchain root_state.validate_block's tracking-data size limit.
 	if len(block.TrackingData()) > 1024 {
 		return errors.New("root tracking data exceeds 1024 bytes")
@@ -251,7 +251,7 @@ func (p *PoSW) verifyBody(chain consensus.RootChainReader, block *qkctypes.RootB
 // isRootDescendant checks whether descendant extends, or is, ancestorHash.
 // It walks parent links like pyquarkchain's is_same_chain. Block/header
 // caching belongs to RootChain.
-func isRootDescendant(chain consensus.RootChainReader, descendant *qkctypes.RootBlockHeader, ancestorHash common.Hash) (bool, error) {
+func isRootDescendant(chain RootChainReader, descendant *qkctypes.RootBlockHeader, ancestorHash common.Hash) (bool, error) {
 	// Missing data is a read error, rather than proof that the roots are unrelated.
 	ancestor, err := chain.GetRootHeader(ancestorHash)
 	if err != nil {
@@ -284,7 +284,7 @@ func isRootDescendant(chain consensus.RootChainReader, descendant *qkctypes.Root
 
 // Prepare fills base difficulty and total difficulty only. The staking discount
 // affects the seal target and never changes these fork-choice fields.
-func (p *PoSW) Prepare(chain consensus.RootChainReader, header *qkctypes.RootBlockHeader) error {
+func (p *PoSW) Prepare(chain RootChainReader, header *qkctypes.RootBlockHeader) error {
 	if chain == nil || header == nil {
 		return errors.New("missing root reader or header")
 	}
@@ -319,7 +319,7 @@ func (p *PoSW) Prepare(chain consensus.RootChainReader, header *qkctypes.RootBlo
 // Finalize prepares a root block for mining. It calculates the reward, then calls
 // RootBlock.Finalize to update the amount and shard-header commitment in place,
 // keeping the block's coinbase address. Errors leave the block unchanged.
-func (p *PoSW) Finalize(chain consensus.RootChainReader, block *qkctypes.RootBlock) (*qkctypes.RootBlock, error) {
+func (p *PoSW) Finalize(chain RootChainReader, block *qkctypes.RootBlock) (*qkctypes.RootBlock, error) {
 	if block == nil {
 		return nil, errors.New("missing root block")
 	}
@@ -353,7 +353,7 @@ func (p *PoSW) Close() error { return p.EthashVerifier.Close() }
 // and rounds once. A non-nil amount identifies a validated shard block.
 // The root's own decayed subsidy is added without reward tax.
 // Finalize and verifyBody share this read-only calculation so their rewards agree.
-func (p *PoSW) coinbaseAmount(chain consensus.RootChainReader, block *qkctypes.RootBlock) (*uint256.Int, error) {
+func (p *PoSW) coinbaseAmount(chain RootChainReader, block *qkctypes.RootBlock) (*uint256.Int, error) {
 	shardAmount := new(big.Int)
 	for i, header := range block.ShardBlockHeaders() {
 		if header == nil {

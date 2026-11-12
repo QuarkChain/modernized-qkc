@@ -42,6 +42,7 @@ type PoSW struct {
 	*EthashVerifier
 	config   *params.ChainConfig // Validated when the engine is constructed.
 	gasLimit uint64              // Fixed shard gas limit copied from genesis, matching pyquarkchain.
+	simulate bool                // Set only by NewSimulate; skips Ethash verification.
 }
 
 var _ consensus.Engine = (*PoSW)(nil)
@@ -70,6 +71,19 @@ func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 		return nil, errors.New("shard genesis chain ID differs from chain config")
 	}
 	return &PoSW{EthashVerifier: NewEthashVerifier(), config: config, gasLimit: genesis.GasLimit}, nil
+}
+
+// NewSimulate keeps shard consensus rules while skipping Ethash verification.
+// TODO: In the New/Init PR, add ConsensusType to params.QuarkChainConfig and have
+// ShardBackend.New instantiate the selected engine, defaulting to PoSW. Nodes on
+// the same chain must agree because this choice changes which seals are valid.
+func NewSimulate(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
+	engine, err := New(config, genesis)
+	if err != nil {
+		return nil, err
+	}
+	engine.simulate = true
+	return engine, nil
 }
 
 // Author returns the coinbase receiving this shard block's subsidy and fees.

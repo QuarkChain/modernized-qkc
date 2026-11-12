@@ -565,3 +565,89 @@ func TestSealParentFork(t *testing.T) {
 		}
 	})
 }
+
+func TestSimulateVerifySeal(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		staking bool
+	}{
+		{name: "ordinary PoW"},
+		{name: "staking", staking: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chain, parent := newTestChain()
+			config := chain.config.QuarkChain.PoSW
+			config.StakingEnabled, config.WindowSize, config.DiffDivider, config.StakePerBlock = test.staking, 3, 100, big.NewInt(100)
+			chain.stakes[parent.Hash()] = uint256.NewInt(100)
+			engine, err := NewSimulate(chain.config, parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			header := child(parent) // The zero Ethash mix hash is invalid.
+			before := header.Hash()
+			var reader consensus.ChainHeaderReader = chain
+			if !test.staking {
+				// Disabled staking must work without the state-reading interface.
+				reader = struct{ consensus.ChainHeaderReader }{chain}
+			}
+			var verifier consensus.SealVerifier = engine
+			if err := verifier.VerifySeal(reader, header); err != nil {
+				t.Fatalf("simulated seal: %v", err)
+			}
+			if header.Hash() != before {
+				t.Fatal("simulation modified the header")
+			}
+			if test.staking && chain.stakeParent != parent.Hash() {
+				t.Fatal("simulation did not read the actual parent state")
+			}
+			normal := newTestEngine(t, chain)
+			if err := normal.VerifySeal(reader, header); err == nil || err.Error() != "invalid Ethash mix hash" {
+				t.Fatalf("normal PoSW must reject the invalid seal: %v", err)
+			}
+			header.Time = parent.Time
+			if err := engine.VerifyHeader(chain, header); !errors.Is(err, errOlderBlockTime) {
+				t.Fatalf("simulated header validation: have %v, want %v", err, errOlderBlockTime)
+			}
+		})
+	}
+}
+
+func TestSimulateVerifySealErrors(t *testing.T) {
+	chain, genesis := newTestChain()
+	config := chain.config.QuarkChain.PoSW
+	config.StakingEnabled, config.WindowSize, config.DiffDivider, config.StakePerBlock = true, 3, 100, big.NewInt(100)
+	parent := child(genesis)
+	chain.headers[parent.Hash()] = parent
+	chain.stakes[parent.Hash()] = uint256.NewInt(100)
+	header := child(parent)
+	engine, err := NewSimulate(chain.config, genesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	chain.stakeErr = consensus.ErrPrunedAncestor
+	if err := engine.VerifySeal(chain, header); !errors.Is(err, consensus.ErrPrunedAncestor) {
+		t.Fatalf("missing parent state: have %v, want ErrPrunedAncestor", err)
+	}
+	chain.stakeErr = nil
+	delete(chain.headers, genesis.Hash())
+	if err := engine.VerifySeal(chain, header); !errors.Is(err, consensus.ErrUnknownAncestor) {
+		t.Fatalf("missing history: have %v, want ErrUnknownAncestor", err)
+	}
+	header.MixDigest = common.Hash{}
+	if err := engine.VerifySeal(chain, header); !errors.Is(err, errInvalidDifficulty) {
+		t.Fatalf("zero difficulty: have %v, want %v", err, errInvalidDifficulty)
+	}
+}
+
+func TestNewSimulateValidation(t *testing.T) {
+	chain, genesis := newTestChain()
+	if engine, err := NewSimulate(nil, genesis); err == nil || engine != nil {
+		t.Fatalf("accepted missing configuration: %v, %v", engine, err)
+	}
+	if engine, err := NewSimulate(chain.config, nil); err == nil || engine != nil {
+		t.Fatalf("accepted missing genesis: %v, %v", engine, err)
+	}
+}
