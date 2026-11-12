@@ -131,7 +131,7 @@ func runMS1(ctx *cli.Context) error {
 		}
 		includedHeaders = append(includedHeaders, fmt.Sprintf("%s@%s", extra.ChainID.String(), header.Number.String()))
 	}
-	rootRelation := fmt.Sprintf("root=%d -> shard headers [%s]", root.Number(), strings.Join(includedHeaders, ", "))
+	rootRelation := fmt.Sprintf("root: %d -> [%s]", root.Number(), strings.Join(includedHeaders, ", "))
 	data, err := root.MarshalSSZ()
 	if err != nil {
 		return err
@@ -211,7 +211,7 @@ func runMS1(ctx *cli.Context) error {
 			}
 			heights = append(heights, fmt.Sprintf("%s=%d", peer.chainID, height))
 		}
-		fmt.Fprintf(ctx.App.Writer, "%s | shard heads: %s\n", rootRelation, strings.Join(heights, "  "))
+		fmt.Fprintf(ctx.App.Writer, "%s | shards: %s\n", rootRelation, strings.Join(heights, "  "))
 		select {
 		case <-runCtx.Done():
 			return nil

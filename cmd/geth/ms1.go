@@ -174,6 +174,6 @@ func (ms1ClusterClient) BroadcastXShardTxList(ctx context.Context, _ *big.Int, _
 	return ctx.Err()
 }
 
-func (ms1ClusterClient) SendMinorBlockHeaderToMaster(ctx context.Context, _ *types.Header, _ *uint256.Int) error {
+func (ms1ClusterClient) SendShardBlockHeaderToMaster(ctx context.Context, _ *types.Header, _ *uint256.Int) error {
 	return ctx.Err()
 }
