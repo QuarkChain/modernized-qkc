@@ -40,7 +40,7 @@ BerlinBlock = "0"
 LondonBlock = "0"
 
 [Eth.Genesis.Config.QuarkChain]
-ConsensusType = "POW_ETHASH"
+ConsensusType = "POW_SIMULATE"
 ChainIDs = ["100001", "100002"]
 RewardTaxRate = "0.5"
 MaxBlocksPerRootBlock = 18

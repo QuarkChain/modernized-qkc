@@ -58,7 +58,7 @@ var _ MinerBackend = (*Shard)(nil)
 // sync are ready. Stop running tasks and chain components before closing the DB.
 type Shard struct {
 	chain         *ShardChain
-	engine        consensus.Engine
+	engine        consensus.Engine // Owned engine; nil when the chain is borrowed.
 	clusterClient ClusterClient
 	stopOnce      sync.Once
 	stopErr       error
@@ -102,6 +102,22 @@ func New(chainConfig *params.ChainConfig, genesis *core.Genesis, db ethdb.Databa
 	return &Shard{chain: NewShardChain(db, chain, nil), engine: engine, clusterClient: client}, nil
 }
 
+// NewWithChain wraps an existing shard chain and its bound builder. The caller
+// owns the blockchain, engine and database and must stop mining and requests
+// before closing them. Stop does not close these borrowed resources.
+func NewWithChain(chain *ShardChain, client ClusterClient) (*Shard, error) {
+	if chain == nil {
+		return nil, errors.New("missing shard chain")
+	}
+	if chain.chain.Config().QuarkChain == nil {
+		return nil, errNotQuarkChain
+	}
+	if client == nil {
+		return nil, errors.New("missing cluster client")
+	}
+	return &Shard{chain: chain, clusterClient: client}, nil
+}
+
 // Init uses the checkpoint received from master to set the root tip and restore
 // the shard head to its last confirmed block. Root-chain recovery is responsible
 // for selecting the checkpoint before calling Init. On restart, pyquarkchain's
@@ -116,8 +132,10 @@ func (s *Shard) Init(root *qkctypes.RootBlock) error {
 // Stop releases owned resources once. The caller retains the database and client.
 func (s *Shard) Stop() error {
 	s.stopOnce.Do(func() {
-		s.chain.chain.Stop()
-		s.stopErr = s.engine.Close()
+		if s.engine != nil {
+			s.chain.chain.Stop()
+			s.stopErr = s.engine.Close()
+		}
 	})
 	return s.stopErr
 }
