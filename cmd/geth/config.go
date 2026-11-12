@@ -289,8 +289,10 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		utils.RegisterEthStatsService(stack, backend, cfg.Ethstats.URL)
 	}
 
-	if backend.ChainConfig().QuarkChain != nil {
-		// Shards do not use Ethereum sync overrides or the Beacon Engine API.
+	// QKC uses PoSW; skip native sync overrides, Engine API and beacon clients.
+	// TODO(M2): When enabling QKC P2P and sync, move this check below
+	// utils.RegisterSyncOverrideService. Keep Engine API and beacon clients disabled.
+	if eth.BlockChain().Config().QuarkChain != nil {
 		return stack
 	}
 

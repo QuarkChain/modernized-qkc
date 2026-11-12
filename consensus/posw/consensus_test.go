@@ -106,7 +106,12 @@ func TestNew(t *testing.T) {
 			t.Fatalf("invalid config accepted: engine %v, error %v", engine, err)
 		}
 	}
-	for _, genesis := range []*types.Header{nil, {GasLimit: params.MaxGasLimit + 1}} {
+	for _, genesis := range []*types.Header{
+		nil,
+		{GasLimit: params.MaxGasLimit + 1},
+		{GasLimit: genesis.GasLimit, Extra: []byte{0xff}},
+		{GasLimit: genesis.GasLimit, Extra: (&types.QKCExtra{ChainID: big.NewInt(10002)}).Encode()},
+	} {
 		if engine, err := New(chain.config, genesis); err == nil || engine != nil {
 			t.Fatalf("invalid genesis accepted: engine %v, error %v", engine, err)
 		}
