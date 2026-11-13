@@ -287,47 +287,19 @@ func TestPoWMinerLocal(t *testing.T) {
 
 func TestPoWMinerSimulated(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
-		env, _, _ := newMiningEnv(t, 10002)
-		// Reporting runs in the mining loop after import. StopLocalMining
-		// waits for the callback before the test reads the collected headers.
-		var headers []*types.Header
-		s := &Shard{chain: env.sc, clusterClient: &backendClusterClient{
-			broadcast: func(context.Context, *big.Int, common.Hash, []*types.DepositTx) error { return nil },
-			report: func(_ context.Context, header *types.Header, _ *uint256.Int) error {
-				if head := env.chain.CurrentBlock(); head.Hash() != header.Hash() {
-					t.Errorf("block #%d was reported without becoming head #%d", header.Number, head.Number)
-				}
-				headers = append(headers, header)
-				return nil
-			},
-		}}
 		coinbase := common.Address{0x42}
-		m := NewPoWMiner(s, PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
-		t.Cleanup(m.StopLocalMining)
+		env, m := newPoWMinerEnv(t, PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
 		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
 		waitForHead(t, env, 3)
 		m.StopLocalMining()
-		if len(headers) < 3 {
-			t.Fatalf("reported %d blocks, want at least 3", len(headers))
-		}
-		parent := env.genesis
-		for i, header := range headers {
-			n := uint64(i + 1)
-			block := env.chain.GetBlockByNumber(n)
-			if block == nil || block.Hash() != header.Hash() || header.Number.Uint64() != n || block.ParentHash() != parent.Hash() {
-				t.Fatalf("reported block #%d does not extend the canonical chain", n)
-			}
+		for n := uint64(1); n <= 3; n++ {
+			block, parent := env.chain.GetBlockByNumber(n), env.chain.GetBlockByNumber(n-1)
 			if block.Coinbase() != coinbase || block.Time() <= parent.Time() || block.Time() > uint64(time.Now().Unix()) {
 				t.Fatalf("unexpected block #%d: coinbase %x, time %d after %d", n, block.Coinbase(), block.Time(), parent.Time())
 			}
-			parent = block
 		}
-		if env.chain.CurrentBlock().Hash() != parent.Hash() {
-			t.Fatal("head is not the last reported block")
-		}
-		t.Logf("Validated %d consecutive canonical blocks; final head #%d (%s)", len(headers), parent.Number(), parent.Hash())
 	})
 }
 

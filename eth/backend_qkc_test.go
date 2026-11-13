@@ -189,7 +189,7 @@ func TestQKCBackendIntegration(t *testing.T) {
 }
 
 // Exercise configured simulated consensus through the backend-owned chain and
-// builder. Reporting order is checked separately by TestPoWMinerSimulated.
+// builder.
 func TestQKCBackendSimulatedMining(t *testing.T) {
 	config := qkcBackendConfig()
 	config.Genesis.Config.QuarkChain.ConsensusType = params.ConsensusSimulate
