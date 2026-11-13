@@ -50,9 +50,10 @@ type XshardConnManager struct {
 	conns       map[string]*XshardConn
 	connections map[*XshardConn]struct{}
 
-	closed        bool
-	shutdownOnce  sync.Once
-	shutdownSlave func() // Stops the slave after an indexed connection drops.
+	handlerWaiters sync.WaitGroup // tracks handlers even on rejected or unindexed connections
+	closed         bool
+	shutdownOnce   sync.Once
+	shutdownSlave  func() // Stops the slave after an indexed connection drops.
 }
 
 // Public API
@@ -250,6 +251,12 @@ func (p *XshardConnManager) Close() {
 	p.log.Info("xshard manager closed", "connections", len(allConns))
 }
 
+// WaitHandlers waits for handlers on all tracked connections after Close.
+// It must be called by the owner, never by a connection handler.
+func (p *XshardConnManager) WaitHandlers() {
+	p.handlerWaiters.Wait()
+}
+
 // Internal implementation
 
 // rejectConnection closes a tracked but not-yet-registered connection and
@@ -312,8 +319,8 @@ func (p *XshardConnManager) watchConnection(conn *XshardConn) {
 	}
 }
 
-// trackConnection registers a newly created conn. It reports false if the
-// manager is already closed.
+// trackConnection registers a newly created conn and tracks its handlers until
+// they finish after closure. It reports false if the manager is already closed.
 func (p *XshardConnManager) trackConnection(conn *XshardConn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -321,7 +328,17 @@ func (p *XshardConnManager) trackConnection(conn *XshardConn) bool {
 		return false
 	}
 	p.connections[conn] = struct{}{}
+	// Register under mu before Close allows the owner to wait.
+	p.handlerWaiters.Add(1)
+	go p.waitConnectionHandlers(conn)
 	return true
+}
+
+// waitConnectionHandlers completes the shutdown tracking reserved by
+// trackConnection, even if handshake rejection removes the connection.
+func (p *XshardConnManager) waitConnectionHandlers(conn *XshardConn) {
+	defer p.handlerWaiters.Done()
+	conn.WaitHandlers()
 }
 
 // knownSlave reports whether chainID identifies the local slave or a slave

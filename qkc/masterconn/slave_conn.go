@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -36,20 +35,17 @@ type SlaveConnConfig struct {
 	RemoteChainID  *big.Int
 	MaxPayloadSize uint32
 	Handler        SlaveRequestHandler
-	ShutdownMaster func() // Required; called asynchronously once per connection closure. Must be idempotent and concurrency-safe across connections.
 	Logger         log.Logger
 }
 
 // SlaveConn wraps one master-to-slave TCP connection. The owner establishes the
-// TCP connection, starts it, and verifies the slave with SendPing. Closing the
-// connection invokes the owning master's shutdown callback.
+// TCP connection, starts it, and verifies the slave with SendPing. The
+// owner watches WaitUntilClosed and decides whether to stop the master.
 type SlaveConn struct {
 	*conn.BaseConn
 
-	remoteChainID  *big.Int
-	handler        SlaveRequestHandler
-	shutdownMaster func()
-	shutdownOnce   sync.Once
+	remoteChainID *big.Int
+	handler       SlaveRequestHandler
 }
 
 // NewSlaveConn wraps a TCP connection without starting it. On error the caller
@@ -62,9 +58,6 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("slave handler must not be nil")
 	}
-	if cfg.ShutdownMaster == nil {
-		return nil, errors.New("slave connection shutdown callback must not be nil")
-	}
 	if err := conn.ValidateSlaveChainID(cfg.RemoteChainID); err != nil {
 		return nil, err
 	}
@@ -74,9 +67,8 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	}
 
 	sc := &SlaveConn{
-		remoteChainID:  new(big.Int).Set(cfg.RemoteChainID),
-		handler:        cfg.Handler,
-		shutdownMaster: cfg.ShutdownMaster,
+		remoteChainID: new(big.Int).Set(cfg.RemoteChainID),
+		handler:       cfg.Handler,
 	}
 	sc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport:   transport,
@@ -87,17 +79,7 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 		Forwarder: sc.routeFrame,
 		Logger:    cfg.Logger,
 	})
-	go sc.watchConnection()
 	return sc, nil
-}
-
-// watchConnection shuts down the owning master when its slave connection closes.
-func (sc *SlaveConn) watchConnection() {
-	<-sc.WaitUntilClosed()
-	sc.shutdownOnce.Do(func() {
-		sc.Logger().Info("slave connection closed; shutting down master", "chain_id", sc.remoteChainID)
-		sc.shutdownMaster()
-	})
 }
 
 // RemoteChainID returns an independent copy of the expected remote chain ID.
