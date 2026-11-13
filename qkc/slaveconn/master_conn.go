@@ -58,13 +58,11 @@ type MasterConnConfig struct {
 	MaxPayloadSize uint32 // Zero uses the protocol maximum.
 	Handler        MasterRequestHandler
 	SlaveDialer    SlaveDialer
-	ShutdownSlave  func()
 	Logger         log.Logger
 }
 
 // MasterConn handles master requests and sends shard block notifications.
-// Any close, including the slave's own Close during shutdown, invokes
-// ShutdownSlave once on a separate goroutine, so it must be idempotent.
+// Its owner watches WaitUntilClosed and decides whether to stop the slave.
 type MasterConn struct {
 	*conn.BaseConn
 
@@ -72,9 +70,6 @@ type MasterConn struct {
 
 	handler     MasterRequestHandler
 	slaveDialer SlaveDialer
-
-	shutdownSlave func()
-	shutdownOnce  sync.Once
 }
 
 // NewMasterConn wraps an accepted master connection; the caller starts it with Start.
@@ -88,9 +83,6 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.SlaveDialer == nil {
 		return nil, errors.New("slave dialer must not be nil")
 	}
-	if cfg.ShutdownSlave == nil {
-		return nil, errors.New("master connection shutdown callback must not be nil")
-	}
 	if err := conn.ValidateSlaveChainID(cfg.LocalChainID); err != nil {
 		return nil, err
 	}
@@ -100,10 +92,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	}
 
 	mc := &MasterConn{
-		handler:       cfg.Handler,
-		slaveDialer:   cfg.SlaveDialer,
-		shutdownSlave: cfg.ShutdownSlave,
-		localChainID:  new(big.Int).Set(cfg.LocalChainID),
+		handler:      cfg.Handler,
+		slaveDialer:  cfg.SlaveDialer,
+		localChainID: new(big.Int).Set(cfg.LocalChainID),
 	}
 
 	// The forwarder runs on the reader goroutine and must not block it.
@@ -125,17 +116,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): mc.handleGetUnconfirmedHeaders,
 		}, Logger: cfg.Logger,
 	})
-	go mc.watchConnection()
 	return mc, nil
-}
-
-// watchConnection shuts down the owning slave when its master connection closes.
-func (mc *MasterConn) watchConnection() {
-	<-mc.WaitUntilClosed()
-	mc.shutdownOnce.Do(func() {
-		mc.Logger().Info("master connection closed; shutting down slave")
-		mc.shutdownSlave()
-	})
 }
 
 // SendAddShardBlockHeader reports a shard header and its coinbase reward to

@@ -67,7 +67,7 @@ func masterTestPair(t *testing.T, h *masterTestHandler, headerCode uint32, chain
 	}
 	h.pool = pool
 	a, b := net.Pipe()
-	mc, err := NewMasterConn(MasterConnConfig{Conn: a, LocalChainID: chainID, Handler: h, SlaveDialer: pool, ShutdownSlave: noopShutdown})
+	mc, err := NewMasterConn(MasterConnConfig{Conn: a, LocalChainID: chainID, Handler: h, SlaveDialer: pool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,40 +88,13 @@ func masterTestPair(t *testing.T, h *masterTestHandler, headerCode uint32, chain
 func TestMasterConnRejectsInvalidChainIDs(t *testing.T) {
 	for _, chainID := range []*big.Int{nil, new(big.Int), big.NewInt(-1), new(big.Int).Lsh(big.NewInt(1), 256)} {
 		local, remote := net.Pipe()
-		mc, err := NewMasterConn(MasterConnConfig{Conn: local, LocalChainID: chainID, Handler: &masterTestHandler{}, SlaveDialer: new(testSlaveDialer), ShutdownSlave: noopShutdown})
+		mc, err := NewMasterConn(MasterConnConfig{Conn: local, LocalChainID: chainID, Handler: &masterTestHandler{}, SlaveDialer: new(testSlaveDialer)})
 		local.Close()
 		remote.Close()
 		if err == nil {
 			mc.Close()
 			t.Fatalf("accepted invalid chain ID %v", chainID)
 		}
-	}
-}
-
-func TestMasterConnCloseShutsDownSlave(t *testing.T) {
-	a, b := net.Pipe()
-	defer b.Close()
-	shutdown := make(chan struct{}, 2)
-	mc, err := NewMasterConn(MasterConnConfig{
-		Conn: a, LocalChainID: big.NewInt(1), Handler: &masterTestHandler{},
-		SlaveDialer: new(testSlaveDialer), ShutdownSlave: func() { shutdown <- struct{}{} },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mc.Start()
-	mc.Close()
-	select {
-	case <-shutdown:
-	case <-time.After(5 * time.Second):
-		t.Fatal("slave shutdown callback was not called")
-	}
-	// Closing an already closed connection must not notify shutdown again.
-	mc.Close()
-	select {
-	case <-shutdown:
-		t.Fatal("slave shutdown callback called more than once")
-	case <-time.After(10 * time.Millisecond):
 	}
 }
 
@@ -214,7 +187,7 @@ func TestMasterConnHandlerErrorClosesConnection(t *testing.T) {
 func TestMasterConnIgnoresPeerFrames(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
-	mc, err := NewMasterConn(MasterConnConfig{Conn: a, LocalChainID: big.NewInt(1), Handler: &masterTestHandler{}, SlaveDialer: new(testSlaveDialer), ShutdownSlave: noopShutdown})
+	mc, err := NewMasterConn(MasterConnConfig{Conn: a, LocalChainID: big.NewInt(1), Handler: &masterTestHandler{}, SlaveDialer: new(testSlaveDialer)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +218,7 @@ func TestMasterConnIgnoresPeerFrames(t *testing.T) {
 func TestMasterConnWritesPeerFrame(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
-	mc, err := NewMasterConn(MasterConnConfig{Conn: a, LocalChainID: big.NewInt(1), Handler: &masterTestHandler{}, SlaveDialer: new(testSlaveDialer), ShutdownSlave: noopShutdown})
+	mc, err := NewMasterConn(MasterConnConfig{Conn: a, LocalChainID: big.NewInt(1), Handler: &masterTestHandler{}, SlaveDialer: new(testSlaveDialer)})
 	if err != nil {
 		t.Fatal(err)
 	}
