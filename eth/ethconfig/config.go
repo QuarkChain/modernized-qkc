@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
 )
@@ -92,6 +93,13 @@ type Config struct {
 	// The genesis block, which is inserted if the database is empty.
 	// If nil, the Ethereum main net block is used.
 	Genesis *core.Genesis `toml:",omitempty"`
+
+	// Average block interval for local POW_SIMULATE mining; zero disables it.
+	// This is a runtime setting, independent of genesis and consensus validation.
+	QKCSimulatedBlockTime time.Duration `toml:",omitempty"`
+	// Optional runtime-only search override. Otherwise Ethereum selects the search
+	// from QKCSimulatedBlockTime after validating the actual chain configuration.
+	QKCMiningSearch shard.NonceSearch `toml:"-"`
 
 	// Network ID separates blockchains on the peer-to-peer networking level. When left
 	// zero, the chain ID is used as network ID.

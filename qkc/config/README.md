@@ -24,6 +24,33 @@ Each shard also has its own IPC filename. Runtime data under `qkc-data/` is igno
 by Git. With this binary on `PATH`, a configuration copied to `shard.toml` starts with
 `geth --config shard.toml`. Relative data paths resolve from the working directory.
 
+### Milestone 1: simulated internal mining
+
+The shard TOMLs disable P2P and set `[Eth].QKCSimulatedBlockTime = 1000000000`
+(one second; zero disables local mining). Ethereum starts mining after `qkc m1`
+connects both shards and initializes R0.
+Build with `make geth qkc`, then use three terminals:
+
+```sh
+# Terminal 1
+build/bin/geth --config qkc/config/devnet/shard-100001.toml
+
+# Terminal 2
+build/bin/geth --config qkc/config/devnet/shard-100002.toml
+
+# Terminal 3
+build/bin/qkc m1
+```
+
+The driver reads `PrivateHost` / `PrivatePort` and chain IDs from both shard TOMLs
+(`--config` overrides them, repeat for each shard). It connects the shards and
+sends the [R0 fixture](devnet/root.toml) via PING, starting both miners. It prints
+R0's included header heights once, then logs each reported shard height and
+returns an ACK. IPC and HTTP are not required. Ctrl-C shuts down all three processes.
+Use fresh data directories for each run: the driver does not check existing
+heights, and initializing R0 restores the shard heads to genesis.
+Regenerate R0 if either shard genesis changes.
+
 ### Test accounts
 
 Both shards preallocate 1,000,000 QKC (`1000000000000000000000000` base units) to
@@ -59,7 +86,7 @@ This starts the local blockchain with the existing PoSW engine and geth's node
 lifecycle and RPC services.
 
 Set `ConsensusType` under `[Eth.Genesis.Config.QuarkChain]` to `"POW_ETHASH"`
-(shard 100001) or `"POW_SIMULATE"` (shard 100002). Both use PoSW rules; simulation
+or `"POW_SIMULATE"` (used by both devnet shards). Both use PoSW rules; simulation
 skips Ethash seal verification. Omitting the field retains the legacy Ethash
 behavior. Unknown values, including `"NONE"`, are rejected.
 

@@ -123,10 +123,10 @@ func TestLoadShardGenesisConfig(t *testing.T) {
 		to   string
 		want string
 	}{
-		{name: "ethash"},
-		{name: "simulate", from: "POW_ETHASH", to: "POW_SIMULATE"},
+		{name: "simulate"},
+		{name: "ethash", from: "POW_SIMULATE", to: "POW_ETHASH"},
 		{name: "omitted balance", from: `Balance = "1000000000000000000000000"`},
-		{name: "consensus", from: "POW_ETHASH", to: "NONE", want: "invalid ConsensusType"},
+		{name: "consensus", from: "POW_SIMULATE", to: "NONE", want: "invalid ConsensusType"},
 		{name: "number", from: "Nonce = 0", to: "Nonce = 0\nNumber = 1", want: "number, parent hash and gas used must be zero"},
 		{name: "nonce", from: "Nonce = 0", to: "Nonce = 1", want: "difficulty and nonce must be zero"},
 		{name: "difficulty", from: `Difficulty = "0"`, to: `Difficulty = "1"`, want: "difficulty and nonce must be zero"},
@@ -322,8 +322,8 @@ func TestShardGenesis(t *testing.T) {
 		{name: "restart", config: inline},
 		{name: "different genesis", config: strings.Replace(inline, "Timestamp = 0", "Timestamp = 1", 1), err: "database contains incompatible genesis"},
 		{name: "different rules", config: strings.Replace(inline, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", 1), err: "quarkchain config differs from stored config"},
-		{name: "different consensus", config: strings.Replace(inline, "POW_ETHASH", "POW_SIMULATE", 1), err: "quarkchain config differs from stored config"},
-		{name: "invalid consensus", config: strings.Replace(inline, "POW_ETHASH", "NONE", 1), err: "invalid ConsensusType"},
+		{name: "different consensus", config: strings.Replace(inline, "POW_SIMULATE", "POW_ETHASH", 1), err: "quarkchain config differs from stored config"},
+		{name: "invalid consensus", config: strings.Replace(inline, "POW_SIMULATE", "NONE", 1), err: "invalid ConsensusType"},
 		{name: "database only", config: withoutGenesis},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
