@@ -50,9 +50,10 @@ type XshardConnManager struct {
 	conns       map[string]*XshardConn
 	connections map[*XshardConn]struct{}
 
-	closed        bool
-	shutdownOnce  sync.Once
-	shutdownSlave func() // Stops the slave after an indexed connection drops.
+	handlerWaiters sync.WaitGroup // tracks handlers even on rejected or unindexed connections
+	closed         bool
+	shutdownOnce   sync.Once
+	shutdownSlave  func() // Stops the slave after an indexed connection drops.
 }
 
 // Public API
@@ -136,6 +137,7 @@ func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo comm.Slav
 		conn.Close()
 		return fmt.Errorf("xshard manager closed")
 	}
+	go p.waitConnectionHandlers(conn)
 	conn.Start()
 
 	// The remote slave must confirm its advertised chain ID.
@@ -192,6 +194,7 @@ func (p *XshardConnManager) HandleInbound(nc net.Conn) {
 	// Arm the registration barrier before Start, so the reader goroutine
 	// observes the channel (goroutine creation publishes the write).
 	conn.inboundRegistered = make(chan struct{})
+	go p.waitConnectionHandlers(conn)
 	conn.Start()
 
 	if !conn.waitUntilPingReceived() {
@@ -247,6 +250,12 @@ func (p *XshardConnManager) Close() {
 		conn.Close()
 	}
 	p.log.Info("xshard manager closed", "connections", len(allConns))
+}
+
+// WaitHandlers waits for handlers on all tracked connections after Close.
+// It must be called by the owner, never by a connection handler.
+func (p *XshardConnManager) WaitHandlers() {
+	p.handlerWaiters.Wait()
 }
 
 // Internal implementation
@@ -312,7 +321,7 @@ func (p *XshardConnManager) watchConnection(conn *XshardConn) {
 }
 
 // trackConnection registers a newly created conn. It reports false if the
-// manager is already closed.
+// manager is already closed. On success, the caller must start waitConnectionHandlers.
 func (p *XshardConnManager) trackConnection(conn *XshardConn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -320,7 +329,16 @@ func (p *XshardConnManager) trackConnection(conn *XshardConn) bool {
 		return false
 	}
 	p.connections[conn] = struct{}{}
+	// Register under mu before Close allows the owner to wait.
+	p.handlerWaiters.Add(1)
 	return true
+}
+
+// waitConnectionHandlers completes the shutdown tracking reserved by
+// trackConnection, even if handshake rejection removes the connection.
+func (p *XshardConnManager) waitConnectionHandlers(conn *XshardConn) {
+	defer p.handlerWaiters.Done()
+	conn.WaitHandlers()
 }
 
 // knownSlave reports whether chainID identifies the local slave or a slave

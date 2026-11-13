@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/conn"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
@@ -79,7 +78,6 @@ type Service struct {
 	mu           sync.Mutex // protects lifecycle
 	stopOnce     sync.Once
 	shutdownOnce sync.Once
-	backendCalls sync.WaitGroup
 	stopping     bool
 }
 
@@ -140,11 +138,11 @@ func (s *Service) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Stop prevents new backend calls, closes the listener and connections, and waits
-// for admitted backend calls to finish before returning. It does not cancel those
-// calls or wait for in-progress TCP dials; late dial results are closed by the
-// manager. The owner may release shard resources after Stop returns. Normal Stop
-// does not request Shutdown.
+// Stop closes the listener and connections, then waits for admitted request
+// handlers to finish. It does not cancel handlers; topology handlers may finish
+// pending dials before returning. Late dial results are closed by the manager.
+// The owner may release shard resources after Stop returns. Normal Stop does not
+// request Shutdown. Stop must not be called from a request handler.
 func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
@@ -158,8 +156,9 @@ func (s *Service) Stop() error {
 		s.xshardManager.Close()
 		if master != nil {
 			master.Close()
+			master.WaitHandlers()
 		}
-		s.backendCalls.Wait()
+		s.xshardManager.WaitHandlers()
 	})
 	return nil
 }
@@ -246,42 +245,18 @@ func (s *Service) SendShardBlockHeaderToMaster(ctx context.Context, header *type
 
 // -- Request handlers calling business methods -------------------------------
 
-// beginBackendCall serializes admission with Stop, so no call can be added
-// after Stop begins waiting. Every admitted call must defer backendCalls.Done.
-func (s *Service) beginBackendCall() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
-		return conn.ErrConnectionClosed
-	}
-	s.backendCalls.Add(1)
-	return nil
-}
-
 // CreateShards handles Master's PING(rootTip) after slave interconnection.
 // The single Shard already exists; Init establishes its root checkpoint.
 func (s *Service) CreateShards(root *qkctypes.RootBlock) error {
-	if err := s.beginBackendCall(); err != nil {
-		return err
-	}
-	defer s.backendCalls.Done()
 	return s.backend.Init(root)
 }
 
 func (s *Service) AddRootBlock(root *qkctypes.RootBlock) error {
-	if err := s.beginBackendCall(); err != nil {
-		return err
-	}
-	defer s.backendCalls.Done()
 	_, err := s.backend.AddRootBlock(root)
 	return err
 }
 
 func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (*comm.RootChainStakesResult, error) {
-	if err := s.beginBackendCall(); err != nil {
-		return nil, err
-	}
-	defer s.backendCalls.Done()
 	stakes, signer, err := s.backend.GetRootChainStakes(address, hash)
 	if err != nil {
 		return nil, err
@@ -290,18 +265,10 @@ func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (
 }
 
 func (s *Service) GetUnconfirmedHeaders() ([]*types.Header, error) {
-	if err := s.beginBackendCall(); err != nil {
-		return nil, err
-	}
-	defer s.backendCalls.Done()
 	headers, err := s.backend.GetUnconfirmedHeaderList()
 	return headers, err
 }
 
 func (s *Service) AddXshardTxList(hash common.Hash, deposits []*types.DepositTx) error {
-	if err := s.beginBackendCall(); err != nil {
-		return err
-	}
-	defer s.backendCalls.Done()
 	return s.backend.AddXshardTxList(hash, deposits)
 }

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -2827,5 +2828,53 @@ func TestTCPTransport_WriteFrameClearsDeadline(t *testing.T) {
 	// timeout; with it cleared it must succeed.
 	if _, err := local.Write([]byte("raw")); err != nil {
 		t.Fatalf("raw write after deadline expiry (deadline not cleared?): %v", err)
+	}
+}
+
+// A handler may close its own connection; only the owner waits for handlers.
+func TestBaseConnWaitHandlers(t *testing.T) {
+	for _, panicHandler := range []bool{false, true} {
+		t.Run(fmt.Sprint(panicHandler), func(t *testing.T) {
+			tr := newFakeFrameTransport()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			var c *BaseConn
+			c = NewBaseConn(Config{Transport: tr, Serializers: pingSerializers, Handlers: map[byte]TypedHandler{
+				byte(wire.ClusterOpPing): func(wire.SSZMessage) (wire.SSZMessage, error) {
+					c.Close()
+					close(entered)
+					<-release
+					if panicHandler {
+						panic("handler failure")
+					}
+					return &wire.PongResponse{}, nil
+				},
+			}})
+			c.Start()
+			defer c.Close()
+			tr.frames <- &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("handler could not close its connection")
+			}
+			waited := make(chan struct{})
+			go func() { c.WaitHandlers(); close(waited) }()
+			// Closing rejects even requests already buffered by the reader.
+			c.handleRequest(&wire.ClusterFrame{Opcode: byte(wire.ClusterOpPing), RPCID: 2}, c.typedHandlers[byte(wire.ClusterOpPing)], pingSer, false)
+			select {
+			case <-waited:
+				t.Fatal("wait returned before handler finished")
+			case <-time.After(20 * time.Millisecond):
+			}
+			unblock()
+			select {
+			case <-waited:
+			case <-time.After(time.Second):
+				t.Fatal("handler wait did not finish")
+			}
+		})
 	}
 }

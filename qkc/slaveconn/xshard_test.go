@@ -386,6 +386,7 @@ func TestXshardConnManagerRejectsDuplicateConnection(t *testing.T) {
 	if !manager.trackConnection(first) {
 		t.Fatal("could not track first connection")
 	}
+	go manager.waitConnectionHandlers(first)
 	if err := manager.registerConnection(first); err != nil {
 		t.Fatal(err)
 	}
@@ -399,6 +400,7 @@ func TestXshardConnManagerRejectsDuplicateConnection(t *testing.T) {
 	if !manager.trackConnection(duplicate) {
 		t.Fatal("could not track duplicate connection")
 	}
+	go manager.waitConnectionHandlers(duplicate)
 	if err := manager.registerConnection(duplicate); err == nil || !strings.Contains(err.Error(), "already connected") {
 		t.Fatalf("expected duplicate connection error, got %v", err)
 	}
@@ -432,6 +434,7 @@ func TestXshardConnManagerShutsDownOnIndexedConnectionClose(t *testing.T) {
 	if !manager.trackConnection(indexed) {
 		t.Fatal("could not track connection")
 	}
+	go manager.waitConnectionHandlers(indexed)
 	if err := manager.registerConnection(indexed); err != nil {
 		t.Fatal(err)
 	}
@@ -462,6 +465,7 @@ func TestXshardConnManagerCloseDoesNotShutDownSlave(t *testing.T) {
 	if !manager.trackConnection(indexed) {
 		t.Fatal("could not track connection")
 	}
+	go manager.waitConnectionHandlers(indexed)
 	if err := manager.registerConnection(indexed); err != nil {
 		t.Fatal(err)
 	}

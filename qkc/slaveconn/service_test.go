@@ -59,6 +59,10 @@ type serviceBackend struct {
 func (b *serviceBackend) Init(*qkctypes.RootBlock) error { b.inits.Add(1); return b.initErr }
 func (b *serviceBackend) AddRootBlock(*qkctypes.RootBlock) (bool, error) {
 	b.roots.Add(1)
+	if b.entered != nil {
+		close(b.entered)
+		<-b.release
+	}
 	return false, b.rootErr
 }
 func (b *serviceBackend) GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error) {
@@ -242,8 +246,15 @@ func TestServiceStopWaitsForBackend(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(backend.release) }) }
 	defer release()
 	s := newTestService(t, 1, backend, noopShutdown)
+	remote := serviceMaster(t, s, nil)
+	root := initializeService(t, remote)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- s.AddXshardTxList(common.Hash{}, nil) }()
+	go func() {
+		_, err := remote.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), &wire.AddRootBlockRequest{RootBlock: root})
+		done <- err
+	}()
 	select {
 	case <-backend.entered:
 	case <-time.After(5 * time.Second):
@@ -270,18 +281,18 @@ func TestServiceStopWaitsForBackend(t *testing.T) {
 		t.Fatal("Stop returned while backend was running")
 	default:
 	}
-	if err := s.AddXshardTxList(common.Hash{}, nil); !errors.Is(err, conn.ErrConnectionClosed) {
-		t.Fatalf("new backend call after stopping: %v", err)
-	}
-	release()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, conn.ErrConnectionClosed) {
+			t.Fatalf("pending request after stopping: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("backend call did not finish after release")
+	case <-ctx.Done():
+		t.Fatal("Stop did not close master connection")
 	}
+	if _, err := remote.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), &wire.AddRootBlockRequest{RootBlock: root}); !errors.Is(err, conn.ErrConnectionClosed) {
+		t.Fatalf("new request after stopping: %v", err)
+	}
+	release()
 
 	select {
 	case <-stopped:
@@ -289,6 +300,72 @@ func TestServiceStopWaitsForBackend(t *testing.T) {
 		t.Fatal("Stop did not return after backend finished")
 	}
 
+}
+
+// Even a connection rejected before PING may have dispatched a business call.
+func TestServiceStopWaitsForRejectedXshardHandlers(t *testing.T) {
+	backend := &serviceBackend{entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(backend.release) }) }
+	defer release()
+	s := newTestService(t, 1, backend, noopShutdown)
+	serviceMaster(t, s, nil)
+	nc, err := net.Dial("tcp", s.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := newXshardConn(nc, 0, big.NewInt(2), big.NewInt(1), true, &serviceBackend{}, nil)
+	if err != nil {
+		nc.Close()
+		t.Fatal(err)
+	}
+	peer.Start()
+	defer peer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- peer.SendAddXshardTxList(ctx, common.Hash{}, nil) }()
+	select {
+	case <-backend.entered:
+	case <-ctx.Done():
+		t.Fatal("xshard handler not entered")
+	}
+	// No PING was sent. Closing causes handshake rejection and index removal.
+	peer.Close()
+	for {
+		s.xshardManager.mu.RLock()
+		remaining := len(s.xshardManager.connections)
+		s.xshardManager.mu.RUnlock()
+		if remaining == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("closed handshaking connection was not removed")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	stopped := make(chan struct{})
+	go func() { s.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop missed handler on rejected connection")
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("Stop did not finish after xshard handler returned")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, conn.ErrConnectionClosed) {
+			t.Fatalf("closed request: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending RPC was not closed")
+	}
 }
 
 func TestServiceStopDoesNotRequestShutdown(t *testing.T) {
@@ -469,8 +546,12 @@ func TestServiceFailureShutdown(t *testing.T) {
 			var releaseOnce sync.Once
 			release := func() { releaseOnce.Do(func() { close(backend.release) }) }
 			defer release()
+			root := initializeService(t, am)
 			result := make(chan error, 1)
-			go func() { result <- a.AddXshardTxList(common.Hash{}, nil) }()
+			go func() {
+				_, err := am.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), &wire.AddRootBlockRequest{RootBlock: root})
+				result <- err
+			}()
 			select {
 			case <-backend.entered:
 			case <-ctx.Done():
@@ -502,15 +583,15 @@ func TestServiceFailureShutdown(t *testing.T) {
 				t.Fatal("Stop returned while backend was still running")
 			default:
 			}
-			release()
 			select {
 			case err := <-result:
-				if err != nil {
-					t.Fatal(err)
+				if !errors.Is(err, conn.ErrConnectionClosed) {
+					t.Fatalf("pending request after failure: %v", err)
 				}
 			case <-ctx.Done():
-				t.Fatal("business request did not finish")
+				t.Fatal("pending request was not closed")
 			}
+			release()
 			select {
 			case <-done:
 			case <-ctx.Done():
