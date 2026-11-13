@@ -17,6 +17,10 @@
 package rawdb
 
 import (
+	"fmt"
+	"math/big"
+	"slices"
+
 	"github.com/ethereum/go-ethereum/common"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -75,6 +79,95 @@ func WriteRootBlock(db ethdb.KeyValueWriter, block *types.RootBlock) {
 	if err := db.Put(rootBlockKey(block.Hash()), data); err != nil {
 		log.Crit("Failed to store root block", "err", err)
 	}
+}
+
+// ReadRootHeadBlockHash retrieves the persisted canonical root head.
+func ReadRootHeadBlockHash(db ethdb.KeyValueReader) (common.Hash, error) {
+	data, err := db.Get(rootHeadBlockKey)
+	return common.BytesToHash(data), err
+}
+
+// WriteRootHeadBlockHash stores the persisted canonical root head.
+func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
+	return db.Put(rootHeadBlockKey, hash.Bytes())
+}
+
+// ReadRootCommittingHash retrieves the root whose shard delivery is incomplete.
+// An absent marker returns the zero hash without an error.
+func ReadRootCommittingHash(db ethdb.KeyValueReader) (common.Hash, error) {
+	// Get uses backend-specific not-found errors.
+	exists, err := db.Has(rootCommittingKey)
+	if err != nil || !exists {
+		return common.Hash{}, err
+	}
+	data, err := db.Get(rootCommittingKey)
+	return common.BytesToHash(data), err
+}
+
+// WriteRootCommittingHash stores the root awaiting shard delivery.
+func WriteRootCommittingHash(db ethdb.KeyValueWriter, hash common.Hash) error {
+	return db.Put(rootCommittingKey, hash.Bytes())
+}
+
+// DeleteRootCommittingHash clears the root awaiting shard delivery.
+func DeleteRootCommittingHash(db ethdb.KeyValueWriter) error {
+	return db.Delete(rootCommittingKey)
+}
+
+// ReadRootCanonicalHash retrieves the hash assigned to a canonical root height.
+func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint32) common.Hash {
+	data, _ := db.Get(rootCanonicalKey(number))
+	return common.BytesToHash(data)
+}
+
+// WriteRootCanonicalHash stores the hash assigned to a canonical root height.
+func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint32) error {
+	return db.Put(rootCanonicalKey(number), hash.Bytes())
+}
+
+type rootShardConfirmation struct {
+	ChainID *big.Int
+	Hash    common.Hash
+}
+
+// ReadRootConfirmedShardBlocks retrieves the cumulative shard confirmations for
+// a root, including confirmations inherited from its ancestors.
+// Missing snapshots, read failures and decoding failures return an error.
+func ReadRootConfirmedShardBlocks(db ethdb.KeyValueReader, hash common.Hash) (map[string]common.Hash, error) {
+	data, err := db.Get(rootConfirmedKey(hash))
+	if err != nil {
+		return nil, err
+	}
+	var entries []rootShardConfirmation
+	if err := rlp.DecodeBytes(data, &entries); err != nil {
+		return nil, fmt.Errorf("decode root shard confirmations: %w", err)
+	}
+	confirmed := make(map[string]common.Hash, len(entries))
+	for _, entry := range entries {
+		confirmed[entry.ChainID.String()] = entry.Hash
+	}
+	return confirmed, nil
+}
+
+// WriteRootConfirmedShardBlocks stores a cumulative snapshot for a root.
+func WriteRootConfirmedShardBlocks(db ethdb.KeyValueWriter, hash common.Hash, confirmed map[string]common.Hash) error {
+	entries := make([]rootShardConfirmation, 0, len(confirmed))
+	for id, blockHash := range confirmed {
+		chainID, ok := new(big.Int).SetString(id, 10)
+		if !ok || chainID.String() != id {
+			return fmt.Errorf("invalid root shard confirmation chain ID %q", id)
+		}
+		entries = append(entries, rootShardConfirmation{ChainID: chainID, Hash: blockHash})
+	}
+	// Map iteration is unordered; persist entries in numeric chain ID order.
+	slices.SortFunc(entries, func(a, b rootShardConfirmation) int {
+		return a.ChainID.Cmp(b.ChainID)
+	})
+	data, err := rlp.EncodeToBytes(entries)
+	if err != nil {
+		return fmt.Errorf("encode root shard confirmations: %w", err)
+	}
+	return db.Put(rootConfirmedKey(hash), data)
 }
 
 // ReadLastConfirmedBlockHash retrieves the hash of the latest shard block
