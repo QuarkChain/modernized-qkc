@@ -146,7 +146,7 @@ func qkcTestMaster(t *testing.T, backend *Ethereum) *masterconn.SlaveConn {
 	}
 	peer, err := masterconn.NewSlaveConn(masterconn.SlaveConnConfig{
 		Conn: socket, RemoteChainID: backend.BlockChain().Config().ChainID,
-		Handler: qkcHeaderHandler{}, ShutdownMaster: func() {},
+		Handler: qkcHeaderHandler{},
 	})
 	if err != nil {
 		socket.Close()
@@ -288,9 +288,8 @@ func TestQKCBackendStopWaitsForMining(t *testing.T) {
 	}
 }
 
-func TestQKCBackendMiningRequiresConnections(t *testing.T) {
+func TestQKCBackendMiningRequiresInitialization(t *testing.T) {
 	config := qkcBackendConfig()
-	config.Genesis.Config.QuarkChain.ChainIDs = append(config.Genesis.Config.QuarkChain.ChainIDs, big.NewInt(10002))
 	search := &qkcWaitingSearch{make(chan struct{}), make(chan struct{}), make(chan struct{})}
 	defer close(search.release)
 	config.QKCMiningSearch = search
@@ -301,9 +300,9 @@ func TestQKCBackendMiningRequiresConnections(t *testing.T) {
 	defer cancel()
 	root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
 		Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
-	}, qkctypes.ShardBlockHeaders{backend.BlockChain().Genesis().Header()}, nil)
+	}, nil, nil)
 	if err := peer.SendPing(ctx, root); err == nil {
-		t.Fatal("initialized mining without the required remote shard connection")
+		t.Fatal("initialized mining without the shard genesis header")
 	}
 	stopped := make(chan struct{})
 	go func() { stack.Wait(); close(stopped) }()
@@ -314,7 +313,7 @@ func TestQKCBackendMiningRequiresConnections(t *testing.T) {
 	}
 	select {
 	case <-search.started:
-		t.Fatal("mining started before all connections were ready")
+		t.Fatal("mining started after initialization failed")
 	default:
 	}
 }

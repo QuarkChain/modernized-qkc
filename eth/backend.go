@@ -65,6 +65,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/qkc/slaveconn"
+	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	gethversion "github.com/ethereum/go-ethereum/version"
@@ -275,7 +276,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		eth.slaveService, err = slaveconn.NewService(slaveconn.ServiceConfig{
 			ListenAddr:   net.JoinHostPort(nodeConfig.PrivateHost, strconv.Itoa(nodeConfig.PrivatePort)),
 			LocalChainID: chainConfig.ChainID, ConfiguredChainIDs: chainConfig.QuarkChain.ChainIDs,
-			OnInitialized: eth.startQKCMining,
 			// The caller must return before Node waits for service requests to exit.
 			Shutdown: sync.OnceFunc(func() { go stack.Close() }),
 		})
@@ -458,9 +458,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := eth.slaveService.BindShard(eth.shard); err != nil {
-			return nil, err
-		}
 		search := config.QKCMiningSearch
 		if search == nil && config.QKCSimulatedBlockTime > 0 {
 			search = shard.NewSimulatedSearch(config.QKCSimulatedBlockTime)
@@ -607,7 +604,7 @@ func (s *Ethereum) Start() error {
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
 	if s.slaveService != nil {
-		if err := s.slaveService.Start(); err != nil {
+		if err := s.slaveService.Start(qkcMiningBackend{s.shard, s.startQKCMining}); err != nil {
 			// Node does not Stop a Lifecycle whose Start failed.
 			s.Stop()
 			return err
@@ -616,16 +613,26 @@ func (s *Ethereum) Start() error {
 	return nil
 }
 
-// startQKCMining runs after the master checkpoint is initialized. M1 needs
-// every cluster connection; M2 must also wait for synchronization here.
+// qkcMiningBackend starts mining only after Service initializes the shard.
+type qkcMiningBackend struct {
+	*shard.Shard
+	startMining func() error
+}
+
+func (b qkcMiningBackend) Init(root *qkctypes.RootBlock) error {
+	if err := b.Shard.Init(root); err != nil {
+		return err
+	}
+	return b.startMining()
+}
+
+// startQKCMining runs after the master checkpoint is initialized. Master connects
+// all slaves before sending the checkpoint; M2 must also wait for synchronization.
 func (s *Ethereum) startQKCMining() error {
 	s.qkcMu.Lock()
 	defer s.qkcMu.Unlock()
 	if s.qkcStopping {
 		return errors.New("QKC node is stopping")
-	}
-	if !s.slaveService.ConnectionsReady() {
-		return errors.New("QKC cluster connections are not ready")
 	}
 	mining := s.config.QKCMiningSearch != nil || s.config.QKCSimulatedBlockTime > 0
 	if mining {
@@ -752,9 +759,8 @@ func (s *Ethereum) Stop() error {
 		s.qkcMu.Lock()
 		s.qkcStopping = true
 		s.qkcMu.Unlock()
-		s.slaveService.Quiesce()
-		s.powMiner.StopLocalMining()
 		s.slaveService.Stop()
+		s.powMiner.StopLocalMining()
 	}
 	s.discmix.Close()
 	if !s.isQKC() {

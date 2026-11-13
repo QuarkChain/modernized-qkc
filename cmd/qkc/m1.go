@@ -168,7 +168,6 @@ func runM1(ctx *cli.Context) error {
 		}
 		peer, err := masterconn.NewSlaveConn(masterconn.SlaveConnConfig{
 			Conn: socket, RemoteChainID: slave.ChainID, Handler: m1Master{},
-			ShutdownMaster: func() { shutdown(fmt.Errorf("shard %s disconnected", slave.ChainID)) },
 		})
 		if err != nil {
 			cancel()
@@ -180,6 +179,10 @@ func runM1(ctx *cli.Context) error {
 		stopClose := context.AfterFunc(runCtx, peer.Close)
 		defer stopClose()
 		peer.Start()
+		go func() {
+			<-peer.WaitUntilClosed()
+			shutdown(fmt.Errorf("shard %s disconnected", slave.ChainID))
+		}()
 		err = peer.SendPing(callCtx, nil)
 		cancel()
 		if err != nil {
