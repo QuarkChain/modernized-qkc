@@ -31,15 +31,13 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
-	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/comm"
 	"github.com/ethereum/go-ethereum/qkc/masterconn"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -96,16 +94,11 @@ func loadM1Root(path string) (*qkctypes.RootBlock, error) {
 	return root, nil
 }
 
-type m1Slave struct {
-	comm.SlaveInfo
-	rpcEndpoint string
-}
-
 // Read the same node and genesis settings as geth; do not hardcode endpoints.
-func loadM1Slave(path string) (m1Slave, error) {
+func loadM1Slave(path string) (comm.SlaveInfo, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return m1Slave{}, err
+		return comm.SlaveInfo{}, err
 	}
 	var cfg struct {
 		Node node.Config
@@ -113,80 +106,23 @@ func loadM1Slave(path string) (m1Slave, error) {
 	}
 	decoder := toml.Config{NormFieldName: func(_ reflect.Type, key string) string { return key }}
 	if err := decoder.Unmarshal(data, &cfg); err != nil {
-		return m1Slave{}, fmt.Errorf("%s: %w", path, err)
+		return comm.SlaveInfo{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if cfg.Node.PrivateHost == "" || cfg.Node.PrivatePort <= 0 || cfg.Node.PrivatePort > 65535 {
-		return m1Slave{}, fmt.Errorf("%s: missing or invalid cluster endpoint", path)
+		return comm.SlaveInfo{}, fmt.Errorf("%s: missing or invalid cluster endpoint", path)
 	}
 	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config == nil || cfg.Eth.Genesis.Config.ChainID == nil {
-		return m1Slave{}, fmt.Errorf("%s: missing genesis chain ID", path)
+		return comm.SlaveInfo{}, fmt.Errorf("%s: missing genesis chain ID", path)
 	}
-	id := cfg.Eth.Genesis.Config.ChainID
-	if id.Sign() <= 0 || id.BitLen() > 256 {
-		return m1Slave{}, fmt.Errorf("%s: invalid genesis chain ID", path)
-	}
-	if cfg.Eth.Genesis.Config.QuarkChain == nil || cfg.Eth.Genesis.Config.QuarkChain.ConsensusType != params.ConsensusSimulate || cfg.Eth.QKCSimulatedBlockTime <= 0 {
-		return m1Slave{}, fmt.Errorf("%s: m1 requires local POW_SIMULATE mining", path)
-	}
-	endpoint := cfg.Node.IPCEndpoint()
-	if endpoint == "" && cfg.Node.HTTPHost != "" {
-		endpoint = "http://" + cfg.Node.HTTPEndpoint() + cfg.Node.HTTPPathPrefix
-	}
-	if endpoint == "" {
-		return m1Slave{}, fmt.Errorf("%s: m1 requires IPC or HTTP to check the shard head before sending R0", path)
-	}
-	return m1Slave{
-		SlaveInfo:   comm.SlaveInfo{Host: cfg.Node.PrivateHost, Port: uint16(cfg.Node.PrivatePort), ChainID: id},
-		rpcEndpoint: endpoint,
-	}, nil
+	return comm.SlaveInfo{Host: cfg.Node.PrivateHost, Port: uint16(cfg.Node.PrivatePort), ChainID: cfg.Eth.Genesis.Config.ChainID}, nil
 }
 
-// The offline R0 demo must not rewind existing blocks. Keep this test-only
-// restriction here; the production shard initialization also supports recovery.
-func (s m1Slave) checkGenesis(ctx context.Context) error {
-	client, err := ethclient.DialContext(ctx, s.rpcEndpoint)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	id, err := client.ChainID(ctx)
-	if err != nil {
-		return err
-	}
-	if id.Cmp(s.ChainID) != 0 {
-		return fmt.Errorf("RPC chain ID %s does not match configured shard %s", id, s.ChainID)
-	}
-	height, err := client.BlockNumber(ctx)
-	if err != nil {
-		return err
-	}
-	if height != 0 {
-		return fmt.Errorf("milestone 1 requires a genesis-only data directory; shard %s is at height %d, use a fresh --datadir", s.ChainID, height)
-	}
-	return nil
-}
+// m1Master only logs and acknowledges headers already imported by the shards.
+// This test driver does not validate headers or construct or confirm R1.
+type m1Master struct{}
 
-// m1Master only records reported heights. It does not construct or confirm R1.
-type m1Master struct {
-	mu      sync.Mutex
-	root    common.Hash
-	heights map[string]uint64
-}
-
-func (m *m1Master) AddShardBlockHeader(source *big.Int, header *types.Header, _ *uint256.Int) error {
-	extra, err := header.QKCExtra()
-	if err != nil {
-		return err
-	}
-	if extra.ChainID.Cmp(source) != 0 || extra.PrevRootBlock != m.root || header.Number == nil || !header.Number.IsUint64() {
-		return errors.New("unexpected milestone 1 shard header")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.heights[source.String()]; !ok {
-		return fmt.Errorf("unexpected shard %s", source)
-	}
-	m.heights[source.String()] = header.Number.Uint64()
+func (m1Master) AddShardBlockHeader(source *big.Int, header *types.Header, _ *uint256.Int) error {
+	log.Info("Shard block", "chain", source, "number", header.Number)
 	return nil
 }
 
@@ -207,33 +143,18 @@ func runM1(ctx *cli.Context) error {
 		}
 		includedHeaders = append(includedHeaders, fmt.Sprintf("%s@%s", extra.ChainID.String(), header.Number.String()))
 	}
-	rootRelation := fmt.Sprintf("root: %d -> [%s]", root.Number(), strings.Join(includedHeaders, ", "))
+	fmt.Fprintf(ctx.App.Writer, "root: %d -> [%s]\n", root.Number(), strings.Join(includedHeaders, ", "))
 	signalCtx, stop := signal.NotifyContext(ctx.Context, os.Interrupt)
 	defer stop()
 	runCtx, shutdown := context.WithCancelCause(signalCtx)
 	defer shutdown(nil)
-	master := &m1Master{root: root.Hash(), heights: make(map[string]uint64)}
 	var slaves []comm.SlaveInfo
 	for _, path := range ctx.StringSlice("config") {
 		slave, err := loadM1Slave(path)
 		if err != nil {
 			return err
 		}
-		id := slave.ChainID.String()
-		if _, exists := master.heights[id]; exists {
-			return fmt.Errorf("duplicate shard %s", id)
-		}
-		callCtx, cancel := context.WithTimeout(runCtx, 5*time.Second)
-		err = slave.checkGenesis(callCtx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("check chain %s before R0: %w", id, err)
-		}
-		master.heights[id] = 0
-		slaves = append(slaves, slave.SlaveInfo)
-	}
-	if len(slaves) == 0 {
-		return errors.New("at least one shard config is required")
+		slaves = append(slaves, slave)
 	}
 	var peers []*masterconn.SlaveConn
 	// Verify every master connection before asking any slave to dial another.
@@ -246,7 +167,7 @@ func runM1(ctx *cli.Context) error {
 			return fmt.Errorf("connect %s: %w", endpoint, err)
 		}
 		peer, err := masterconn.NewSlaveConn(masterconn.SlaveConnConfig{
-			Conn: socket, RemoteChainID: slave.ChainID, Handler: master,
+			Conn: socket, RemoteChainID: slave.ChainID, Handler: m1Master{},
 			ShutdownMaster: func() { shutdown(fmt.Errorf("shard %s disconnected", slave.ChainID)) },
 		})
 		if err != nil {
@@ -285,25 +206,9 @@ func runM1(ctx *cli.Context) error {
 		}
 		fmt.Fprintf(ctx.App.Writer, "chain %s: initialized R0 %s\n", peer.RemoteChainID(), root.Hash())
 	}
-	fmt.Fprintln(ctx.App.Writer, "Watching reported heights; exiting this command shuts down the shards.")
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		var heights []string
-		master.mu.Lock()
-		for _, peer := range peers {
-			id := peer.RemoteChainID().String()
-			heights = append(heights, fmt.Sprintf("%s=%d", id, master.heights[id]))
-		}
-		master.mu.Unlock()
-		fmt.Fprintf(ctx.App.Writer, "%s | shards: %s\n", rootRelation, strings.Join(heights, "  "))
-		select {
-		case <-runCtx.Done():
-			if errors.Is(context.Cause(runCtx), context.Canceled) {
-				return nil
-			}
-			return context.Cause(runCtx)
-		case <-ticker.C:
-		}
+	<-runCtx.Done()
+	if errors.Is(context.Cause(runCtx), context.Canceled) {
+		return nil
 	}
+	return context.Cause(runCtx)
 }

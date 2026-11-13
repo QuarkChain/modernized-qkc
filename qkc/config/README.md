@@ -43,12 +43,13 @@ build/bin/qkc m1
 ```
 
 The driver reads `PrivateHost` / `PrivatePort` and chain IDs from both shard TOMLs
-(`--config` overrides them, repeat for each shard). It checks that both live heads
-are at genesis using the configured IPC endpoint, or HTTP when IPC is disabled.
-After identity PINGs and interconnection it sends the [R0 fixture](devnet/root.toml)
-via PING, starting both miners. It displays R0's included
-header heights alongside heights reported by the shards. Ctrl-C shuts down all three processes.
-Use fresh data directories for each run. Regenerate R0 if either shard genesis changes.
+(`--config` overrides them, repeat for each shard). It connects the shards and
+sends the [R0 fixture](devnet/root.toml) via PING, starting both miners. It prints
+R0's included header heights once, then logs each reported shard height and
+returns an ACK. IPC and HTTP are not required. Ctrl-C shuts down all three processes.
+Use fresh data directories for each run: the driver does not check existing
+heights, and initializing R0 restores the shard heads to genesis.
+Regenerate R0 if either shard genesis changes.
 
 ### Test accounts
 
