@@ -136,6 +136,7 @@ type BaseConn struct {
 
 	// -- Synchronization primitives --
 	shutdownOnce sync.Once
+	handlers     sync.WaitGroup
 	// activeChan signals that startup has completed. The connection may be ACTIVE
 	// or already closed; callers must check IsActive().
 	activeChan chan struct{}
@@ -213,6 +214,14 @@ func (c *BaseConn) Start() {
 // It does not cancel or wait for handler goroutines.
 func (c *BaseConn) Close() {
 	c.shutdown(nil)
+}
+
+// WaitHandlers waits for closure and all admitted request handlers to return.
+// Close remains non-blocking with respect to handlers, so handlers may call it.
+// WaitHandlers must be called by the owner, never from a handler on this connection.
+func (c *BaseConn) WaitHandlers() {
+	<-c.closedChan
+	c.handlers.Wait()
 }
 
 // SendRPC serializes a request with ClusterPeerID zero and waits for its response.
@@ -530,6 +539,15 @@ func (c *BaseConn) handleRequest(frame *wire.ClusterFrame, handler TypedHandler,
 		}
 	}
 
+	// Admission and closure share mu, so WaitHandlers cannot miss a dispatch.
+	c.mu.Lock()
+	if c.state == ConnectionStateClosed {
+		c.mu.Unlock()
+		return
+	}
+	c.handlers.Add(1)
+	c.mu.Unlock()
+
 	// TODO: Bound concurrent handler dispatches to prevent unbounded goroutines.
 	go c.dispatch(frame, handler, ser)
 }
@@ -537,6 +555,7 @@ func (c *BaseConn) handleRequest(frame *wire.ClusterFrame, handler TypedHandler,
 // -- dispatch (handler execution + response write) ----------------------------
 
 func (c *BaseConn) dispatch(frame *wire.ClusterFrame, handler TypedHandler, ser *OpSerializer) {
+	defer c.handlers.Done()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			c.shutdown(fmt.Errorf("handler panic (opcode=0x%x): %v", frame.Opcode, recovered))
