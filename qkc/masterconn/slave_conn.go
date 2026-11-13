@@ -111,7 +111,7 @@ func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) 
 	if !ok {
 		return fmt.Errorf("unexpected ping response %T", resp)
 	}
-	id := wire.ChainIDFromSSZ(pong.ChainID)
+	id := pong.ChainID.ToBig()
 	if id.Cmp(sc.remoteChainID) != 0 {
 		return fmt.Errorf("slave chain ID mismatch: expected %s, got %s", sc.remoteChainID, id)
 	}
@@ -124,19 +124,15 @@ func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) 
 // to the next slave; failure aborts cluster initialization without a retry.
 // The caller is responsible for setting an appropriate context deadline.
 func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []comm.SlaveInfo) error {
-	req := &wire.ConnectToSlavesRequest{SlaveInfoList: make([]wire.SlaveInfo, len(slaves))}
+	req := &wire.ConnectToSlavesRequest{SlaveInfoList: make([]*wire.SlaveInfo, len(slaves))}
 	for i, slave := range slaves {
 		if slave.Host == "" || slave.Port == 0 {
 			return fmt.Errorf("invalid slave address at index %d: host %q, port %d", i, slave.Host, slave.Port)
 		}
-		if slave.ChainID == nil || slave.ChainID.Sign() <= 0 {
+		if slave.ChainID == nil || slave.ChainID.Sign() <= 0 || slave.ChainID.BitLen() > 256 {
 			return fmt.Errorf("invalid slave chain ID at index %d: %v", i, slave.ChainID)
 		}
-		id, err := wire.ChainIDToSSZ(slave.ChainID)
-		if err != nil {
-			return fmt.Errorf("encode slave chain ID at index %d: %w", i, err)
-		}
-		req.SlaveInfoList[i] = wire.SlaveInfo{Host: []byte(slave.Host), Port: slave.Port, ChainID: id}
+		req.SlaveInfoList[i] = &wire.SlaveInfo{Host: []byte(slave.Host), Port: slave.Port, ChainID: *uint256.MustFromBig(slave.ChainID)}
 	}
 	resp, err := sc.SendRPC(ctx, byte(wire.ClusterOpConnectToSlavesRequest), req)
 	if err != nil {
@@ -151,7 +147,7 @@ func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []comm.Slav
 	}
 	for index, failure := range result.ResultList {
 		if len(failure) != 0 {
-			target := wire.ChainIDFromSSZ(req.SlaveInfoList[index].ChainID)
+			target := req.SlaveInfoList[index].ChainID.ToBig()
 			return fmt.Errorf("slave %s failed to connect to slave %s: %q", sc.remoteChainID, target, failure)
 		}
 	}
@@ -200,11 +196,7 @@ func (sc *SlaveConn) SendGetRootChainStakes(ctx context.Context, address common.
 	if result.ErrorCode != 0 {
 		return nil, &comm.RemoteError{Code: result.ErrorCode}
 	}
-	stakes := new(uint256.Int)
-	if err := stakes.UnmarshalSSZ(result.Stakes[:]); err != nil {
-		return nil, fmt.Errorf("decode root chain stakes: %w", err)
-	}
-	return &comm.RootChainStakesResult{Stakes: stakes, Signer: result.Signer}, nil
+	return &comm.RootChainStakesResult{Stakes: result.Stakes.Clone(), Signer: result.Signer}, nil
 }
 
 // SendGetUnconfirmedHeaders asks a slave for its unconfirmed shard headers.
@@ -248,10 +240,7 @@ func (sc *SlaveConn) handleAddShardBlockHeader(req wire.SSZMessage) (wire.SSZMes
 	if err := rlp.DecodeBytes(request.ShardBlockHeader, header); err != nil {
 		return nil, fmt.Errorf("decode shard block header: %w", err)
 	}
-	amount := new(uint256.Int)
-	if err := amount.UnmarshalSSZ(request.CoinbaseAmount[:]); err != nil {
-		return nil, fmt.Errorf("decode coinbase amount: %w", err)
-	}
+	amount := request.CoinbaseAmount.Clone()
 	code, err := wire.ErrorCode(sc.handler.AddShardBlockHeader(sc.RemoteChainID(), header, amount))
 	if err != nil {
 		return nil, err

@@ -130,9 +130,7 @@ func TestChainHeaderMessagesSSZ(t *testing.T) {
 	msg := &AddShardBlockHeaderRequest{
 		ShardBlockHeader: Data(headerData),
 	}
-	if _, err := uint256.NewInt(0x0102).MarshalSSZAppend(msg.CoinbaseAmount[:0]); err != nil {
-		t.Fatal(err)
-	}
+	msg.CoinbaseAmount = uint256.Int{0x0102}
 	encoded, err := msg.MarshalSSZ()
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +209,7 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := &AddXshardTxListRequest{
-		ChainID:        [UInt256Length]byte{2},
+		ChainID:        uint256.Int{2},
 		ShardBlockHash: deposit.SourceBlockHash,
 		DepositTxList:  []Data{Data(depositData)},
 	}
@@ -243,7 +241,7 @@ func TestCrossChainDepositsSSZ(t *testing.T) {
 		t.Fatalf("deposit hash tree root: %v", err)
 	}
 
-	empty := &AddXshardTxListRequest{ChainID: [UInt256Length]byte{2}, ShardBlockHash: msg.ShardBlockHash}
+	empty := &AddXshardTxListRequest{ChainID: uint256.Int{2}, ShardBlockHash: msg.ShardBlockHash}
 	var decodedEmpty AddXshardTxListRequest
 	encoded, err = empty.MarshalSSZ()
 	if err != nil {
@@ -271,9 +269,7 @@ func TestMasterMessagesSSZ(t *testing.T) {
 		ErrorCode: 1,
 		Signer:    common.HexToAddress("0x9abc"),
 	}
-	if _, err := uint256.NewInt(0x0102).MarshalSSZAppend(response.Stakes[:0]); err != nil {
-		t.Fatal(err)
-	}
+	response.Stakes = uint256.Int{0x0102}
 	roundTripSSZ(t, response)
 }
 
@@ -317,7 +313,7 @@ func TestRootBlockPayloadsSSZ(t *testing.T) {
 
 func TestPingPongSSZRoundTrip(t *testing.T) {
 	ping := &PingRequest{
-		ChainID:    [UInt256Length]byte{2, 0, 1},
+		ChainID:    uint256.Int{0x010002},
 		HasRootTip: true,
 		RootTip:    []byte{0xaa, 0xbb},
 	}
@@ -332,7 +328,7 @@ func TestPingPongSSZRoundTrip(t *testing.T) {
 		t.Fatalf("deep mismatch: got %+v, want %+v", &got, ping)
 	}
 
-	pong := &PongResponse{ChainID: [UInt256Length]byte{2}}
+	pong := &PongResponse{ChainID: uint256.Int{2}}
 	roundTripSSZ(t, pong)
 
 	// Boundary: all dynamic fields empty.
@@ -340,83 +336,39 @@ func TestPingPongSSZRoundTrip(t *testing.T) {
 	roundTripSSZ(t, &PongResponse{})
 }
 
-func TestChainIDSSZConversion(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		id   *big.Int
-		want [UInt256Length]byte
-	}{
-		{"zero", new(big.Int), [UInt256Length]byte{}},
-		{"one", big.NewInt(1), [UInt256Length]byte{1}},
-		{"multi-byte", big.NewInt(0x01020304), [UInt256Length]byte{4, 3, 2, 1}},
-		{"max", new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1)), [UInt256Length]byte(bytes.Repeat([]byte{0xff}, UInt256Length))},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			original := new(big.Int).Set(test.id)
-			encoded, err := ChainIDToSSZ(test.id)
-			if err != nil || encoded != test.want {
-				t.Fatalf("encode %v: have %x, error %v, want %x", test.id, encoded, err, test.want)
-			}
-			if test.id.Cmp(original) != 0 {
-				t.Fatal("encoding changed the input chain ID")
-			}
-			decoded := ChainIDFromSSZ(encoded)
-			if decoded.Cmp(test.id) != 0 || encoded != test.want {
-				t.Fatalf("decode %x: have %v, want %v", encoded, decoded, test.id)
-			}
-		})
-	}
-	for _, test := range []struct {
-		name string
-		id   *big.Int
-	}{
-		{"nil", nil},
-		{"negative", big.NewInt(-1)},
-		{"overflow", new(big.Int).Lsh(big.NewInt(1), 256)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if _, err := ChainIDToSSZ(test.id); err == nil {
-				t.Fatalf("invalid chain ID %v accepted", test.id)
-			}
-		})
-	}
-}
-
 func TestSSZLargeChainIDs(t *testing.T) {
 	// Numeric uint256 is little-endian; this ID uses both the high and low bits.
 	value := new(big.Int).Lsh(big.NewInt(0x40), 248)
 	value.Add(value, new(big.Int).Lsh(big.NewInt(0x80), 128))
 	value.Add(value, big.NewInt(0x31))
-	id, err := ChainIDToSSZ(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := ([UInt256Length]byte{0: 0x31, 16: 0x80, 31: 0x40}); id != want {
+	id := *uint256.MustFromBig(value)
+	if want := (uint256.Int{0x31, 0, 0x80, 0x4000000000000000}); id != want {
 		t.Fatalf("chain ID byte order: have %x, want %x", id, want)
 	}
 	for _, msg := range []SSZMessage{
 		&PingRequest{ChainID: id, HasRootTip: true, RootTip: Data{1}},
 		&PongResponse{ChainID: id},
 		&SlaveInfo{Host: []byte("localhost"), Port: 38391, ChainID: id},
-		&ConnectToSlavesRequest{SlaveInfoList: []SlaveInfo{{ChainID: id}}},
+		&ConnectToSlavesRequest{SlaveInfoList: []*SlaveInfo{{ChainID: id}}},
 		&AddXshardTxListRequest{ChainID: id, DepositTxList: []Data{{1}}},
 	} {
 		roundTripSSZ(t, msg)
 	}
-	if got := mustMarshalSSZ(t, &PongResponse{ChainID: id}); !bytes.Equal(got, id[:]) {
+	wantEncoding := [32]byte{0: 0x31, 16: 0x80, 31: 0x40}
+	if got := mustMarshalSSZ(t, &PongResponse{ChainID: id}); !bytes.Equal(got, wantEncoding[:]) {
 		t.Fatalf("chain ID encoding: have %x, want %x", got, id)
 	}
 	var pong PongResponse
 	if err := pong.UnmarshalSSZ(mustMarshalSSZ(t, &PongResponse{ChainID: id})); err != nil {
 		t.Fatal(err)
 	}
-	if got := ChainIDFromSSZ(pong.ChainID); got.Cmp(value) != 0 {
+	if got := pong.ChainID.ToBig(); got.Cmp(value) != 0 {
 		t.Fatalf("decoded chain ID: have %v, want %v", got, value)
 	}
 }
 
 func TestChainToChainPingCarriesChainIDWithoutRootTip(t *testing.T) {
-	for _, chainID := range [][UInt256Length]byte{{1}, {2}} {
+	for _, chainID := range []uint256.Int{{1}, {2}} {
 		ping := &PingRequest{ChainID: chainID, HasRootTip: false}
 		encoded := mustMarshalSSZ(t, ping)
 
@@ -432,9 +384,9 @@ func TestChainToChainPingCarriesChainIDWithoutRootTip(t *testing.T) {
 
 func TestConnectToSlavesSSZRoundTrip(t *testing.T) {
 	req := &ConnectToSlavesRequest{
-		SlaveInfoList: []SlaveInfo{
-			{Host: []byte("10.0.0.1"), Port: 38391, ChainID: [UInt256Length]byte{1}},
-			{Host: []byte("10.0.0.2"), Port: 38392, ChainID: [UInt256Length]byte{2}},
+		SlaveInfoList: []*SlaveInfo{
+			{Host: []byte("10.0.0.1"), Port: 38391, ChainID: uint256.Int{1}},
+			{Host: []byte("10.0.0.2"), Port: 38392, ChainID: uint256.Int{2}},
 		},
 	}
 	roundTripSSZ(t, req)
@@ -532,6 +484,51 @@ func TestGeneratedCodecsRejectMalformedPayloads(t *testing.T) {
 	}
 }
 
+// Dynamic lists must validate the offset table before allocating elements.
+func TestSSZRejectsMalformedListOffsets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		new  func() SSZMessage
+	}{
+		{"slaves", func() SSZMessage { return new(ConnectToSlavesRequest) }},
+		{"results", func() SSZMessage { return new(ConnectToSlavesResponse) }},
+		{"deposits", func() SSZMessage { return new(AddXshardTxListRequest) }},
+		{"headers", func() SSZMessage { return new(GetUnconfirmedHeadersResponse) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, tail := range [][]byte{
+				{1}, {1, 2, 3}, // Incomplete offset.
+				{0, 0, 0, 0},             // Zero offset.
+				{5, 0, 0, 0, 0},          // Misaligned offset table.
+				{0xfc, 0xff, 0xff, 0xff}, // Offset table exceeds input.
+				{8, 0, 0, 0, 4, 0, 0, 0}, // Descending offsets.
+			} {
+				encoded := append(mustMarshalSSZ(t, tc.new()), tail...)
+				if err := tc.new().UnmarshalSSZ(encoded); err == nil {
+					t.Fatalf("accepted malformed list tail %x", tail)
+				}
+			}
+		})
+	}
+}
+
+func TestSSZBooleanDecoding(t *testing.T) {
+	encoded := mustMarshalSSZ(t, &PingRequest{})
+	decoded := &PingRequest{HasRootTip: true}
+	if err := decoded.UnmarshalSSZ(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.HasRootTip {
+		t.Fatal("decoding false retained the previous true value")
+	}
+	for _, value := range []byte{2, 255} {
+		encoded[32] = value
+		if err := decoded.UnmarshalSSZ(encoded); err == nil {
+			t.Fatalf("accepted invalid SSZ boolean %d", value)
+		}
+	}
+}
+
 func TestResultListGoldenEncoding(t *testing.T) {
 	msg := &ConnectToSlavesResponse{ResultList: [][]byte{nil, []byte("x")}}
 	got, err := msg.MarshalSSZ()
@@ -582,12 +579,12 @@ func TestHelloCommandGoldenEncoding(t *testing.T) {
 // TestSSZGoldenEncoding pins the encoding of a PingRequest with a fixed-width
 // ChainID, HasRootTip=false, and an empty RootTip.
 //
-//	PingRequest{ChainID: [UInt256Length]byte{1}, HasRootTip: false}
+//	PingRequest{ChainID: uint256.Int{1}, HasRootTip: false}
 //	  ChainID  = 1 -> 01 followed by 31 zero bytes
 //	  HasRootTip   -> 00
 //	  offset(RootTip) = 37 -> 25 00 00 00
 func TestSSZGoldenEncoding(t *testing.T) {
-	ping := &PingRequest{ChainID: [UInt256Length]byte{1}}
+	ping := &PingRequest{ChainID: uint256.Int{1}}
 	got, err := ping.MarshalSSZ()
 	if err != nil {
 		t.Fatalf("MarshalSSZ: %v", err)

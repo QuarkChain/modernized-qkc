@@ -101,10 +101,7 @@ func TestMasterConnRejectsInvalidChainIDs(t *testing.T) {
 func TestMasterConnRPC(t *testing.T) {
 	h := &masterTestHandler{roots: make(chan *types.RootBlock, 1)}
 	chainID := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 100), big.NewInt(258))
-	encodedID, err := wire.ChainIDToSSZ(chainID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	encodedID := *uint256.MustFromBig(chainID)
 	mc, remote, _ := masterTestPair(t, h, 9, chainID)
 	chainID.SetInt64(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -127,7 +124,7 @@ func TestMasterConnRPC(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("root tip not handled")
 	}
-	resp, err = remote.SendRPC(ctx, byte(wire.ClusterOpConnectToSlavesRequest), &wire.ConnectToSlavesRequest{SlaveInfoList: []wire.SlaveInfo{{ChainID: encodedID}, {ChainID: [wire.UInt256Length]byte{3}}}})
+	resp, err = remote.SendRPC(ctx, byte(wire.ClusterOpConnectToSlavesRequest), &wire.ConnectToSlavesRequest{SlaveInfoList: []*wire.SlaveInfo{{ChainID: encodedID}, {ChainID: uint256.Int{3}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,8 +265,8 @@ func TestMasterConnConnectToSlaves(t *testing.T) {
 	addr := listener.Addr().(*net.TCPAddr)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := remote.SendRPC(ctx, byte(wire.ClusterOpConnectToSlavesRequest), &wire.ConnectToSlavesRequest{SlaveInfoList: []wire.SlaveInfo{
-		{ChainID: [wire.UInt256Length]byte{1}}, {ChainID: [wire.UInt256Length]byte{2}, Host: []byte("127.0.0.1"), Port: uint16(addr.Port)},
+	resp, err := remote.SendRPC(ctx, byte(wire.ClusterOpConnectToSlavesRequest), &wire.ConnectToSlavesRequest{SlaveInfoList: []*wire.SlaveInfo{
+		{ChainID: uint256.Int{1}}, {ChainID: uint256.Int{2}, Host: []byte("127.0.0.1"), Port: uint16(addr.Port)},
 	}})
 	if err != nil {
 		t.Fatal(err)
