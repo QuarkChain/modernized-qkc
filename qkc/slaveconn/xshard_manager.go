@@ -137,7 +137,6 @@ func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo comm.Slav
 		conn.Close()
 		return fmt.Errorf("xshard manager closed")
 	}
-	go p.waitConnectionHandlers(conn)
 	conn.Start()
 
 	// The remote slave must confirm its advertised chain ID.
@@ -194,7 +193,6 @@ func (p *XshardConnManager) HandleInbound(nc net.Conn) {
 	// Arm the registration barrier before Start, so the reader goroutine
 	// observes the channel (goroutine creation publishes the write).
 	conn.inboundRegistered = make(chan struct{})
-	go p.waitConnectionHandlers(conn)
 	conn.Start()
 
 	if !conn.waitUntilPingReceived() {
@@ -320,8 +318,8 @@ func (p *XshardConnManager) watchConnection(conn *XshardConn) {
 	}
 }
 
-// trackConnection registers a newly created conn. It reports false if the
-// manager is already closed. On success, the caller must start waitConnectionHandlers.
+// trackConnection registers a newly created conn and tracks its handlers until
+// they finish after closure. It reports false if the manager is already closed.
 func (p *XshardConnManager) trackConnection(conn *XshardConn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -331,6 +329,7 @@ func (p *XshardConnManager) trackConnection(conn *XshardConn) bool {
 	p.connections[conn] = struct{}{}
 	// Register under mu before Close allows the owner to wait.
 	p.handlerWaiters.Add(1)
+	go p.waitConnectionHandlers(conn)
 	return true
 }
 
