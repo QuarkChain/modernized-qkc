@@ -61,7 +61,7 @@ type ServiceConfig struct {
 }
 
 // Service owns the slave listener and cluster connections, not shard resources.
-// Assembly is NewService -> shard.New(client=Service) -> BindShard -> Start.
+// Assembly is NewService -> shard.New(client=Service) -> Start(shard).
 // Master must connect to every slave first (the first connection is treated as
 // Master), then await each slave's interconnection command in turn, aborting on
 // failure. PING(rootTip) initializes the shard afterward; Service trusts this order.
@@ -109,39 +109,26 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	return s, nil
 }
 
-// BindShard completes assembly exactly once, before Start. The owner calls it
-// during sequential construction, never concurrently with other service methods.
-func (s *Service) BindShard(backend ShardBackend) error {
-	if backend == nil {
-		return errors.New("missing shard backend")
-	}
-	if s.backend != nil || s.listener != nil || s.stopping {
-		return errors.New("shard backend must be bound once before start")
-	}
-	s.backend = backend
-	return nil
-}
-
-// Start listens without waiting for Master or root initialization. The owner
-// calls it once after BindShard and before Stop, without concurrent lifecycle calls.
-func (s *Service) Start() error {
+// Start installs the backend and listens without waiting for Master or root
+// initialization.
+func (s *Service) Start(backend ShardBackend) error {
 	if s.listener != nil || s.stopping {
 		return errors.New("slave service already started or stopped")
 	}
-	if s.backend == nil {
+	if backend == nil {
 		return errors.New("missing shard backend")
 	}
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return err
 	}
+	s.backend = backend
 	s.listener = listener
 	go s.acceptLoop(listener)
 	return nil
 }
 
-// Addr returns the bound address, or nil before Start. It must not be called
-// concurrently with Start.
+// Addr returns the bound address, or nil before Start.
 func (s *Service) Addr() net.Addr {
 	if s.listener == nil {
 		return nil

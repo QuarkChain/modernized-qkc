@@ -86,10 +86,7 @@ func newTestService(t *testing.T, id int64, backend *serviceBackend, shutdown fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BindShard(backend); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Start(); err != nil {
+	if err := s.Start(backend); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Stop() })
@@ -319,31 +316,49 @@ func TestServiceAssembly(t *testing.T) {
 	if s.Addr() != nil {
 		t.Fatal("constructor opened listener")
 	}
-	if err := s.Start(); err == nil {
-		t.Fatal("started before binding")
-	}
-	if err := s.BindShard(nil); err == nil {
-		t.Fatal("bound nil backend")
-	}
-	if err := s.BindShard(&serviceBackend{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.BindShard(&serviceBackend{}); err == nil {
-		t.Fatal("bound twice")
+	if err := s.Start(nil); err == nil {
+		t.Fatal("started with nil backend")
 	}
 	cfg.LocalChainID.SetInt64(99)
 	if s.cfg.LocalChainID.Int64() != 1 {
 		t.Fatal("configuration ID was not copied")
 	}
-	if err := s.Start(); err != nil {
+	if err := s.Start(&serviceBackend{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Start(); err == nil {
+	if err := s.Start(&serviceBackend{}); err == nil {
 		t.Fatal("started twice")
 	}
 	s.Stop()
-	if err := s.Start(); err == nil {
+	if err := s.Start(&serviceBackend{}); err == nil {
 		t.Fatal("restarted stopped service")
+	}
+}
+
+func TestServiceStartListenFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	s, err := NewService(ServiceConfig{ListenAddr: listener.Addr().String(), LocalChainID: big.NewInt(1), ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	if err := s.Start(&serviceBackend{}); err == nil {
+		t.Fatal("started on occupied address")
+	}
+	if s.backend != nil || s.Addr() != nil {
+		t.Fatal("failed start retained backend or listener")
+	}
+	listener.Close()
+	backend := &serviceBackend{}
+	if err := s.Start(backend); err != nil {
+		t.Fatal(err)
+	}
+	if s.backend != backend {
+		t.Fatal("retry did not install backend")
 	}
 }
 
@@ -506,10 +521,7 @@ func TestServiceWithShard(t *testing.T) {
 	}
 	t.Cleanup(func() { backend.Stop() })
 	t.Cleanup(func() { s.Stop() })
-	if err := s.BindShard(backend); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Start(); err != nil {
+	if err := s.Start(backend); err != nil {
 		t.Fatal(err)
 	}
 	remote := serviceMaster(t, s, nil)
