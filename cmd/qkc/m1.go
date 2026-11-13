@@ -185,8 +185,7 @@ func runM1(ctx *cli.Context) error {
 	runCtx, shutdown := context.WithCancelCause(signalCtx)
 	defer shutdown(nil)
 	var peers []*masterconn.SlaveConn
-	// Verify every shard before initializing any of them. M1 skips slave
-	// interconnection because cross-shard delivery is still mocked.
+	// Verify every master connection before asking any slave to dial another.
 	for _, slave := range slaves {
 		endpoint := net.JoinHostPort(slave.Host, strconv.Itoa(int(slave.Port)))
 		callCtx, cancel := context.WithTimeout(runCtx, 5*time.Second)
@@ -215,6 +214,16 @@ func runM1(ctx *cli.Context) error {
 			return fmt.Errorf("chain ID at %s: %w", endpoint, err)
 		}
 		peers = append(peers, peer)
+	}
+	// Interconnect one slave at a time, as required by the connection protocol.
+	// Empty deposit lists also need delivery ACKs before headers can be reported.
+	for _, peer := range peers {
+		callCtx, cancel := context.WithTimeout(runCtx, 5*time.Second)
+		err := peer.SendConnectToSlaves(callCtx, slaves)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("connect chain %s to slaves: %w", peer.RemoteChainID(), err)
+		}
 	}
 	for _, peer := range peers {
 		callCtx, cancel := context.WithTimeout(runCtx, 5*time.Second)

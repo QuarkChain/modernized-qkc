@@ -264,17 +264,11 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		utils.Fatalf("failed to setup OpenTelemetry: %v", err)
 	}
 
-	// M1 supplies its temporary cluster client before Ethereum assembles the shard.
-	var m1 *m1Service
-	if ctx.Bool(m1Flag.Name) {
-		m1 = newM1Service(stack, &cfg.Eth)
-	}
-	// Add Ethereum service.
+	// Add Ethereum, which owns the shard service and mining lifecycle.
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
-	// Temporary M1 service, enabled explicitly for local mining tests.
-	if m1 != nil {
-		if err := m1.register(eth); err != nil {
-			utils.Fatalf("Failed to register milestone 1: %v", err)
+	if ctx.Bool(m1Flag.Name) {
+		if err := checkM1(eth); err != nil {
+			utils.Fatalf("Failed to configure milestone 1: %v", err)
 		}
 	}
 

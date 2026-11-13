@@ -204,8 +204,7 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		return err
 	}
 	c.rootTip = rootHeader
-	// TODO(SlaveService): Call Init with the master's root checkpoint
-	// before enabling mining or allowing block imports from P2P sync.
+	// TODO(M2): Keep synchronization imports behind master initialization too.
 	return nil
 }
 

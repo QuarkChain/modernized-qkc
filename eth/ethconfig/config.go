@@ -94,11 +94,8 @@ type Config struct {
 	// If nil, the Ethereum main net block is used.
 	Genesis *core.Genesis `toml:",omitempty"`
 
-	// Runtime-only QKC dependencies, supplied before New assembles the shard.
-	// A supplied client's service must stop requests and close connections before
-	// Ethereum.Stop closes shared resources. Nil selects the default mock client.
-	QKCClusterClient shard.ClusterClient `toml:"-"`
-	// Nil leaves local mining disabled. Mining must be started after Shard.Init.
+	// Runtime-only local mining search. Nil disables local mining; Ethereum starts
+	// a configured search only after master initialization and cluster readiness.
 	QKCMiningSearch shard.NonceSearch `toml:"-"`
 
 	// Network ID separates blockchains on the peer-to-peer networking level. When left

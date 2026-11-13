@@ -18,9 +18,8 @@ import (
 // MarshalTOML marshals as TOML.
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
-		Genesis                 *core.Genesis       `toml:",omitempty"`
-		QKCClusterClient        shard.ClusterClient `toml:"-"`
-		QKCMiningSearch         shard.NonceSearch   `toml:"-"`
+		Genesis                 *core.Genesis     `toml:",omitempty"`
+		QKCMiningSearch         shard.NonceSearch `toml:"-"`
 		NetworkId               uint64
 		SyncMode                SyncMode
 		HistoryMode             history.HistoryPolicy
@@ -78,7 +77,6 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
-	enc.QKCClusterClient = c.QKCClusterClient
 	enc.QKCMiningSearch = c.QKCMiningSearch
 	enc.NetworkId = c.NetworkId
 	enc.SyncMode = c.SyncMode
@@ -140,9 +138,8 @@ func (c Config) MarshalTOML() (interface{}, error) {
 // UnmarshalTOML unmarshals from TOML.
 func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
-		Genesis                 *core.Genesis       `toml:",omitempty"`
-		QKCClusterClient        shard.ClusterClient `toml:"-"`
-		QKCMiningSearch         shard.NonceSearch   `toml:"-"`
+		Genesis                 *core.Genesis     `toml:",omitempty"`
+		QKCMiningSearch         shard.NonceSearch `toml:"-"`
 		NetworkId               *uint64
 		SyncMode                *SyncMode
 		HistoryMode             *history.HistoryPolicy
@@ -204,9 +201,6 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.Genesis != nil {
 		c.Genesis = dec.Genesis
-	}
-	if dec.QKCClusterClient != nil {
-		c.QKCClusterClient = dec.QKCClusterClient
 	}
 	if dec.QKCMiningSearch != nil {
 		c.QKCMiningSearch = dec.QKCMiningSearch

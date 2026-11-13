@@ -21,6 +21,7 @@ import (
 	"errors"
 	"maps"
 	"math/big"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/masterconn"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/triedb"
@@ -70,7 +72,7 @@ func qkcBackendNode(t *testing.T, datadir string) *node.Node {
 		datadir = t.TempDir()
 	}
 	stack, err := node.New(&node.Config{
-		Name: "qkc-backend-test", DataDir: datadir,
+		Name: "qkc-backend-test", DataDir: datadir, PrivateHost: "127.0.0.1",
 		P2P: p2p.Config{NoDiscovery: true, NoDial: true},
 	})
 	if err != nil {
@@ -129,6 +131,31 @@ func initQKCBackend(t *testing.T, backend *Ethereum) *qkctypes.RootBlock {
 	return root
 }
 
+type qkcHeaderHandler struct{}
+
+func (qkcHeaderHandler) AddShardBlockHeader(*big.Int, *types.Header, *uint256.Int) error {
+	return nil
+}
+
+func qkcTestMaster(t *testing.T, backend *Ethereum) *masterconn.SlaveConn {
+	t.Helper()
+	socket, err := net.DialTimeout("tcp", backend.SlaveService().Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := masterconn.NewSlaveConn(masterconn.SlaveConnConfig{
+		Conn: socket, RemoteChainID: backend.BlockChain().Config().ChainID,
+		Handler: qkcHeaderHandler{}, ShutdownMaster: func() {},
+	})
+	if err != nil {
+		socket.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(peer.Close)
+	peer.Start()
+	return peer
+}
+
 // Build a transaction from Ethereum's public pool to check that ShardChain uses
 // the same chain, PoSW engine and builder. Starting Node must not fake master Init.
 func TestQKCBackendIntegration(t *testing.T) {
@@ -145,7 +172,7 @@ func TestQKCBackendIntegration(t *testing.T) {
 				t.Fatal("Shard uses a different BlockChain")
 			}
 			if backend.Shard().RootTip() != (common.Hash{}) {
-				t.Fatal("mock service initialized the shard")
+				t.Fatal("service initialized the shard without master")
 			}
 			if err := backend.PoWMiner().StartLocalMining(); err == nil {
 				t.Fatal("local mining started without a searcher")
@@ -212,8 +239,21 @@ func TestQKCBackendStopWaitsForMining(t *testing.T) {
 	defer release()
 	config.QKCMiningSearch = search
 	backend := startQKCBackend(t, stack, &config)
-	initQKCBackend(t, backend)
-	if err := backend.PoWMiner().StartLocalMining(); err != nil {
+	peer := qkcTestMaster(t, backend)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := peer.SendPing(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-search.started:
+		t.Fatal("local mining started before master initialization")
+	default:
+	}
+	root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+		Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
+	}, qkctypes.ShardBlockHeaders{backend.BlockChain().Genesis().Header()}, nil)
+	if err := peer.SendPing(ctx, root); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -244,6 +284,65 @@ func TestQKCBackendStopWaitsForMining(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown did not finish")
+	}
+}
+
+func TestQKCBackendMiningRequiresConnections(t *testing.T) {
+	config := qkcBackendConfig()
+	config.Genesis.Config.QuarkChain.ChainIDs = append(config.Genesis.Config.QuarkChain.ChainIDs, big.NewInt(10002))
+	search := &qkcWaitingSearch{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	defer close(search.release)
+	config.QKCMiningSearch = search
+	stack := qkcBackendNode(t, "")
+	backend := startQKCBackend(t, stack, &config)
+	peer := qkcTestMaster(t, backend)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+		Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
+	}, qkctypes.ShardBlockHeaders{backend.BlockChain().Genesis().Header()}, nil)
+	if err := peer.SendPing(ctx, root); err == nil {
+		t.Fatal("initialized mining without the required remote shard connection")
+	}
+	stopped := make(chan struct{})
+	go func() { stack.Wait(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("failed initialization did not stop the node")
+	}
+	select {
+	case <-search.started:
+		t.Fatal("mining started before all connections were ready")
+	default:
+	}
+}
+
+func TestQKCBackendListenerFailureCleansUp(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	config := qkcBackendConfig()
+	stack := qkcBackendNode(t, "")
+	stack.Config().PrivatePort = listener.Addr().(*net.TCPAddr).Port
+	backend, err := New(stack, &config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := backend.BlockChain().SubscribeChainHeadEvent(make(chan core.ChainHeadEvent, 1))
+	defer sub.Unsubscribe()
+	if err := stack.Start(); err == nil {
+		t.Fatal("started with an occupied slave port")
+	}
+	select {
+	case <-sub.Err():
+	default:
+		t.Fatal("Ethereum.Start failure left the blockchain running")
+	}
+	if err := backend.ChainDb().Put([]byte("closed"), nil); err == nil {
+		t.Fatal("Ethereum.Start failure left the database open")
 	}
 }
 
@@ -308,5 +407,10 @@ func TestQKCBackendConstructionErrors(t *testing.T) {
 		if backend, err := New(stack, &config); err == nil || backend != nil {
 			t.Fatalf("invalid tracer accepted: %v", err)
 		}
+		db, err := stack.OpenDatabaseWithOptions("chaindata", node.DatabaseOptions{Cache: 16, Handles: 16})
+		if err != nil {
+			t.Fatalf("constructor failure left the database open: %v", err)
+		}
+		db.Close()
 	})
 }
