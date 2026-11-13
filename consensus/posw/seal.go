@@ -18,6 +18,7 @@ package posw
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"math/big"
 	"sync"
@@ -46,6 +47,25 @@ func (v *EthashVerifier) Close() error {
 	defer v.cacheMu.Unlock()
 	v.caches.Purge()
 	return nil
+}
+
+// SearchNonce searches Ethash seals at the supplied effective difficulty, starting
+// at startNonce. It is intended for low-difficulty local mining and tests, using
+// CPU computation and the verification cache instead of allocating a full DAG.
+// It returns false if ctx is canceled or difficulty is not positive.
+func (p *PoSW) SearchNonce(ctx context.Context, number uint64, sealHash common.Hash, difficulty *big.Int, startNonce uint64) (types.BlockNonce, common.Hash, bool) {
+	if ctx.Err() != nil || difficulty == nil || difficulty.Sign() <= 0 {
+		return types.BlockNonce{}, common.Hash{}, false
+	}
+	target := new(big.Int).Div(new(big.Int).Lsh(big.NewInt(1), 256), difficulty)
+	cache, size := p.EthashVerifier.cache(number), datasetSize(number)
+	for nonce := startNonce; ctx.Err() == nil; nonce++ {
+		digest, result := hashimotoLight(size, cache, sealHash[:], nonce)
+		if new(big.Int).SetBytes(result).Cmp(target) <= 0 {
+			return types.EncodeNonce(nonce), common.BytesToHash(digest), true
+		}
+	}
+	return types.BlockNonce{}, common.Hash{}, false
 }
 
 // VerifySeal checks Ethash against the parent-state PoSW target. Header-only
