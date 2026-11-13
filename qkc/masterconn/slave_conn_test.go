@@ -3,8 +3,6 @@ package masterconn
 import (
 	"context"
 	"errors"
-	"io"
-	"fmt"
 	"math/big"
 	"net"
 	"strings"

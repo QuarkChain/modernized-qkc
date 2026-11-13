@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -625,17 +626,28 @@ func TestServiceWithShard(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	alloc := core.SystemContractAllocs()
 	maps.Copy(alloc, core.PoSWStakingContractAllocs(config))
-	backend, err := shard.New(config, &core.Genesis{
+	genesis := &core.Genesis{
+		Config:   config,
 		GasLimit: 12_000_000, Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
 		ExtraData: (&types.QKCExtra{
 			ChainID: chainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
 			XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
 		}).Encode(), Alloc: alloc,
-	}, db, nil, s)
+	}
+	engine, err := posw.New(config, genesis.ToBlock().Header())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { backend.Stop() })
+	t.Cleanup(func() { engine.Close() })
+	chain, err := core.NewBlockChain(db, genesis, engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(chain.Stop)
+	backend, err := shard.New(shard.NewShardChain(db, chain, nil), s)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { s.Stop() })
 	if err := s.Start(backend); err != nil {
 		t.Fatal(err)

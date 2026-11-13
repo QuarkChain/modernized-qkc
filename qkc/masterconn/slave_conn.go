@@ -58,8 +58,6 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("slave handler must not be nil")
 	}
-	if cfg.RemoteChainID == nil || cfg.RemoteChainID.Sign() <= 0 || cfg.RemoteChainID.BitLen() > 256 {
-		return nil, fmt.Errorf("invalid slave chain ID: %v", cfg.RemoteChainID)
 	if err := conn.ValidateSlaveChainID(cfg.RemoteChainID); err != nil {
 		return nil, err
 	}

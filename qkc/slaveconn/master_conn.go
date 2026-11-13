@@ -83,9 +83,6 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.SlaveDialer == nil {
 		return nil, errors.New("slave dialer must not be nil")
 	}
-	if cfg.ShutdownSlave == nil {
-		return nil, errors.New("master connection shutdown callback must not be nil")
-	}
 	if err := conn.ValidateSlaveChainID(cfg.LocalChainID); err != nil {
 		return nil, err
 	}
