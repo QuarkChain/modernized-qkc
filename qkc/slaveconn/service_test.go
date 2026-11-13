@@ -299,7 +299,6 @@ func TestServiceStopWaitsForBackend(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return after backend finished")
 	}
-
 }
 
 // Even a connection rejected before PING may have dispatched a business call.

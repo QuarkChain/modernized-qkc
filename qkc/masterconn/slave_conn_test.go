@@ -3,7 +3,6 @@ package masterconn
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -33,8 +32,6 @@ func (handler slaveHandlerFunc) AddShardBlockHeader(source *big.Int, header *typ
 	return handler.addShardBlockHeader(source, header, amount)
 }
 
-func noopShutdown() {}
-
 func testRoot(number uint32) *qkctypes.RootBlock {
 	return qkctypes.NewRootBlockWithHeader(&qkctypes.RootBlockHeader{Number: number})
 }
@@ -58,7 +55,7 @@ func newSlaveTestPair(t *testing.T, chainID *big.Int, handler SlaveRequestHandle
 	if handler == nil {
 		handler = slaveHandlerFunc{}
 	}
-	sc, err := NewSlaveConn(SlaveConnConfig{Conn: local, RemoteChainID: chainID, Handler: handler, ShutdownMaster: noopShutdown})
+	sc, err := NewSlaveConn(SlaveConnConfig{Conn: local, RemoteChainID: chainID, Handler: handler})
 	if err != nil {
 		local.Close()
 		remote.Close()
@@ -98,7 +95,6 @@ func TestSlaveConnConfig(t *testing.T) {
 	}{
 		{"nil connection", func(cfg *SlaveConnConfig) { cfg.Conn = nil }},
 		{"nil handler", func(cfg *SlaveConnConfig) { cfg.Handler = nil }},
-		{"nil shutdown", func(cfg *SlaveConnConfig) { cfg.ShutdownMaster = nil }},
 		{"nil chain ID", func(cfg *SlaveConnConfig) { cfg.RemoteChainID = nil }},
 		{"zero chain ID", func(cfg *SlaveConnConfig) { cfg.RemoteChainID = new(big.Int) }},
 		{"negative chain ID", func(cfg *SlaveConnConfig) { cfg.RemoteChainID = big.NewInt(-1) }},
@@ -111,7 +107,7 @@ func TestSlaveConnConfig(t *testing.T) {
 			defer remote.Close()
 			cfg := SlaveConnConfig{
 				Conn: local, RemoteChainID: big.NewInt(1),
-				Handler: slaveHandlerFunc{}, ShutdownMaster: noopShutdown,
+				Handler: slaveHandlerFunc{},
 			}
 			test.change(&cfg)
 			if connection, err := NewSlaveConn(cfg); err == nil {
@@ -153,7 +149,7 @@ func TestSlaveConnRPC(t *testing.T) {
 	local, remote := net.Pipe()
 	h := &businessHandler{roots: make(chan *qkctypes.RootBlock, 2), address: common.Address{5}, blockHash: common.Hash{6}}
 	receivedHeader := make(chan *types.Header, 1)
-	sc, err := NewSlaveConn(SlaveConnConfig{Conn: local, RemoteChainID: chainID, ShutdownMaster: noopShutdown,
+	sc, err := NewSlaveConn(SlaveConnConfig{Conn: local, RemoteChainID: chainID,
 		Handler: slaveHandlerFunc{addShardBlockHeader: func(source *big.Int, header *types.Header, amount *uint256.Int) error {
 			if source.Cmp(wantID) != 0 || amount.Cmp(uint256.NewInt(0x10203)) != 0 {
 				t.Error("incorrect decoded header notification")
@@ -166,7 +162,7 @@ func TestSlaveConnRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	targets := make(chan comm.SlaveInfo, 1)
-	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{Conn: remote, LocalChainID: wantID, Handler: h, ShutdownSlave: noopShutdown,
+	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{Conn: remote, LocalChainID: wantID, Handler: h,
 		SlaveDialer: slaveDialerFunc(func(_ context.Context, info comm.SlaveInfo) error { targets <- info; return nil })})
 	if err != nil {
 		sc.Close()
@@ -419,39 +415,6 @@ func TestSlaveConnPeerFramesDoNotReachLocalDispatch(t *testing.T) {
 	}
 	if sc.IsClosed() {
 		t.Fatal("peer frame closed the physical connection")
-	}
-}
-
-func TestSlaveConnCloseShutsDownMaster(t *testing.T) {
-	for _, remoteClose := range []bool{false, true} {
-		t.Run(fmt.Sprint(remoteClose), func(t *testing.T) {
-			local, remote := net.Pipe()
-			defer remote.Close()
-			shutdown := make(chan struct{}, 2)
-			sc, err := NewSlaveConn(SlaveConnConfig{Conn: local, RemoteChainID: big.NewInt(1), Handler: slaveHandlerFunc{}, ShutdownMaster: func() { shutdown <- struct{}{} }})
-			if err != nil {
-				local.Close()
-				t.Fatal(err)
-			}
-			defer sc.Close()
-			sc.Start()
-			if remoteClose {
-				remote.Close()
-			} else {
-				sc.Close()
-			}
-			select {
-			case <-shutdown:
-			case <-time.After(5 * time.Second):
-				t.Fatal("master shutdown callback was not called")
-			}
-			sc.Close()
-			select {
-			case <-shutdown:
-				t.Fatal("master shutdown callback called more than once")
-			case <-time.After(10 * time.Millisecond):
-			}
-		})
 	}
 }
 

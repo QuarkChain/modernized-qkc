@@ -195,7 +195,7 @@ func (s *Service) acceptLoop(listener net.Listener) {
 			mc, err := NewMasterConn(MasterConnConfig{
 				Conn: nc, LocalChainID: s.cfg.LocalChainID,
 				MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s,
-				SlaveDialer: s, ShutdownSlave: s.shutdown, Logger: s.cfg.Logger,
+				SlaveDialer: s, Logger: s.cfg.Logger,
 			})
 			if err != nil {
 				s.mu.Unlock()
@@ -204,6 +204,10 @@ func (s *Service) acceptLoop(listener net.Listener) {
 				return
 			}
 			s.master = mc
+			go func() {
+				<-mc.WaitUntilClosed()
+				s.shutdown()
+			}()
 			mc.Start()
 		} else {
 			go s.xshardManager.HandleInbound(nc)
