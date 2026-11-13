@@ -59,8 +59,8 @@ func New(config *params.QuarkChainConfig) (*PoSW, error) {
 }
 
 // NewSimulate keeps root consensus rules while skipping Ethash verification.
-// TODO: Select this engine through chain consensus configuration in RootChain's
-// New/Init flow; default to PoSW and require all nodes to use the same setting.
+// TODO: Select this engine in the backend through chain consensus configuration;
+// default to PoSW and require all nodes to use the same setting.
 func NewSimulate(config *params.QuarkChainConfig) (*PoSW, error) {
 	engine, err := New(config)
 	if err != nil {

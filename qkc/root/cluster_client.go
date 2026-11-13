@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package master defines the cluster client used by master business logic.
-package master
+// Package root manages the root chain and defines its cluster client.
+package root
 
 import (
 	"context"
@@ -31,6 +31,12 @@ import (
 // chains. Master business logic holds this interface instead of those
 // connections and does not construct wire messages.
 type ClusterClient interface {
+	// Ping sends the checkpoint in PING to every configured shard host and waits
+	// for initialization to finish. Missing connections and RPC failures return
+	// errors. Like Python SlaveServer.create_shards, receivers skip shards that
+	// are already initialized, so startup can retry after partial success.
+	Ping(ctx context.Context, checkpoint *qkctypes.RootBlock) error
+
 	// BroadcastRootBlock sends block to every ShardNode in the cluster and waits
 	// for all acknowledgements. A send failure, a nonzero remote ErrorCode
 	// (returned as *comm.RemoteError), or a ShardNode without a connection is
