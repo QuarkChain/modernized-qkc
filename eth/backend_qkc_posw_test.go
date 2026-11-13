@@ -14,41 +14,42 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package shard
+package eth
 
 import (
 	"context"
-	"maps"
 	"math/big"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/rawdb"
-	"github.com/ethereum/go-ethereum/core/txpool"
-	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
-	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
-	"github.com/holiman/uint256"
+	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
-type nonceSearchFunc func(context.Context, *MiningWork) (types.BlockNonce, common.Hash, bool)
+type nonceSearchFunc func(context.Context, *shard.MiningWork) (types.BlockNonce, common.Hash, bool)
 
-func (f nonceSearchFunc) Search(ctx context.Context, work *MiningWork) (types.BlockNonce, common.Hash, bool) {
+func (f nonceSearchFunc) Search(ctx context.Context, work *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
 	return f(ctx, work)
 }
 
-func TestPoWMinerPoSW(t *testing.T) {
-	testPoWMiner(t, func(t *testing.T) {
+func TestQKCBackendPoSWMining(t *testing.T) {
+	// Process-wide sender workers must outlive the synctest bubble.
+	core.SenderCacher()
+	synctest.Test(t, func(t *testing.T) {
+		// Node's discovery LevelDB drains its memory pool for up to one second
+		// after Close. Run this last so its timer can finish before time stops.
+		t.Cleanup(func() { time.Sleep(time.Second) })
 		const fullDifficulty, reducedDifficulty = 32, 4
-		config := params.NewTestQuarkChainConfig(10002, 10002)
-		config.QuarkChain.ConsensusType = params.ConsensusEthash
-		staking := config.QuarkChain.PoSW
+		config := qkcBackendConfig()
+		config.Genesis.Config.QuarkChain.ConsensusType = params.ConsensusEthash
+		staking := config.Genesis.Config.QuarkChain.PoSW
 		staking.StakingEnabled, staking.WindowSize, staking.DiffDivider = true, 4, 8
 		// The base difficulty stays at 32: it is below AdjustmentFactor (512),
 		// so integer difficulty adjustment is zero even across the withdrawal delay.
@@ -57,68 +58,24 @@ func TestPoWMinerPoSW(t *testing.T) {
 		// 20 QKC grants two discounted blocks. WindowSize includes the candidate,
 		// so eligibility counts this coinbase's blocks among the preceding three.
 		stake := new(big.Int).Mul(big.NewInt(2), staking.StakePerBlock)
-		key, err := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		if err != nil {
-			t.Fatal(err)
-		}
 		// Miner A owns the stake; unstaked miner B advances the window.
-		coinbase, other := crypto.PubkeyToAddress(key.PublicKey), common.Address{0x42}
-		alloc := core.SystemContractAllocs()
-		maps.Copy(alloc, core.PoSWStakingContractAllocs(config))
-		alloc[coinbase] = types.Account{Balance: new(big.Int).Mul(big.NewInt(1000), big.NewInt(params.Ether))}
-		genesis := &core.Genesis{
-			Config: config, Alloc: alloc, GasLimit: 12_000_000,
-			Difficulty: new(big.Int), Mixhash: common.BigToHash(staking.MinimumDifficulty),
-			ExtraData: (&types.QKCExtra{
-				ChainID: config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
-				XShardGasLimit: 12_000_000 / params.XShardGasLimitDivisor,
-			}).Encode(),
+		coinbase, other := address, common.Address{0x42}
+		config.Genesis.Alloc[coinbase] = types.Account{Balance: new(big.Int).Mul(big.NewInt(1000), big.NewInt(params.Ether))}
+		config.Genesis.Mixhash = common.BigToHash(staking.MinimumDifficulty)
+		backend := startQKCBackend(t, qkcBackendNode(t, ""), &config)
+		pow, ok := backend.Engine().(*posw.PoSW)
+		if !ok || pow.IsSimulate() {
+			t.Fatalf("consensus engine %T, want real Ethash PoSW", backend.Engine())
 		}
-		db := rawdb.NewMemoryDatabase()
-		t.Cleanup(func() { db.Close() })
-		// Use real PoSW for both construction and full block import, so seal
-		// validation derives the Ethash target from the actual parent state.
-		pow, err := posw.New(config, genesis.ToBlock().Header())
-		if err != nil {
-			t.Fatal(err)
+		chain := backend.BlockChain()
+		if chain.Engine() != pow {
+			t.Fatal("BlockChain must use the Ethereum-owned PoSW engine")
 		}
-		t.Cleanup(func() { pow.Close() })
-		chain, err := core.NewBlockChain(db, genesis, pow, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(chain.Stop)
-		poolConfig := legacypool.DefaultConfig
-		poolConfig.Journal = ""
-		pool, err := txpool.New(poolConfig.PriceLimit, chain, []txpool.SubPool{legacypool.New(poolConfig, chain)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { pool.Close() })
-		minerConfig := miner.DefaultConfig
-		minerConfig.GasCeil = genesis.GasLimit
-		builder := miner.New(miningBackend{chain, pool}, minerConfig, pow)
-		reported := make(chan *types.Header, 1)
-		s, err := New(NewShardChain(db, chain, builder), &backendClusterClient{
-			broadcast: func(context.Context, *big.Int, common.Hash, []*types.DepositTx) error { return nil },
-			report: func(_ context.Context, header *types.Header, _ *uint256.Int) error {
-				reported <- header
-				return nil
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
-			Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
-		}, qkctypes.ShardBlockHeaders{s.CurrentBlock()}, nil)
-		if err := s.Init(root); err != nil {
-			t.Fatal(err)
-		}
+		initQKCBackend(t, backend)
 		t.Logf("Initialized real Ethash PoSW: coinbase=%s WindowSize=%d StakePerBlock=10 QKC DiffDivider=%d", coinbase, staking.WindowSize, staking.DiffDivider)
 
 		fullDifficultyBig := big.NewInt(fullDifficulty)
-		search := func(ctx context.Context, work *MiningWork) (types.BlockNonce, common.Hash, bool) {
+		search := func(ctx context.Context, work *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
 			// Work can be timestamped at parent.Time+1, ahead of the test clock.
 			select {
 			case <-time.After(time.Until(time.Unix(int64(work.Time), 0))):
@@ -149,8 +106,11 @@ func TestPoWMinerPoSW(t *testing.T) {
 		mine := func(label string, address common.Address, wantDifficulty int64) *types.Block {
 			t.Helper()
 			parent := chain.CurrentBlock()
-			works := make(chan *MiningWork)
-			m := NewPoWMiner(s, PoWMinerConfig{Coinbase: address, Search: nonceSearchFunc(func(ctx context.Context, work *MiningWork) (types.BlockNonce, common.Hash, bool) {
+			heads := make(chan core.ChainHeadEvent, 1)
+			sub := chain.SubscribeChainHeadEvent(heads)
+			defer sub.Unsubscribe()
+			works := make(chan *shard.MiningWork)
+			backend.powMiner = shard.NewPoWMiner(backend.Shard(), shard.PoWMinerConfig{Coinbase: address, Search: nonceSearchFunc(func(ctx context.Context, work *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
 				// The test receives once, releasing exactly one search. The next search
 				// blocks here until StopLocalMining cancels it, keeping stake changes
 				// and assertions between blocks while exercising the real mining loop.
@@ -161,11 +121,12 @@ func TestPoWMinerPoSW(t *testing.T) {
 				}
 				return search(ctx, work)
 			})})
+			m := backend.PoWMiner()
 			t.Cleanup(m.StopLocalMining)
 			if err := m.StartLocalMining(); err != nil {
 				t.Fatal(err)
 			}
-			var work *MiningWork
+			var work *shard.MiningWork
 			select {
 			case work = <-works:
 			case <-time.After(time.Minute):
@@ -176,13 +137,17 @@ func TestPoWMinerPoSW(t *testing.T) {
 			}
 			var header *types.Header
 			select {
-			case header = <-reported:
+			case event := <-heads:
+				header = event.Header
 			case <-time.After(time.Minute):
 				t.Fatalf("%s: timed out waiting for a mined block", label)
 			}
 			m.StopLocalMining()
 			if header.ParentHash != parent.Hash() || header.Number.Uint64() != parent.Number.Uint64()+1 || header.Coinbase != address || chain.CurrentBlock().Hash() != header.Hash() {
 				t.Fatalf("%s: mined block does not extend the canonical head", label)
+			}
+			if committed, err := qkcrawdb.IsShardBlockCommitted(backend.ChainDb(), header.Hash()); err != nil || !committed {
+				t.Fatalf("%s: mined block delivery not committed: %v", label, err)
 			}
 			// Headers commit the base difficulty; only the work's seal target
 			// receives the staking discount.
@@ -218,11 +183,11 @@ func TestPoWMinerPoSW(t *testing.T) {
 		var nonce uint64
 		send := func(value *big.Int, data []byte) *types.Transaction {
 			t.Helper()
-			tx := types.MustSignNewTx(key, types.LatestSigner(config), &types.LegacyTx{
+			tx := types.MustSignNewTx(key, types.LatestSigner(chain.Config()), &types.LegacyTx{
 				Nonce: nonce, To: &params.ShardStakingContractAddress, Value: value,
 				Gas: 200_000, GasPrice: big.NewInt(2 * params.GWei), Data: data,
 			})
-			if err := pool.Add([]*types.Transaction{tx}, true)[0]; err != nil {
+			if err := backend.TxPool().Add([]*types.Transaction{tx}, true)[0]; err != nil {
 				t.Fatal(err)
 			}
 			nonce++
@@ -257,8 +222,11 @@ func TestPoWMinerPoSW(t *testing.T) {
 		}
 		rejectDiscount := func(label string) {
 			t.Helper()
-			m := NewPoWMiner(s, PoWMinerConfig{})
-			work := getWork(t, m, coinbase)
+			m := backend.PoWMiner()
+			work, err := m.GetWork(t.Context(), coinbase)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if work.Difficulty.Int64() != fullDifficulty {
 				t.Fatalf("%s: required difficulty %s, want %d", label, work.Difficulty, fullDifficulty)
 			}
@@ -276,8 +244,8 @@ func TestPoWMinerPoSW(t *testing.T) {
 			if err := m.SubmitWork(work.SealHash, nonce, mix); err == nil || err.Error() != "invalid Ethash proof of work" {
 				t.Fatalf("%s: discounted block error %v, want invalid Ethash proof of work", label, err)
 			}
-			if chain.CurrentBlock().Hash() != head.Hash() || len(reported) != 0 {
-				t.Fatalf("%s: rejected block changed the head or was reported", label)
+			if chain.CurrentBlock().Hash() != head.Hash() {
+				t.Fatalf("%s: rejected block changed the head", label)
 			}
 			t.Logf("%s: block=#%d searchedDifficulty=%d requiredDifficulty=%d nonce=%d validation=rejected (invalid Ethash proof of work)", label, work.Number, reducedDifficulty, fullDifficulty, nonce.Uint64())
 		}
