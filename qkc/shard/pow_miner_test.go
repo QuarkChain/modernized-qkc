@@ -19,14 +19,23 @@ package shard
 import (
 	"context"
 	"errors"
+	"maps"
 	"math/big"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/posw"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/txpool"
+	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/miner"
+	"github.com/ethereum/go-ethereum/params"
+	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
 
@@ -71,11 +80,11 @@ func getWork(t *testing.T, m *PoWMiner, coinbase common.Address) *MiningWork {
 	return work
 }
 
-func waitForHead(t *testing.T, env *testEnv, number uint64) {
+func waitForHead(t *testing.T, chain *core.BlockChain, number uint64) {
 	t.Helper()
-	for deadline := time.Now().Add(time.Hour); env.chain.CurrentBlock().Number.Uint64() < number; {
+	for deadline := time.Now().Add(time.Hour); chain.CurrentBlock().Number.Uint64() < number; {
 		if time.Now().After(deadline) {
-			t.Fatalf("head #%d did not reach #%d", env.chain.CurrentBlock().Number.Uint64(), number)
+			t.Fatalf("head #%d did not reach #%d", chain.CurrentBlock().Number.Uint64(), number)
 		}
 		time.Sleep(time.Second)
 	}
@@ -287,19 +296,112 @@ func TestPoWMinerLocal(t *testing.T) {
 
 func TestPoWMinerSimulated(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
+		config := params.NewTestQuarkChainConfig(10002, 10002)
+		config.QuarkChain.ConsensusType = params.ConsensusSimulate
+		alloc := core.SystemContractAllocs()
+		maps.Copy(alloc, core.PoSWStakingContractAllocs(config))
+		genesis := &core.Genesis{
+			Config: config, Alloc: alloc, GasLimit: 12_000_000,
+			Difficulty: new(big.Int), Mixhash: common.BigToHash(common.Big1),
+		}
+		genesis.ExtraData = (&types.QKCExtra{
+			ChainID: config.ChainID, Cursor: types.XShardCursor{RootBlockHeight: 1},
+			XShardGasLimit: genesis.GasLimit / params.XShardGasLimitDivisor,
+		}).Encode()
+		db := rawdb.NewMemoryDatabase()
+		t.Cleanup(func() { db.Close() })
+		engine, err := ethconfig.CreateConsensusEngine(config, db, genesis)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { engine.Close() })
+		pow, ok := engine.(*posw.PoSW)
+		if !ok || !pow.IsSimulate() {
+			t.Fatalf("consensus engine %T, want simulated PoSW", engine)
+		}
+		t.Logf("Initialized consensus: chainID=%s type=%s", config.ChainID, config.QuarkChain.ConsensusType)
+		// Use the selected engine for both construction and full block import.
+		chain, err := core.NewBlockChain(db, genesis, engine, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(chain.Stop)
+		poolConfig := legacypool.DefaultConfig
+		poolConfig.Journal = ""
+		pool, err := txpool.New(poolConfig.PriceLimit, chain, []txpool.SubPool{legacypool.New(poolConfig, chain)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { pool.Close() })
+		minerConfig := miner.DefaultConfig
+		minerConfig.GasCeil = genesis.GasLimit
+		builder := miner.New(miningBackend{chain, pool}, minerConfig, engine)
+
+		// Reporting runs in the mining loop after import. StopLocalMining
+		// waits for the callback before the test reads the collected headers.
+		var headers []*types.Header
+		client := &backendClusterClient{
+			broadcast: func(context.Context, *big.Int, common.Hash, []*types.DepositTx) error { return nil },
+			report: func(_ context.Context, header *types.Header, _ *uint256.Int) error {
+				if err := pow.VerifyHeader(chain, header); err != nil {
+					t.Errorf("block #%d header verification: %v", header.Number, err)
+				} else {
+					t.Logf("Block #%d passed header verification", header.Number)
+				}
+				if err := pow.VerifySeal(chain, header); err != nil {
+					t.Errorf("block #%d seal verification: %v", header.Number, err)
+				} else {
+					t.Logf("Block #%d passed simulated seal verification", header.Number)
+				}
+				if head := chain.CurrentBlock(); head.Hash() != header.Hash() {
+					t.Errorf("block #%d was reported without becoming head #%d", header.Number, head.Number)
+				} else {
+					t.Logf("Block #%d became head: hash=%s parent=%s", header.Number, header.Hash(), header.ParentHash)
+				}
+				headers = append(headers, header)
+				return nil
+			},
+		}
+		s, err := New(NewShardChain(db, chain, builder), client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+			Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
+		}, qkctypes.ShardBlockHeaders{s.CurrentBlock()}, nil)
+		if err := s.Init(root); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Initialized shard: genesis=%s root=%s", chain.Genesis().Hash(), root.Hash())
 		coinbase := common.Address{0x42}
-		env, m := newPoWMinerEnv(t, PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
+		m := NewPoWMiner(s, PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
+		t.Cleanup(m.StopLocalMining)
+		t.Logf("Starting simulated local mining: coinbase=%s targetBlocks=3", coinbase)
 		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
-		waitForHead(t, env, 3)
+		waitForHead(t, chain, 3)
 		m.StopLocalMining()
-		for n := uint64(1); n <= 3; n++ {
-			block, parent := env.chain.GetBlockByNumber(n), env.chain.GetBlockByNumber(n-1)
+		t.Logf("Stopped local mining: head=#%d reportedBlocks=%d", chain.CurrentBlock().Number, len(headers))
+		if len(headers) < 3 {
+			t.Fatalf("reported %d blocks, want at least 3", len(headers))
+		}
+		parent := chain.Genesis()
+		for i, header := range headers {
+			n := uint64(i + 1)
+			block := chain.GetBlockByNumber(n)
+			if block == nil || block.Hash() != header.Hash() || header.Number.Uint64() != n || block.ParentHash() != parent.Hash() {
+				t.Fatalf("reported block #%d does not extend the canonical chain", n)
+			}
 			if block.Coinbase() != coinbase || block.Time() <= parent.Time() || block.Time() > uint64(time.Now().Unix()) {
 				t.Fatalf("unexpected block #%d: coinbase %x, time %d after %d", n, block.Coinbase(), block.Time(), parent.Time())
 			}
+			parent = block
 		}
+		if chain.CurrentBlock().Hash() != parent.Hash() {
+			t.Fatal("head is not the last reported block")
+		}
+		t.Logf("Validated %d consecutive canonical blocks; final head #%d (%s)", len(headers), parent.Number(), parent.Hash())
 	})
 }
 
