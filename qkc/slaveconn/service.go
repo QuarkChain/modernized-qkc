@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"syscall"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -180,7 +181,12 @@ func (s *Service) shutdown() {
 func (s *Service) acceptLoop(listener net.Listener) {
 	for {
 		nc, err := listener.Accept()
+		// An aborted pending connection does not invalidate the listener.
+		if errors.Is(err, syscall.ECONNABORTED) {
+			continue
+		}
 		if err != nil {
+			s.cfg.Logger.Debug("Accept failed", "err", err)
 			s.shutdown()
 			return
 		}

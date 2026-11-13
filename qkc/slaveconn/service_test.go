@@ -25,6 +25,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -385,6 +386,58 @@ func TestServiceStopDoesNotRequestShutdown(t *testing.T) {
 	s.shutdown()
 	if calls.Load() != 0 {
 		t.Fatalf("normal Stop requested shutdown %d times", calls.Load())
+	}
+}
+
+type serviceAcceptListener struct {
+	net.Listener
+	accept func() (net.Conn, error)
+}
+
+func (l serviceAcceptListener) Accept() (net.Conn, error) { return l.accept() }
+
+func TestServiceAcceptErrors(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ECONNABORTED} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			var shutdowns int
+			s, err := NewService(ServiceConfig{
+				ListenAddr: "127.0.0.1:0", LocalChainID: big.NewInt(1),
+				ConfiguredChainIDs: []*big.Int{big.NewInt(1)},
+				Shutdown:           func() { shutdowns++ },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Stop()
+			nc, peer := net.Pipe()
+			defer nc.Close()
+			defer peer.Close()
+			var accepts int
+			s.acceptLoop(serviceAcceptListener{accept: func() (net.Conn, error) {
+				accepts++
+				switch accepts {
+				case 1:
+					return nil, &net.OpError{Op: "accept", Net: "tcp", Err: errno}
+				case 2:
+					if shutdowns != 0 {
+						t.Fatal("aborted connection requested shutdown")
+					}
+					return nc, nil
+				default:
+					return nil, errors.New("permanent accept failure")
+				}
+			}})
+			if errno == syscall.ECONNABORTED {
+				if accepts != 3 || s.master == nil {
+					t.Fatalf("did not resume accepting: accepts=%d, master=%v", accepts, s.master)
+				}
+			} else if accepts != 1 || s.master != nil {
+				t.Fatalf("resource exhaustion did not stop accepting: accepts=%d, master=%v", accepts, s.master)
+			}
+			if shutdowns != 1 {
+				t.Fatalf("permanent accept error requested shutdown %d times", shutdowns)
+			}
+		})
 	}
 }
 
