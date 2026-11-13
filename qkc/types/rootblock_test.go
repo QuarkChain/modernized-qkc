@@ -44,6 +44,34 @@ func newTestShardHeader(shard uint32, number int64) *ctypes.Header {
 	}
 }
 
+func TestRootBlockHeaderSanityCheck(t *testing.T) {
+	header := &RootBlockHeader{Time: 1, Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1)}
+	if err := (*RootBlockHeader)(nil).SanityCheck(); err == nil {
+		t.Fatal("nil root header accepted")
+	}
+	if err := header.SanityCheck(); err != nil {
+		t.Fatalf("valid genesis header rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*RootBlockHeader)
+		want string
+	}{
+		{"version", func(h *RootBlockHeader) { h.Version = 1 }, "version"},
+		{"difficulty", func(h *RootBlockHeader) { h.Difficulty.Clear() }, "difficulty"},
+		{"total difficulty", func(h *RootBlockHeader) { h.TotalDifficulty.Clear() }, "difficulty"},
+		{"extra", func(h *RootBlockHeader) { h.Extra = make([]byte, 1025) }, "extra"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := CopyRootBlockHeader(header)
+			test.edit(candidate)
+			if err := candidate.SanityCheck(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func newTestRootBlock() *RootBlock {
 	header := &RootBlockHeader{
 		Version:         1,

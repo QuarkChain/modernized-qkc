@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"sync"
@@ -84,14 +83,15 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.SlaveDialer == nil {
 		return nil, errors.New("slave dialer must not be nil")
 	}
-	if cfg.LocalChainID == nil || cfg.LocalChainID.Sign() <= 0 || cfg.LocalChainID.BitLen() > 256 {
-		return nil, fmt.Errorf("invalid slave chain ID: %v", cfg.LocalChainID)
+	if cfg.ShutdownSlave == nil {
+		return nil, errors.New("master connection shutdown callback must not be nil")
 	}
-	maxPayloadSize := cfg.MaxPayloadSize
-	if maxPayloadSize == 0 {
-		maxPayloadSize = wire.MaxFramePayloadLen
-	} else if maxPayloadSize > wire.MaxFramePayloadLen {
-		return nil, fmt.Errorf("max payload size %d exceeds protocol limit %d", maxPayloadSize, wire.MaxFramePayloadLen)
+	if err := conn.ValidateSlaveChainID(cfg.LocalChainID); err != nil {
+		return nil, err
+	}
+	transport, err := conn.NewMasterSlaveTransport(cfg.Conn, cfg.MaxPayloadSize)
+	if err != nil {
+		return nil, err
 	}
 
 	mc := &MasterConn{
@@ -104,23 +104,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	forwarder := mc.routeFrame
 
 	mc.BaseConn = conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(cfg.Conn, func(r io.Reader) (*wire.ClusterFrame, error) {
-			return wire.ReadClusterFrameWithPeerID(r, maxPayloadSize)
-		}, wire.WriteClusterFrameWithPeerID),
-		Forwarder: forwarder,
-		Serializers: map[byte]*conn.OpSerializer{
-			// Communication layer: connection setup and slave topology.
-			byte(wire.ClusterOpPing):                   conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			byte(wire.ClusterOpConnectToSlavesRequest): conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
-
-			// Business layer: requests sent to the master.
-			byte(wire.ClusterOpAddShardBlockHeaderRequest): conn.OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
-
-			// Business layer: requests received from the master.
-			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
-			byte(wire.ClusterOpGetRootChainStakesRequest):    conn.OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
-			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): conn.OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
-		},
+		Transport:   transport,
+		Forwarder:   forwarder,
+		Serializers: conn.ClusterSerializers(),
 		Handlers: map[byte]conn.TypedHandler{
 			// Handlers process received requests only.
 			// Communication layer.

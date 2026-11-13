@@ -60,6 +60,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/dnsdisc"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	gethversion "github.com/ethereum/go-ethereum/version"
@@ -98,6 +99,10 @@ type Ethereum struct {
 	blobCache      *blobpool.Cache
 	localTxTracker *locals.TxTracker
 	blockchain     *core.BlockChain
+
+	shard         *shard.Shard
+	powMiner      *shard.PoWMiner
+	clusterClient shard.ClusterClient
 
 	handler *handler
 	discmix *enode.FairMix
@@ -186,6 +191,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	chainConfig, genesisHash, err := core.LoadChainConfig(chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
+	}
+	// QKC does not use geth sync: the handler and downloader are never started.
+	// Pin FullSync only to skip snap-specific setup checks (the default is SnapSync).
+	if chainConfig.QuarkChain != nil {
+		config.SyncMode = ethconfig.FullSync
 	}
 	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb, config.Genesis)
 	if err != nil {
@@ -325,19 +335,26 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	legacyPool := legacypool.New(config.TxPool, eth.blockchain)
 
-	if config.BlobPool.Datadir != "" {
-		config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
+	// QuarkChain currently does not support blob transactions. Keep the native
+	// blob pool for non-QKC configs, including the existing Engine API tests.
+	pools := []txpool.SubPool{legacyPool}
+	if !eth.isQKC() {
+		if config.BlobPool.Datadir != "" {
+			config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
+		}
+		eth.blobTxPool = blobpool.New(config.BlobPool, eth.blockchain, legacyPool.HasPendingAuth)
+		pools = append(pools, eth.blobTxPool)
 	}
-	eth.blobTxPool = blobpool.New(config.BlobPool, eth.blockchain, legacyPool.HasPendingAuth)
-
-	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, []txpool.SubPool{legacyPool, eth.blobTxPool})
+	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, pools)
 	if err != nil {
 		return nil, err
 	}
 	// Only after txpool.New has run the pool's Init: the cache reads the pool's
 	// lookup and store, which Init builds without holding the pool lock.
-	eth.blobCache = blobpool.NewCache(eth.blobTxPool)
-
+	// QKC does not create a blob pool, so it also skips the blob cache.
+	if eth.blobTxPool != nil {
+		eth.blobCache = blobpool.NewCache(eth.blobTxPool)
+	}
 	if !config.TxPool.NoLocals {
 		rejournal := config.TxPool.Rejournal
 		if rejournal < time.Second {
@@ -371,6 +388,20 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	eth.miner = miner.New(eth, config.Miner, eth.engine)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 	eth.miner.SetPrioAddresses(config.TxPool.Locals)
+	// Only QKC chains use root/shard coordination. Non-QKC configurations remain
+	// usable by the original geth tests without attaching shard-only validation.
+	if eth.isQKC() {
+		// TODO(SlaveService): Replace the mock with a real ClusterClient implementation.
+		client := &shard.MockClusterClient{}
+		eth.clusterClient = client
+		shardChain := shard.NewShardChain(chainDb, eth.blockchain, eth.miner)
+		eth.shard, err = shard.New(shardChain, eth.clusterClient)
+		if err != nil {
+			return nil, err
+		}
+		client.Shard = eth.shard
+		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
+	}
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
 	if eth.APIBackend.allowUnprotectedTxs {
@@ -441,6 +472,12 @@ func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
 
 func (s *Ethereum) Miner() *miner.Miner { return s.miner }
 
+// Shard and PoWMiner are owned by Ethereum and called by the cluster service
+// and MinerAPI. Ethereum.Stop must reject new calls and wait for in-flight
+// ones before closing the chain and database.
+func (s *Ethereum) Shard() *shard.Shard       { return s.shard }
+func (s *Ethereum) PoWMiner() *shard.PoWMiner { return s.powMiner }
+
 func (s *Ethereum) AccountManager() *accounts.Manager  { return s.accountManager }
 func (s *Ethereum) BlockChain() *core.BlockChain       { return s.blockchain }
 func (s *Ethereum) TxPool() *txpool.TxPool             { return s.txPool }
@@ -456,9 +493,15 @@ func (s *Ethereum) SetSynced()                         { s.handler.enableSyncedF
 func (s *Ethereum) ArchiveMode() bool                  { return s.config.NoPruning }
 func (s *Ethereum) EngineMaxReorgDepth() uint64        { return s.config.EngineMaxReorgDepth }
 
+func (s *Ethereum) isQKC() bool { return s.blockchain.Config().QuarkChain != nil }
+
 // Protocols returns all the currently configured
 // network protocols to start.
 func (s *Ethereum) Protocols() []p2p.Protocol {
+	if s.isQKC() {
+		// TODO(M2): Enable QKC protocols after sync imports go through Shard/ShardChain.
+		return nil
+	}
 	protos := eth.MakeProtocols((*ethHandler)(s.handler), s.networkID, s.discmix)
 	if s.config.SnapshotCache > 0 {
 		protos = append(protos, snap.MakeProtocols((*snapHandler)(s.handler), s.config.SnapV2)...)
@@ -469,18 +512,23 @@ func (s *Ethereum) Protocols() []p2p.Protocol {
 // Start implements node.Lifecycle, starting all internal goroutines needed by the
 // Ethereum protocol implementation.
 func (s *Ethereum) Start() error {
-	if err := s.setupDiscovery(); err != nil {
-		return err
+	// QKC skips geth discovery, handler and dropper startup; non-QKC configs
+	// keep the original networking behavior for the existing geth tests.
+	// TODO(M2): Integrate QKC sync here and update Protocols() and Stop() together.
+	if !s.isQKC() {
+		if err := s.setupDiscovery(); err != nil {
+			return err
+		}
 	}
-
 	// Regularly update shutdown marker
 	s.shutdownTracker.Start()
 
-	// Start the networking layer
-	s.handler.Start(s.p2pServer.MaxPeers)
-
-	// Start the connection manager with inclusion-based peer protection.
-	s.dropper.Start(s.p2pServer, func() bool { return !s.Synced() }, s.handler.txTracker.GetAllPeerStats)
+	if !s.isQKC() {
+		// Start the networking layer.
+		s.handler.Start(s.p2pServer.MaxPeers)
+		// Start the connection manager with inclusion-based peer protection.
+		s.dropper.Start(s.p2pServer, func() bool { return !s.Synced() }, s.handler.txTracker.GetAllPeerStats)
+	}
 
 	// Subscribe to chain events for the filterMaps head updater.
 	s.fmHeadSub = s.blockchain.SubscribeChainEvent(s.fmHeadEventCh)
@@ -603,18 +651,34 @@ func (s *Ethereum) setupDiscovery() error {
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
-	// Stop all the peer-related stuff first.
+	// TODO(SlaveService): When replacing the QKC mock, update this shutdown order
+	// with the service integration: reject new requests, cancel and wait for
+	// request handlers and mining, then close cluster connections before the
+	// chain resources and database below.
 	s.discmix.Close()
-	s.dropper.Stop()
-	s.handler.txTracker.Stop()
-	s.handler.Stop()
+	if !s.isQKC() {
+		s.dropper.Stop()
+		s.handler.txTracker.Stop()
+		s.handler.Stop()
+	} else {
+		// QKC skips handler.Start/dropper.Start, so their Stop methods are not used.
+		// newHandler already started downloader goroutines; terminate them directly.
+		// TODO(M2): Restore matching handler/dropper Start and Stop calls
+		// when enabling geth P2P components for QKC.
+		s.handler.downloader.Terminate()
+		// Cancel local mining and wait for the mining loop to exit, including any
+		// block build, seal search or block import already in progress.
+		s.powMiner.StopLocalMining()
+	}
 
 	// Then stop everything else.
 	ch := make(chan struct{})
 	s.closeFilterMaps <- ch
 	<-ch
 	s.filterMaps.Stop()
-	s.blobCache.Stop()
+	if s.blobCache != nil {
+		s.blobCache.Stop()
+	}
 	s.txPool.Close()
 	s.blockchain.Stop()
 	s.engine.Close()

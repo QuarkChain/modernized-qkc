@@ -20,11 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core/tracing"
@@ -41,16 +39,16 @@ var errOlderBlockTime = errors.New("timestamp must be greater than parent")
 // MixDigest carries the base difficulty; geth's Difficulty and Nonce stay zero.
 // Header checks need no state; VerifySeal applies the discount at body import.
 type PoSW struct {
-	config   *params.ChainConfig          // Validated when the engine is constructed.
-	gasLimit uint64                       // Fixed shard gas limit copied from genesis, matching pyquarkchain.
-	cacheMu  sync.Mutex                   // Serializes cache creation, not hashimoto verification.
-	caches   *lru.Cache[uint64, []uint32] // Immutable verification data, keyed by Ethash epoch.
+	*EthashVerifier
+	config   *params.ChainConfig // Validated when the engine is constructed.
+	gasLimit uint64              // Fixed shard gas limit copied from genesis, matching pyquarkchain.
+	simulate bool                // Set only by NewSimulate; skips Ethash verification.
 }
 
 var _ consensus.Engine = (*PoSW)(nil)
 var _ consensus.SealVerifier = (*PoSW)(nil)
 
-// New validates the shard configuration and saves the genesis gas limit.
+// New validates the shard configuration and genesis chain ID, and saves its gas limit.
 // The caller supplies genesis so engine creation does not require a running chain.
 func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	if config == nil || config.QuarkChain == nil {
@@ -65,7 +63,29 @@ func New(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
 	if genesis.GasLimit > params.MaxGasLimit {
 		return nil, fmt.Errorf("invalid genesis gas limit: have %d, max %d", genesis.GasLimit, params.MaxGasLimit)
 	}
-	return &PoSW{config: config, gasLimit: genesis.GasLimit, caches: lru.NewCache[uint64, []uint32](2)}, nil
+	extra, err := genesis.QKCExtra()
+	if err != nil {
+		return nil, err
+	}
+	if config.ChainID == nil || extra.ChainID.Cmp(config.ChainID) != 0 {
+		return nil, errors.New("shard genesis chain ID differs from chain config")
+	}
+	return &PoSW{EthashVerifier: NewEthashVerifier(), config: config, gasLimit: genesis.GasLimit}, nil
+}
+
+// NewSimulate creates a simulation engine with the same configuration checks as New.
+func NewSimulate(config *params.ChainConfig, genesis *types.Header) (*PoSW, error) {
+	engine, err := New(config, genesis)
+	if err != nil {
+		return nil, err
+	}
+	engine.simulate = true
+	return engine, nil
+}
+
+// IsSimulate reports whether the engine skips Ethash verification.
+func (p *PoSW) IsSimulate() bool {
+	return p.simulate
 }
 
 // Author returns the coinbase receiving this shard block's subsidy and fees.
@@ -198,7 +218,8 @@ func (p *PoSW) verifyHeader(chain consensus.ChainHeaderReader, header, parent *t
 	if cancun != (header.BlobGasUsed != nil) {
 		return errors.New("invalid blob gas used presence")
 	}
-	// TODO: Also disable blob transactions in the transaction pool to match this consensus restriction.
+	// QuarkChain disables blob transactions in its pool; imported headers must
+	// enforce the same chain rule independently of the local transaction pool.
 	if header.BlobGasUsed != nil && *header.BlobGasUsed != 0 {
 		return errors.New("qkc blob gas used must be zero")
 	}
@@ -299,8 +320,5 @@ func (p *PoSW) Seal(chain consensus.ChainHeaderReader, block *types.Block, resul
 // Close releases cached verification data. In-flight verification retains its
 // own slice references, so clearing the cache does not invalidate those reads.
 func (p *PoSW) Close() error {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	p.caches.Purge()
-	return nil
+	return p.EthashVerifier.Close()
 }

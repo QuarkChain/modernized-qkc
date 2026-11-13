@@ -18,7 +18,6 @@ package ethconfig
 
 import (
 	"math/big"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -34,13 +33,13 @@ import (
 
 func TestCreateShardConsensusEngine(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		kind params.ConsensusType
-		want interface{}
+		name     string
+		kind     params.ConsensusType
+		simulate bool
 	}{
-		{"legacy", "", &posw.PoSW{}},
-		{"ethash", params.ConsensusEthash, &posw.PoSW{}},
-		{"simulate", params.ConsensusSimulate, &posw.PoSWSimulate{}},
+		{"legacy", "", false},
+		{"ethash", params.ConsensusEthash, false},
+		{"simulate", params.ConsensusSimulate, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			genesis := &core.Genesis{
@@ -70,8 +69,12 @@ func TestCreateShardConsensusEngine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if reflect.TypeOf(engine) != reflect.TypeOf(test.want) {
-					t.Fatalf("stored=%t: engine %T, want %T", stored, engine, test.want)
+				shardEngine, ok := engine.(*posw.PoSW)
+				if !ok {
+					t.Fatalf("stored=%t: engine %T, want *posw.PoSW", stored, engine)
+				}
+				if shardEngine.IsSimulate() != test.simulate {
+					t.Fatalf("stored=%t: simulate=%t, want %t", stored, shardEngine.IsSimulate(), test.simulate)
 				}
 				if err := engine.Close(); err != nil {
 					t.Fatal(err)

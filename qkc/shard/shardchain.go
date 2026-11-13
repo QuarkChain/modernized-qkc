@@ -204,8 +204,8 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		return err
 	}
 	c.rootTip = rootHeader
-	// TODO: wire Init into the shard service's master handshake, data sync and
-	// mining startup. Genesis construction/state setup stays in that service.
+	// TODO(SlaveService): Call Init with the master's root checkpoint
+	// before enabling mining or allowing block imports from P2P sync.
 	return nil
 }
 
@@ -451,7 +451,8 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 // InsertRootBlock validates a root block against the shard chain, stores it,
 // and makes it the root tip if the fork choice rule selects it, moving the
 // canonical head onto the shard chain it confirms. It reports whether the root
-// tip changed. Known root blocks are ignored. Head and root writes are not one
+// tip changed. Known roots still participate in fork choice, so replay after
+// Init can advance a restored checkpoint. Head and root writes are not one
 // transaction; a failed root-batch write may leave the head changed. Subsequent
 // root imports or service initialization may restore consistency.
 // It mirrors ShardState.add_root_block in pyquarkchain.
@@ -466,16 +467,21 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	if rootTip == nil {
 		return false, ErrRootChainUninitialized
 	}
-	if rawdb.HasRootBlock(c.db, root.Hash()) {
+	// Step 1: determine whether the root can replace the tip. On restart, master
+	// rolls back one root block and initializes shards at that checkpoint before
+	// rebroadcasting the next root. Shards that already stored it must still
+	// advance their tip, matching pyquarkchain's recovery behavior. Unlike Python,
+	// skip known roots that cannot replace the tip to avoid repeated validation
+	// and DB writes on duplicate delivery.
+	switched := root.TotalDifficulty().Cmp(&rootTip.TotalDifficulty) > 0
+	if !switched && rawdb.HasRootBlock(c.db, root.Hash()) {
 		return false, nil
 	}
-	// Step 1: validate the root and find its latest confirmed shard block.
+	// Step 2: validate the root and find its latest confirmed shard block.
 	confirmed, err := c.validateRootBlock(root)
 	if err != nil {
 		return false, err
 	}
-	// Step 2: the fork choice.
-	switched := root.TotalDifficulty().Cmp(&rootTip.TotalDifficulty) > 0
 	// Step 3: reconcile the shard head before storing the root.
 	previousHead := c.chain.CurrentBlock().Hash()
 	if switched {

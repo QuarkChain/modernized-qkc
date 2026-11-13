@@ -27,7 +27,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/ethereum/go-ethereum/qkc/conn"
 )
 
 // XshardConnManager manages the local slave's cross-shard connections to other slaves,
@@ -41,7 +41,7 @@ type XshardConnManager struct {
 	localChainID *big.Int
 	// Only connections to slaves with configured chain IDs enter the routing index.
 	configuredChainIDs map[string]struct{}
-	maxPayloadSize     uint32               // 0 uses the maximum frame payload length.
+	maxPayloadSize     uint32               // Resolved frame payload limit.
 	handler            XshardRequestHandler // Serves cross-shard requests from other slaves.
 	log                log.Logger
 
@@ -71,21 +71,22 @@ func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, 
 	if shutdownSlave == nil {
 		return nil, errors.New("xshard shutdown callback must not be nil")
 	}
-	if err := validateXshardChainID(localChainID); err != nil {
+	if err := conn.ValidateSlaveChainID(localChainID); err != nil {
 		return nil, err
 	}
 	if len(configuredChainIDs) == 0 {
 		return nil, errors.New("configured chain IDs must not be empty")
 	}
-	if maxPayloadSize > wire.MaxFramePayloadLen {
-		return nil, fmt.Errorf("max payload size %d exceeds protocol limit %d", maxPayloadSize, wire.MaxFramePayloadLen)
+	maxPayloadSize, err := conn.ClusterPayloadSize(maxPayloadSize)
+	if err != nil {
+		return nil, err
 	}
 	if logger == nil {
 		logger = log.Root()
 	}
 	clusterSet := make(map[string]struct{}, len(configuredChainIDs))
 	for _, id := range configuredChainIDs {
-		if err := validateXshardChainID(id); err != nil {
+		if err := conn.ValidateSlaveChainID(id); err != nil {
 			return nil, err
 		}
 		clusterSet[id.String()] = struct{}{}
@@ -108,7 +109,7 @@ func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, 
 // DialToSlave establishes an outbound cross-shard connection to the slave
 // described by slaveInfo. Its ChainID identifies the chain hosted by that slave.
 func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo comm.SlaveInfo) error {
-	if err := validateXshardChainID(slaveInfo.ChainID); err != nil {
+	if err := conn.ValidateSlaveChainID(slaveInfo.ChainID); err != nil {
 		return err
 	}
 	remoteChainID := new(big.Int).Set(slaveInfo.ChainID)

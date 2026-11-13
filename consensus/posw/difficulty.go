@@ -98,7 +98,31 @@ func GetAdjustedDifficulty(config *params.PoSWConfig, reader consensus.StakingRe
 	return CalcAdjustedDifficulty(config, header.Number, difficulty, stakes, mined), nil
 }
 
-// CalcAdjustedDifficulty applies the same stake quota rule on root and shard chains.
+// StakeQuota returns the number of discounted blocks allowed by locked stakes,
+// capped at WindowSize. Root and shard consensus share this quota calculation.
+// config must pass Check with staking enabled, and number and stakes must be non-nil.
+func StakeQuota(config *params.PoSWConfig, number *big.Int, stakes *uint256.Int) uint64 {
+	quota := new(big.Int).Div(stakes.ToBig(), config.StakePerBlockAt(number))
+	// Compare before narrowing: large stakes must not wrap a uint64 quota.
+	if quota.Cmp(new(big.Int).SetUint64(config.WindowSize)) < 0 {
+		return quota.Uint64()
+	}
+	return config.WindowSize
+}
+
+// DiscountDifficulty divides difficulty by diffDivider, with a minimum of 1,
+// without modifying difficulty. Callers determine whether the candidate qualifies.
+// diffDivider and difficulty must be positive.
+func DiscountDifficulty(diffDivider uint64, difficulty *big.Int) *big.Int {
+	diff := new(big.Int).Div(difficulty, new(big.Int).SetUint64(diffDivider))
+	if diff.Sign() == 0 {
+		// A large divider must not turn PoW difficulty into zero.
+		diff.SetInt64(1)
+	}
+	return diff
+}
+
+// CalcAdjustedDifficulty applies the stake quota rule to a shard candidate.
 //
 // config supplies the staking rules. StakePerBlockAt provides the effective stake
 // requirement and handles the configured height offset and decay rules.
@@ -107,29 +131,18 @@ func GetAdjustedDifficulty(config *params.PoSWConfig, reader consensus.StakingRe
 //
 // difficulty is the candidate's base PoW difficulty, before the staking discount.
 //
-// stakes come from the parent shard block's state for a shard candidate. For a root
-// candidate, they come from the state of the latest shard-0 block confirmed by
-// its parent root block.
+// stakes come from the parent shard block's state.
 //
 // mined counts all blocks by this coinbase among the preceding windowSize-1
 // ancestors, including ordinary PoW blocks. Count ancestors on the candidate's
 // own chain, starting at its parent. The candidate occupies the last window slot.
 func CalcAdjustedDifficulty(config *params.PoSWConfig, number, difficulty *big.Int, stakes *uint256.Int, mined uint64) *big.Int {
-	diff := new(big.Int).Set(difficulty)
 	if config == nil || !config.StakingEnabled || stakes == nil || number.Sign() == 0 {
-		return diff
+		return new(big.Int).Set(difficulty)
 	}
-	quota := new(big.Int).Div(stakes.ToBig(), config.StakePerBlockAt(number))
-	// Compare before narrowing: large stakes must not wrap a uint64 quota.
-	threshold := config.WindowSize
-	if quota.Cmp(new(big.Int).SetUint64(threshold)) < 0 {
-		threshold = quota.Uint64()
+	// Grant a discount only while the preceding blocks have not used all quota.
+	if mined < StakeQuota(config, number, stakes) {
+		return DiscountDifficulty(config.DiffDivider, difficulty)
 	}
-	if mined < threshold {
-		diff.Div(diff, new(big.Int).SetUint64(config.DiffDivider))
-		if diff.Sign() == 0 {
-			diff.SetInt64(1)
-		}
-	}
-	return diff
+	return new(big.Int).Set(difficulty)
 }

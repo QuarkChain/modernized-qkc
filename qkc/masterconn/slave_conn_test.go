@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"fmt"
 	"math/big"
 	"net"
 	"strings"
@@ -61,19 +62,14 @@ func newSlaveTestPair(t *testing.T, chainID *big.Int, handler SlaveRequestHandle
 		remote.Close()
 		t.Fatal(err)
 	}
+	transport, err := conn.NewMasterSlaveTransport(remote, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	peer := conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(remote, func(reader io.Reader) (*wire.ClusterFrame, error) {
-			return wire.ReadClusterFrameWithPeerID(reader, wire.MaxFramePayloadLen)
-		}, wire.WriteClusterFrameWithPeerID),
-		Serializers: map[byte]*conn.OpSerializer{
-			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
-			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
-			byte(wire.ClusterOpGetRootChainStakesRequest):    conn.OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
-			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): conn.OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
-			byte(wire.ClusterOpAddShardBlockHeaderRequest):   conn.OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
-		},
-		Handlers: peerHandlers,
+		Transport:   transport,
+		Serializers: conn.ClusterSerializers(),
+		Handlers:    peerHandlers,
 	})
 	t.Cleanup(func() { sc.Close(); peer.Close() })
 	sc.Start()

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 
@@ -61,12 +60,12 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	}
 	if cfg.RemoteChainID == nil || cfg.RemoteChainID.Sign() <= 0 || cfg.RemoteChainID.BitLen() > 256 {
 		return nil, fmt.Errorf("invalid slave chain ID: %v", cfg.RemoteChainID)
+	if err := conn.ValidateSlaveChainID(cfg.RemoteChainID); err != nil {
+		return nil, err
 	}
-	maxPayloadSize := cfg.MaxPayloadSize
-	if maxPayloadSize == 0 {
-		maxPayloadSize = wire.MaxFramePayloadLen
-	} else if maxPayloadSize > wire.MaxFramePayloadLen {
-		return nil, fmt.Errorf("max payload size %d exceeds protocol limit %d", maxPayloadSize, wire.MaxFramePayloadLen)
+	transport, err := conn.NewMasterSlaveTransport(cfg.Conn, cfg.MaxPayloadSize)
+	if err != nil {
+		return nil, err
 	}
 
 	sc := &SlaveConn{
@@ -74,18 +73,8 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 		handler:       cfg.Handler,
 	}
 	sc.BaseConn = conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(cfg.Conn, func(reader io.Reader) (*wire.ClusterFrame, error) {
-			return wire.ReadClusterFrameWithPeerID(reader, maxPayloadSize)
-		}, wire.WriteClusterFrameWithPeerID),
-		Serializers: map[byte]*conn.OpSerializer{
-			byte(wire.ClusterOpPing):                   conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			byte(wire.ClusterOpConnectToSlavesRequest): conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
-
-			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
-			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): conn.OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
-			byte(wire.ClusterOpGetRootChainStakesRequest):    conn.OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
-			byte(wire.ClusterOpAddShardBlockHeaderRequest):   conn.OpSerializerFor[wire.AddShardBlockHeaderRequest, wire.AddShardBlockHeaderResponse](byte(wire.ClusterOpAddShardBlockHeaderResponse)),
-		},
+		Transport:   transport,
+		Serializers: conn.ClusterSerializers(),
 		Handlers: map[byte]conn.TypedHandler{
 			byte(wire.ClusterOpAddShardBlockHeaderRequest): sc.handleAddShardBlockHeader,
 		},
