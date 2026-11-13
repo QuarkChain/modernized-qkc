@@ -16,7 +16,6 @@ geth:
 
 #? qkc: Build qkc.
 qkc:
-	go generate ./qkc/wire
 	$(GORUN) build/ci.go install ./cmd/qkc
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/qkc\" to launch qkc."
@@ -29,7 +28,6 @@ evm:
 
 #? all: Build all packages and executables.
 all:
-	go generate ./qkc/wire
 	$(GORUN) build/ci.go install
 
 #? test: Run the tests.
