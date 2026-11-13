@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"math/big"
 	"net"
@@ -39,10 +38,9 @@ import (
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
-	"github.com/urfave/cli/v2"
 )
 
-func m1TestNode(t *testing.T, id int) (*eth.Ethereum, *node.Node) {
+func qkcTestNode(t *testing.T, id int) (*eth.Ethereum, *node.Node) {
 	t.Helper()
 	cfg := gethConfig{Eth: ethconfig.Defaults, Node: defaultNodeConfig()}
 	if err := loadConfig(fmt.Sprintf("../../qkc/config/devnet/shard-%d.toml", id), &cfg); err != nil {
@@ -50,16 +48,6 @@ func m1TestNode(t *testing.T, id int) (*eth.Ethereum, *node.Node) {
 	}
 	cfg.Node.DataDir = t.TempDir()
 	cfg.Node.HTTPHost, cfg.Node.WSHost, cfg.Node.IPCPath = "", "", ""
-	flags := flag.NewFlagSet("m1-test", flag.ContinueOnError)
-	if err := m1Flag.Apply(flags); err != nil {
-		t.Fatal(err)
-	}
-	if err := flags.Set("m1", "true"); err != nil {
-		t.Fatal(err)
-	}
-	if err := configureM1(cli.NewContext(nil, flags, nil), &cfg); err != nil {
-		t.Fatal(err)
-	}
 	cfg.Node.PrivatePort = 0 // Let the OS choose an isolated cluster port.
 	cfg.Eth.DatabaseCache, cfg.Eth.TrieCleanCache, cfg.Eth.TrieDirtyCache = 16, 16, 16
 	cfg.Eth.SnapshotCache = 0
@@ -72,22 +60,19 @@ func m1TestNode(t *testing.T, id int) (*eth.Ethereum, *node.Node) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkM1(backend); err != nil {
-		t.Fatal(err)
-	}
 	if err := stack.Start(); err != nil {
 		t.Fatal(err)
 	}
 	return backend, stack
 }
 
-type m1HeaderHandler func(*big.Int, *types.Header, *uint256.Int) error
+type qkcHeaderHandler func(*big.Int, *types.Header, *uint256.Int) error
 
-func (f m1HeaderHandler) AddShardBlockHeader(id *big.Int, header *types.Header, amount *uint256.Int) error {
+func (f qkcHeaderHandler) AddShardBlockHeader(id *big.Int, header *types.Header, amount *uint256.Int) error {
 	return f(id, header, amount)
 }
 
-func m1TestConnection(t *testing.T, backend *eth.Ethereum, handler m1HeaderHandler) *masterconn.SlaveConn {
+func qkcTestConnection(t *testing.T, backend *eth.Ethereum, handler qkcHeaderHandler) *masterconn.SlaveConn {
 	t.Helper()
 	socket, err := net.DialTimeout("tcp", backend.SlaveService().Addr().String(), 5*time.Second)
 	if err != nil {
@@ -105,7 +90,7 @@ func m1TestConnection(t *testing.T, backend *eth.Ethereum, handler m1HeaderHandl
 	return peer
 }
 
-func TestM1Mining(t *testing.T) {
+func TestQKCMining(t *testing.T) {
 	data, err := os.ReadFile("../../qkc/config/devnet/root.toml")
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +124,7 @@ func TestM1Mining(t *testing.T) {
 		slaves        []comm.SlaveInfo
 	)
 	for index, id := range []int{100001, 100002} {
-		backend, stack := m1TestNode(t, id)
+		backend, stack := qkcTestNode(t, id)
 		backends[index], stacks[index] = backend, stack
 		if backend.BlockChain().CurrentBlock().Number.Sign() != 0 || backend.Shard().RootTip() != (common.Hash{}) {
 			t.Fatal("mining started before root initialization")
@@ -155,7 +140,7 @@ func TestM1Mining(t *testing.T) {
 			t.Fatal("failed initialization changed the root tip")
 		}
 		reports[index] = make(chan report, 32)
-		peers[index] = m1TestConnection(t, backend, func(source *big.Int, header *types.Header, amount *uint256.Int) error {
+		peers[index] = qkcTestConnection(t, backend, func(source *big.Int, header *types.Header, amount *uint256.Int) error {
 			if source.Int64() != int64(id) {
 				return fmt.Errorf("unexpected source chain %s", source)
 			}

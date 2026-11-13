@@ -26,24 +26,27 @@ by Git. With this binary on `PATH`, a configuration copied to `shard.toml` start
 
 ### Milestone 1: simulated internal mining
 
-`--m1` selects one-second simulated mining and disables P2P. Ethereum manages
-the slave service; `qkc m1` connects both shards and initializes R0 before mining.
+The shard TOMLs disable P2P and set `[Eth].QKCSimulatedBlockTime = 1000000000`
+(one second; zero disables local mining). Ethereum starts mining after `qkc m1`
+connects both shards and initializes R0.
 Build with `make geth qkc`, then use three terminals:
 
 ```sh
 # Terminal 1
-build/bin/geth --config qkc/config/devnet/shard-100001.toml --m1
+build/bin/geth --config qkc/config/devnet/shard-100001.toml
 
 # Terminal 2
-build/bin/geth --config qkc/config/devnet/shard-100002.toml --m1
+build/bin/geth --config qkc/config/devnet/shard-100002.toml
 
 # Terminal 3
 build/bin/qkc m1
 ```
 
 The driver reads `PrivateHost` / `PrivatePort` and chain IDs from both shard TOMLs
-(`--config` overrides them, repeat for each shard). After identity PINGs and shard
-interconnection it sends the [R0 fixture](devnet/root.toml) via PING, starting both miners. It displays R0's included
+(`--config` overrides them, repeat for each shard). It checks that both live heads
+are at genesis using the configured IPC endpoint, or HTTP when IPC is disabled.
+After identity PINGs and interconnection it sends the [R0 fixture](devnet/root.toml)
+via PING, starting both miners. It displays R0's included
 header heights alongside heights reported by the shards. Ctrl-C shuts down all three processes.
 Use fresh data directories for each run. Regenerate R0 if either shard genesis changes.
 

@@ -171,10 +171,6 @@ func loadBaseConfig(ctx *cli.Context) gethConfig {
 // makeConfigNode loads geth configuration and creates a blank node instance.
 func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 	cfg := loadBaseConfig(ctx)
-	// Temporary M1 test setup; see m1.go for scope and removal conditions.
-	if err := configureM1(ctx, &cfg); err != nil {
-		utils.Fatalf("%v", err)
-	}
 	stack, err := node.New(&cfg.Node)
 	if err != nil {
 		utils.Fatalf("Failed to create the protocol stack: %v", err)
@@ -266,11 +262,6 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 
 	// Add Ethereum, which owns the shard service and mining lifecycle.
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
-	if ctx.Bool(m1Flag.Name) {
-		if err := checkM1(eth); err != nil {
-			utils.Fatalf("Failed to configure milestone 1: %v", err)
-		}
-	}
 
 	// Create gauge with geth system and build information
 	if eth != nil { // The 'eth' backend may be nil in light mode

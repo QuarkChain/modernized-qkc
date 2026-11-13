@@ -29,8 +29,6 @@ import (
 // consensus. It waits for an exponentially distributed delay after the
 // candidate's timestamp, as PoW block intervals are, and returns a random
 // nonce. Chains mined this way must not verify seals.
-//
-// TODO: Select this search for ConsensusSimulate when wiring local mining in Shard.New.
 type simulatedSearch struct {
 	blockTime time.Duration
 }

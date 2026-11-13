@@ -94,8 +94,11 @@ type Config struct {
 	// If nil, the Ethereum main net block is used.
 	Genesis *core.Genesis `toml:",omitempty"`
 
-	// Runtime-only local mining search. Nil disables local mining; Ethereum starts
-	// a configured search only after master initialization and cluster readiness.
+	// Average block interval for local POW_SIMULATE mining; zero disables it.
+	// This is a runtime setting, independent of genesis and consensus validation.
+	QKCSimulatedBlockTime time.Duration `toml:",omitempty"`
+	// Optional runtime-only search override. Otherwise Ethereum selects the search
+	// from QKCSimulatedBlockTime after validating the actual chain configuration.
 	QKCMiningSearch shard.NonceSearch `toml:"-"`
 
 	// Network ID separates blockchains on the peer-to-peer networking level. When left

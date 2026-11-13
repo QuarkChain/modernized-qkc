@@ -209,6 +209,14 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			chainDb.Close()
 		}
 	}()
+	if qkc := chainConfig.QuarkChain; qkc != nil {
+		if config.QKCSimulatedBlockTime < 0 {
+			return nil, errors.New("QKCSimulatedBlockTime must not be negative")
+		}
+		if config.QKCSimulatedBlockTime > 0 && qkc.ConsensusType != params.ConsensusSimulate {
+			return nil, errors.New("QKCSimulatedBlockTime requires POW_SIMULATE consensus")
+		}
+	}
 	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
@@ -453,9 +461,13 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		if err := eth.slaveService.BindShard(eth.shard); err != nil {
 			return nil, err
 		}
+		search := config.QKCMiningSearch
+		if search == nil && config.QKCSimulatedBlockTime > 0 {
+			search = shard.NewSimulatedSearch(config.QKCSimulatedBlockTime)
+		}
 		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{
 			Coinbase: stack.Config().CoinbaseAddress,
-			Search:   config.QKCMiningSearch,
+			Search:   search,
 		})
 	}
 
@@ -615,12 +627,13 @@ func (s *Ethereum) startQKCMining() error {
 	if !s.slaveService.ConnectionsReady() {
 		return errors.New("QKC cluster connections are not ready")
 	}
-	if s.config.QKCMiningSearch != nil {
+	mining := s.config.QKCMiningSearch != nil || s.config.QKCSimulatedBlockTime > 0
+	if mining {
 		if err := s.powMiner.StartLocalMining(); err != nil {
 			return err
 		}
 	}
-	log.Info("Initialized shard root", "hash", s.shard.RootTip(), "mining", s.config.QKCMiningSearch != nil)
+	log.Info("Initialized shard root", "hash", s.shard.RootTip(), "mining", mining)
 	return nil
 }
 

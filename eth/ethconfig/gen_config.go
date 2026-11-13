@@ -19,6 +19,7 @@ import (
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
 		Genesis                 *core.Genesis     `toml:",omitempty"`
+		QKCSimulatedBlockTime   time.Duration     `toml:",omitempty"`
 		QKCMiningSearch         shard.NonceSearch `toml:"-"`
 		NetworkId               uint64
 		SyncMode                SyncMode
@@ -77,6 +78,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
+	enc.QKCSimulatedBlockTime = c.QKCSimulatedBlockTime
 	enc.QKCMiningSearch = c.QKCMiningSearch
 	enc.NetworkId = c.NetworkId
 	enc.SyncMode = c.SyncMode
@@ -139,6 +141,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
 		Genesis                 *core.Genesis     `toml:",omitempty"`
+		QKCSimulatedBlockTime   *time.Duration    `toml:",omitempty"`
 		QKCMiningSearch         shard.NonceSearch `toml:"-"`
 		NetworkId               *uint64
 		SyncMode                *SyncMode
@@ -201,6 +204,9 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.Genesis != nil {
 		c.Genesis = dec.Genesis
+	}
+	if dec.QKCSimulatedBlockTime != nil {
+		c.QKCSimulatedBlockTime = *dec.QKCSimulatedBlockTime
 	}
 	if dec.QKCMiningSearch != nil {
 		c.QKCMiningSearch = dec.QKCMiningSearch

@@ -22,6 +22,7 @@ import (
 	"maps"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -391,6 +392,24 @@ func TestQKCBackendSyncMode(t *testing.T) {
 
 // Startup errors are returned to cmd/geth, which exits rather than retrying New.
 func TestQKCBackendConstructionErrors(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		consensus params.ConsensusType
+		interval  time.Duration
+	}{
+		{"negative simulated interval", params.ConsensusSimulate, -time.Second},
+		{"simulated search with ethash", params.ConsensusEthash, time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := qkcBackendConfig()
+			config.Genesis.Config.QuarkChain.ConsensusType = test.consensus
+			config.QKCSimulatedBlockTime = test.interval
+			stack := qkcBackendNode(t, "")
+			if backend, err := New(stack, &config); err == nil || backend != nil || !strings.Contains(err.Error(), "QKCSimulatedBlockTime") {
+				t.Fatalf("invalid simulated mining configuration accepted: %v", err)
+			}
+		})
+	}
 	t.Run("invalid genesis", func(t *testing.T) {
 		config := qkcBackendConfig()
 		config.Genesis.ExtraData = []byte{0}

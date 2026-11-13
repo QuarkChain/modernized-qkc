@@ -16,7 +16,7 @@
 
 package main
 
-// Temporary milestone 1 master: initialize --m1 geth nodes with an offline R0
+// Temporary milestone 1 master: initialize geth shards with an offline R0
 // and receive their shard headers over the real cluster protocol.
 // TODO(m1): Replace this driver when root-chain and mining control are available.
 
@@ -37,7 +37,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/comm"
 	"github.com/ethereum/go-ethereum/qkc/masterconn"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -94,11 +96,16 @@ func loadM1Root(path string) (*qkctypes.RootBlock, error) {
 	return root, nil
 }
 
-// Read the same node and genesis settings as geth; do not hardcode TCP endpoints.
-func loadM1Slave(path string) (comm.SlaveInfo, error) {
+type m1Slave struct {
+	comm.SlaveInfo
+	rpcEndpoint string
+}
+
+// Read the same node and genesis settings as geth; do not hardcode endpoints.
+func loadM1Slave(path string) (m1Slave, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return comm.SlaveInfo{}, err
+		return m1Slave{}, err
 	}
 	var cfg struct {
 		Node node.Config
@@ -106,19 +113,57 @@ func loadM1Slave(path string) (comm.SlaveInfo, error) {
 	}
 	decoder := toml.Config{NormFieldName: func(_ reflect.Type, key string) string { return key }}
 	if err := decoder.Unmarshal(data, &cfg); err != nil {
-		return comm.SlaveInfo{}, fmt.Errorf("%s: %w", path, err)
+		return m1Slave{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if cfg.Node.PrivateHost == "" || cfg.Node.PrivatePort <= 0 || cfg.Node.PrivatePort > 65535 {
-		return comm.SlaveInfo{}, fmt.Errorf("%s: missing or invalid cluster endpoint", path)
+		return m1Slave{}, fmt.Errorf("%s: missing or invalid cluster endpoint", path)
 	}
 	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config == nil || cfg.Eth.Genesis.Config.ChainID == nil {
-		return comm.SlaveInfo{}, fmt.Errorf("%s: missing genesis chain ID", path)
+		return m1Slave{}, fmt.Errorf("%s: missing genesis chain ID", path)
 	}
 	id := cfg.Eth.Genesis.Config.ChainID
 	if id.Sign() <= 0 || id.BitLen() > 256 {
-		return comm.SlaveInfo{}, fmt.Errorf("%s: invalid genesis chain ID", path)
+		return m1Slave{}, fmt.Errorf("%s: invalid genesis chain ID", path)
 	}
-	return comm.SlaveInfo{Host: cfg.Node.PrivateHost, Port: uint16(cfg.Node.PrivatePort), ChainID: id}, nil
+	if cfg.Eth.Genesis.Config.QuarkChain == nil || cfg.Eth.Genesis.Config.QuarkChain.ConsensusType != params.ConsensusSimulate || cfg.Eth.QKCSimulatedBlockTime <= 0 {
+		return m1Slave{}, fmt.Errorf("%s: m1 requires local POW_SIMULATE mining", path)
+	}
+	endpoint := cfg.Node.IPCEndpoint()
+	if endpoint == "" && cfg.Node.HTTPHost != "" {
+		endpoint = "http://" + cfg.Node.HTTPEndpoint() + cfg.Node.HTTPPathPrefix
+	}
+	if endpoint == "" {
+		return m1Slave{}, fmt.Errorf("%s: m1 requires IPC or HTTP to check the shard head before sending R0", path)
+	}
+	return m1Slave{
+		SlaveInfo:   comm.SlaveInfo{Host: cfg.Node.PrivateHost, Port: uint16(cfg.Node.PrivatePort), ChainID: id},
+		rpcEndpoint: endpoint,
+	}, nil
+}
+
+// The offline R0 demo must not rewind existing blocks. Keep this test-only
+// restriction here; the production shard initialization also supports recovery.
+func (s m1Slave) checkGenesis(ctx context.Context) error {
+	client, err := ethclient.DialContext(ctx, s.rpcEndpoint)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	id, err := client.ChainID(ctx)
+	if err != nil {
+		return err
+	}
+	if id.Cmp(s.ChainID) != 0 {
+		return fmt.Errorf("RPC chain ID %s does not match configured shard %s", id, s.ChainID)
+	}
+	height, err := client.BlockNumber(ctx)
+	if err != nil {
+		return err
+	}
+	if height != 0 {
+		return fmt.Errorf("milestone 1 requires a genesis-only data directory; shard %s is at height %d, use a fresh --datadir", s.ChainID, height)
+	}
+	return nil
 }
 
 // m1Master only records reported heights. It does not construct or confirm R1.
@@ -163,6 +208,10 @@ func runM1(ctx *cli.Context) error {
 		includedHeaders = append(includedHeaders, fmt.Sprintf("%s@%s", extra.ChainID.String(), header.Number.String()))
 	}
 	rootRelation := fmt.Sprintf("root: %d -> [%s]", root.Number(), strings.Join(includedHeaders, ", "))
+	signalCtx, stop := signal.NotifyContext(ctx.Context, os.Interrupt)
+	defer stop()
+	runCtx, shutdown := context.WithCancelCause(signalCtx)
+	defer shutdown(nil)
 	master := &m1Master{root: root.Hash(), heights: make(map[string]uint64)}
 	var slaves []comm.SlaveInfo
 	for _, path := range ctx.StringSlice("config") {
@@ -174,16 +223,18 @@ func runM1(ctx *cli.Context) error {
 		if _, exists := master.heights[id]; exists {
 			return fmt.Errorf("duplicate shard %s", id)
 		}
+		callCtx, cancel := context.WithTimeout(runCtx, 5*time.Second)
+		err = slave.checkGenesis(callCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("check chain %s before R0: %w", id, err)
+		}
 		master.heights[id] = 0
-		slaves = append(slaves, slave)
+		slaves = append(slaves, slave.SlaveInfo)
 	}
 	if len(slaves) == 0 {
 		return errors.New("at least one shard config is required")
 	}
-	signalCtx, stop := signal.NotifyContext(ctx.Context, os.Interrupt)
-	defer stop()
-	runCtx, shutdown := context.WithCancelCause(signalCtx)
-	defer shutdown(nil)
 	var peers []*masterconn.SlaveConn
 	// Verify every master connection before asking any slave to dial another.
 	for _, slave := range slaves {

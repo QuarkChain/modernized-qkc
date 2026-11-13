@@ -5,6 +5,8 @@
 [Eth]
 NetworkId = 2
 SyncMode = "full"
+# Local simulated mining, average interval in nanoseconds.
+QKCSimulatedBlockTime = 1000000000
 
 [Node]
 DataDir = "./qkc-data/shard-100001"
@@ -15,6 +17,16 @@ IPCPath = "qkc-shard-100001.ipc"
 HTTPHost = "127.0.0.1"
 HTTPPort = 18545
 HTTPModules = ["eth", "net", "web3"]
+
+# Cluster communication uses PrivateHost/PrivatePort; external P2P is disabled.
+[Node.P2P]
+ListenAddr = ""
+DiscAddr = ""
+MaxPeers = 0
+NoDial = true
+NoDiscovery = true
+DiscoveryV4 = false
+DiscoveryV5 = false
 
 # Native TOML uses Go field names and big integer/rational strings; byte fields use single-line arrays.
 [Eth.Genesis]
