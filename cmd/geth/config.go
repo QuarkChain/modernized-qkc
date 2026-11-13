@@ -260,7 +260,7 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		utils.Fatalf("failed to setup OpenTelemetry: %v", err)
 	}
 
-	// Add Ethereum, which owns the shard service and mining lifecycle.
+	// Add Ethereum service.
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
 
 	// Create gauge with geth system and build information
