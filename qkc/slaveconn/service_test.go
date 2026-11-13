@@ -78,10 +78,8 @@ func (b *serviceBackend) AddXshardTxList(hash common.Hash, _ []*types.DepositTx)
 
 func newTestService(t *testing.T, id int64, backend *serviceBackend, shutdown func()) *Service {
 	t.Helper()
-	// Model the required owner entrypoint: schedule full shutdown once and
-	// return immediately, even if another connection reports failure.
-	var shutdownOnce sync.Once
-	requestShutdown := func() { shutdownOnce.Do(func() { go shutdown() }) }
+	// The owner schedules shutdown asynchronously; Service deduplicates failures.
+	requestShutdown := func() { go shutdown() }
 	s, err := NewService(ServiceConfig{ListenAddr: "127.0.0.1:0", LocalChainID: big.NewInt(id), ConfiguredChainIDs: []*big.Int{big.NewInt(1), big.NewInt(2)}, Shutdown: requestShutdown})
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +236,7 @@ func TestServiceBackendErrorClosesConnection(t *testing.T) {
 	}
 }
 
-func TestServiceStopDoesNotWaitForBackend(t *testing.T) {
+func TestServiceStopWaitsForBackend(t *testing.T) {
 	backend := &serviceBackend{entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(backend.release) }) }
@@ -253,15 +251,27 @@ func TestServiceStopDoesNotWaitForBackend(t *testing.T) {
 	}
 	stopped := make(chan struct{})
 	go func() { s.Stop(); close(stopped) }()
+	// Listener closure proves Stop has disabled admission before waiting.
+	listenerClosed := make(chan error, 1)
+	go func() {
+		_, err := s.listener.Accept()
+		listenerClosed <- err
+	}()
 	select {
-	case <-stopped:
+	case err := <-listenerClosed:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("listener close error: %v", err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop waited for running backend call")
+		t.Fatal("Stop did not close listener")
 	}
 	select {
-	case <-done:
-		t.Fatal("running backend call was interrupted")
+	case <-stopped:
+		t.Fatal("Stop returned while backend was running")
 	default:
+	}
+	if err := s.AddXshardTxList(common.Hash{}, nil); !errors.Is(err, conn.ErrConnectionClosed) {
+		t.Fatalf("new backend call after stopping: %v", err)
 	}
 	release()
 	select {
@@ -273,6 +283,32 @@ func TestServiceStopDoesNotWaitForBackend(t *testing.T) {
 		t.Fatal("backend call did not finish after release")
 	}
 
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after backend finished")
+	}
+
+}
+
+func TestServiceStopDoesNotRequestShutdown(t *testing.T) {
+	var calls atomic.Int32
+	s, err := NewService(ServiceConfig{ListenAddr: "127.0.0.1:0", LocalChainID: big.NewInt(1), ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: func() { calls.Add(1) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(&serviceBackend{}); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	serviceMaster(t, s, nil)
+	s.Stop()
+	// Exercise late notifications too, irrespective of watcher scheduling.
+	s.shutdown()
+	s.shutdown()
+	if calls.Load() != 0 {
+		t.Fatalf("normal Stop requested shutdown %d times", calls.Load())
+	}
 }
 
 func TestServiceStopClosesPendingRPC(t *testing.T) {
@@ -463,8 +499,8 @@ func TestServiceFailureShutdown(t *testing.T) {
 			}
 			select {
 			case <-done:
-			case <-ctx.Done():
-				t.Fatal("owner did not stop service while backend was still running")
+				t.Fatal("Stop returned while backend was still running")
+			default:
 			}
 			release()
 			select {

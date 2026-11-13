@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/comm"
+	"github.com/ethereum/go-ethereum/qkc/conn"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
@@ -54,9 +55,10 @@ type ServiceConfig struct {
 	ConfiguredChainIDs []*big.Int
 	MaxPayloadSize     uint32
 	Logger             log.Logger
-	// Shutdown requests asynchronous node shutdown on disconnect or listener failure,
-	// and may also run during normal Stop. It must be prompt, concurrent-safe and
-	// idempotent. The owner closes Service; Master's owner stops the cluster.
+	// Shutdown requests node shutdown on unexpected disconnect or listener failure.
+	// It is called at most once, never as a result of Stop. It must return promptly and
+	// schedule shutdown asynchronously. The owner stops Service before releasing
+	// shard resources; Master's owner stops the cluster.
 	Shutdown func()
 }
 
@@ -74,9 +76,11 @@ type Service struct {
 	master        *MasterConn
 	listener      net.Listener
 
-	mu       sync.Mutex // protects lifecycle
-	stopOnce sync.Once
-	stopping bool
+	mu           sync.Mutex // protects lifecycle
+	stopOnce     sync.Once
+	shutdownOnce sync.Once
+	backendCalls sync.WaitGroup
+	stopping     bool
 }
 
 var (
@@ -136,10 +140,11 @@ func (s *Service) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Stop closes the listener and connections. It neither cancels nor joins backend
-// calls or in-progress TCP dials; late dial results are closed by the manager.
-// The owner/backend must stop admission and drain business calls before releasing
-// shard resources. Stop may trigger Shutdown, including after it returns.
+// Stop prevents new backend calls, closes the listener and connections, and waits
+// for admitted backend calls to finish before returning. It does not cancel those
+// calls or wait for in-progress TCP dials; late dial results are closed by the
+// manager. The owner may release shard resources after Stop returns. Normal Stop
+// does not request Shutdown.
 func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
@@ -154,12 +159,23 @@ func (s *Service) Stop() error {
 		if master != nil {
 			master.Close()
 		}
+		s.backendCalls.Wait()
 	})
 	return nil
 }
 
+// shutdown forwards the first unexpected failure to the owner.
+// Stop sets stopping before closing anything, so its failures are ignored.
 func (s *Service) shutdown() {
-	s.cfg.Shutdown()
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		stopping := s.stopping
+		s.mu.Unlock()
+		if stopping {
+			return
+		}
+		s.cfg.Shutdown()
+	})
 }
 
 func (s *Service) acceptLoop(listener net.Listener) {
@@ -230,18 +246,42 @@ func (s *Service) SendShardBlockHeaderToMaster(ctx context.Context, header *type
 
 // -- Request handlers calling business methods -------------------------------
 
+// beginBackendCall serializes admission with Stop, so no call can be added
+// after Stop begins waiting. Every admitted call must defer backendCalls.Done.
+func (s *Service) beginBackendCall() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopping {
+		return conn.ErrConnectionClosed
+	}
+	s.backendCalls.Add(1)
+	return nil
+}
+
 // CreateShards handles Master's PING(rootTip) after slave interconnection.
 // The single Shard already exists; Init establishes its root checkpoint.
 func (s *Service) CreateShards(root *qkctypes.RootBlock) error {
+	if err := s.beginBackendCall(); err != nil {
+		return err
+	}
+	defer s.backendCalls.Done()
 	return s.backend.Init(root)
 }
 
 func (s *Service) AddRootBlock(root *qkctypes.RootBlock) error {
+	if err := s.beginBackendCall(); err != nil {
+		return err
+	}
+	defer s.backendCalls.Done()
 	_, err := s.backend.AddRootBlock(root)
 	return err
 }
 
 func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (*comm.RootChainStakesResult, error) {
+	if err := s.beginBackendCall(); err != nil {
+		return nil, err
+	}
+	defer s.backendCalls.Done()
 	stakes, signer, err := s.backend.GetRootChainStakes(address, hash)
 	if err != nil {
 		return nil, err
@@ -250,10 +290,18 @@ func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (
 }
 
 func (s *Service) GetUnconfirmedHeaders() ([]*types.Header, error) {
+	if err := s.beginBackendCall(); err != nil {
+		return nil, err
+	}
+	defer s.backendCalls.Done()
 	headers, err := s.backend.GetUnconfirmedHeaderList()
 	return headers, err
 }
 
 func (s *Service) AddXshardTxList(hash common.Hash, deposits []*types.DepositTx) error {
+	if err := s.beginBackendCall(); err != nil {
+		return err
+	}
+	defer s.backendCalls.Done()
 	return s.backend.AddXshardTxList(hash, deposits)
 }
