@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
+	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/triedb"
@@ -185,6 +186,65 @@ func TestQKCBackendIntegration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Exercise configured simulated consensus through the backend-owned chain and
+// builder. Reporting order is checked separately by TestPoWMinerSimulated.
+func TestQKCBackendSimulatedMining(t *testing.T) {
+	config := qkcBackendConfig()
+	config.Genesis.Config.QuarkChain.ConsensusType = params.ConsensusSimulate
+	backend := startQKCBackend(t, qkcBackendNode(t, ""), &config)
+	pow, ok := backend.Engine().(*posw.PoSW)
+	if !ok || !pow.IsSimulate() {
+		t.Fatalf("consensus engine %T, want simulated PoSW", backend.Engine())
+	}
+	chain := backend.BlockChain()
+	if chain.Engine() != pow {
+		t.Fatal("BlockChain must use the Ethereum-owned PoSW engine")
+	}
+	initQKCBackend(t, backend)
+	coinbase := common.Address{0x42}
+	// Local mining does not yet select a searcher from ConsensusType.
+	backend.powMiner = shard.NewPoWMiner(backend.Shard(), shard.PoWMinerConfig{
+		Coinbase: coinbase, Search: shard.NewSimulatedSearch(100 * time.Millisecond),
+	})
+	m := backend.PoWMiner()
+	t.Cleanup(m.StopLocalMining)
+	if err := m.StartLocalMining(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(15 * time.Second); chain.CurrentBlock().Number.Uint64() < 3; {
+		if time.Now().After(deadline) {
+			t.Fatalf("head #%d did not reach #3", chain.CurrentBlock().Number)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	m.StopLocalMining()
+	head := chain.CurrentBlock()
+	parent := chain.Genesis()
+	for n := uint64(1); n <= head.Number.Uint64(); n++ {
+		block := chain.GetBlockByNumber(n)
+		if block == nil || block.NumberU64() != n || block.ParentHash() != parent.Hash() {
+			t.Fatalf("block #%d does not extend the canonical chain", n)
+		}
+		if block.Coinbase() != coinbase || block.Time() <= parent.Time() || block.Time() > uint64(time.Now().Unix()) {
+			t.Fatalf("unexpected block #%d: coinbase %x, time %d after %d", n, block.Coinbase(), block.Time(), parent.Time())
+		}
+		if err := pow.VerifyHeader(chain, block.Header()); err != nil {
+			t.Fatalf("block #%d header verification: %v", n, err)
+		}
+		if err := pow.VerifySeal(chain, block.Header()); err != nil {
+			t.Fatalf("block #%d seal verification: %v", n, err)
+		}
+		if committed, err := qkcrawdb.IsShardBlockCommitted(backend.ChainDb(), block.Hash()); err != nil || !committed {
+			t.Fatalf("block #%d delivery not committed: %v", n, err)
+		}
+		parent = block
+	}
+	if head.Hash() != parent.Hash() {
+		t.Fatal("head is not the last validated block")
+	}
+	t.Logf("Validated %d consecutive canonical blocks with simulated consensus and committed delivery", head.Number.Uint64())
 }
 
 type qkcWaitingSearch struct {
