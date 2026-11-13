@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-package posw
+package poswshard
 
 // Copied from go-ethereum commit 3768b0074791169441ca5eb3a7c73c7b9e74c24a:
 // https://github.com/ethereum/go-ethereum/blob/3768b0074791169441ca5eb3a7c73c7b9e74c24a/consensus/ethash/algorithm.go
