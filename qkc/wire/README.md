@@ -28,12 +28,8 @@ hand.
    `messages_test.go`, then run `go test ./qkc/wire`.
 6. Commit `messages_ssz.go` together with the schema and test changes.
 
-`make qkc`, `make all`, and `make test` also regenerate the wire codecs
-automatically before building.
-
-Direct `go build`, `go test`, and `go run build/ci.go install` commands do not
-regenerate codecs. Run `go generate ./qkc/wire` first when using those commands
-after changing `messages.go`.
+Run `go generate ./qkc/wire` after changing `messages.go`. `go run build/ci.go check_generate` reports a stale
+`messages_ssz.go`.
 
 ## Field rules
 
