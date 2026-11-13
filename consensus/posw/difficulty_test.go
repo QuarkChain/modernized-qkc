@@ -65,6 +65,13 @@ func TestAdjustedDifficulty(t *testing.T) {
 	if base.Int64() != 100 {
 		t.Fatal("modified base difficulty")
 	}
+	c.DiffDivider = 1000
+	if got := CalcAdjustedDifficulty(c, big.NewInt(1), base, uint256.NewInt(100), 0); got.Int64() != 1 {
+		t.Fatalf("large divider produced difficulty %s, want 1", got)
+	}
+	if base.Int64() != 100 {
+		t.Fatal("discount modified base difficulty")
+	}
 	c.StakingEnabled = false
 	if got := CalcAdjustedDifficulty(c, big.NewInt(1), base, uint256.NewInt(100), 0); got.Int64() != 100 {
 		t.Fatal(got)
@@ -103,8 +110,8 @@ func TestShardStakingDecay(t *testing.T) {
 			// The root path uses the configured, fixed requirement at every epoch.
 			rootConfig := *config
 			rootConfig.PoSWStakingDecayEnabled = false
-			if got := CalcAdjustedDifficulty(&rootConfig, number, base, uint256.NewInt(99), 0); got.Int64() != 100 {
-				t.Fatalf("root stake requirement decayed: difficulty %s", got)
+			if got := StakeQuota(&rootConfig, number, uint256.NewInt(99)); got != 0 {
+				t.Fatalf("root stake requirement decayed: quota %d", got)
 			}
 			if config.StakePerBlock.Uint64() != 100 || config.DecayFactor.Cmp(big.NewRat(22, 25)) != 0 ||
 				number.Uint64() != test.number || base.Int64() != 100 || stakes.Uint64() != test.stakes {
