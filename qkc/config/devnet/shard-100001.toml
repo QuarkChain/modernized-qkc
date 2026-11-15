@@ -5,8 +5,6 @@
 [Eth]
 NetworkId = 2
 SyncMode = "full"
-# Local simulated mining, average interval in nanoseconds.
-QKCSimulatedBlockTime = 1000000000
 
 [Node]
 DataDir = "./qkc-data/shard-100001"
@@ -16,9 +14,9 @@ CoinbaseAddress = "0x2222222222222222222222222222222222222222"
 IPCPath = "qkc-shard-100001.ipc"
 HTTPHost = "127.0.0.1"
 HTTPPort = 18545
-HTTPModules = ["eth", "net", "web3"]
+HTTPModules = ["eth", "net", "web3", "miner"]
 
-# Cluster communication uses PrivateHost/PrivatePort; external P2P is disabled.
+# External P2P is disabled for the local demo.
 [Node.P2P]
 ListenAddr = ""
 DiscAddr = ""
@@ -52,7 +50,7 @@ BerlinBlock = "0"
 LondonBlock = "0"
 
 [Eth.Genesis.Config.QuarkChain]
-ConsensusType = "POW_SIMULATE"
+ConsensusType = "POW_ETHASH"
 ChainIDs = ["100001", "100002"]
 RewardTaxRate = "0.5"
 MaxBlocksPerRootBlock = 18

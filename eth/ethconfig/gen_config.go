@@ -12,15 +12,12 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
 	"github.com/ethereum/go-ethereum/miner"
-	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
 // MarshalTOML marshals as TOML.
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
-		Genesis                 *core.Genesis     `toml:",omitempty"`
-		QKCSimulatedBlockTime   time.Duration     `toml:",omitempty"`
-		QKCMiningSearch         shard.NonceSearch `toml:"-"`
+		Genesis                 *core.Genesis `toml:",omitempty"`
 		NetworkId               uint64
 		SyncMode                SyncMode
 		HistoryMode             history.HistoryPolicy
@@ -78,8 +75,6 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
-	enc.QKCSimulatedBlockTime = c.QKCSimulatedBlockTime
-	enc.QKCMiningSearch = c.QKCMiningSearch
 	enc.NetworkId = c.NetworkId
 	enc.SyncMode = c.SyncMode
 	enc.HistoryMode = c.HistoryMode
@@ -140,9 +135,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 // UnmarshalTOML unmarshals from TOML.
 func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
-		Genesis                 *core.Genesis     `toml:",omitempty"`
-		QKCSimulatedBlockTime   *time.Duration    `toml:",omitempty"`
-		QKCMiningSearch         shard.NonceSearch `toml:"-"`
+		Genesis                 *core.Genesis `toml:",omitempty"`
 		NetworkId               *uint64
 		SyncMode                *SyncMode
 		HistoryMode             *history.HistoryPolicy
@@ -204,12 +197,6 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.Genesis != nil {
 		c.Genesis = dec.Genesis
-	}
-	if dec.QKCSimulatedBlockTime != nil {
-		c.QKCSimulatedBlockTime = *dec.QKCSimulatedBlockTime
-	}
-	if dec.QKCMiningSearch != nil {
-		c.QKCMiningSearch = dec.QKCMiningSearch
 	}
 	if dec.NetworkId != nil {
 		c.NetworkId = *dec.NetworkId

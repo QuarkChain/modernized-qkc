@@ -20,13 +20,10 @@ package eth
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"math/big"
-	"net"
 	"runtime"
-	"strconv"
 	"sync"
 	"time"
 
@@ -64,8 +61,6 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/shard"
-	"github.com/ethereum/go-ethereum/qkc/slaveconn"
-	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	gethversion "github.com/ethereum/go-ethereum/version"
@@ -105,11 +100,9 @@ type Ethereum struct {
 	localTxTracker *locals.TxTracker
 	blockchain     *core.BlockChain
 
-	shard        *shard.Shard
-	powMiner     *shard.PoWMiner
-	slaveService *slaveconn.Service
-	qkcMu        sync.Mutex // serializes mining activation with shutdown
-	qkcStopping  bool
+	shard         *shard.Shard
+	powMiner      *shard.PoWMiner
+	clusterClient shard.ClusterClient
 
 	handler *handler
 	discmix *enode.FairMix
@@ -204,29 +197,10 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if chainConfig.QuarkChain != nil {
 		config.SyncMode = ethconfig.FullSync
 	}
-	constructed := false
-	defer func() {
-		if chainConfig.QuarkChain != nil && !constructed {
-			chainDb.Close()
-		}
-	}()
-	if qkc := chainConfig.QuarkChain; qkc != nil {
-		if config.QKCSimulatedBlockTime < 0 {
-			return nil, errors.New("QKCSimulatedBlockTime must not be negative")
-		}
-		if config.QKCSimulatedBlockTime > 0 && qkc.ConsensusType != params.ConsensusSimulate {
-			return nil, errors.New("QKCSimulatedBlockTime requires POW_SIMULATE consensus")
-		}
-	}
 	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if chainConfig.QuarkChain != nil && !constructed {
-			engine.Close()
-		}
-	}()
 	// Set networkID to chainID by default.
 	networkID := config.NetworkId
 	if networkID == 0 {
@@ -246,42 +220,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		shutdownTracker: shutdowncheck.NewShutdownTracker(chainDb),
 		fmHeadEventCh:   make(chan core.ChainEvent, 10),
 		fmBlockProcCh:   make(chan bool, 10),
-	}
-	if chainConfig.QuarkChain != nil {
-		// A constructor failure cannot rely on Node calling Ethereum.Stop.
-		defer func() {
-			if !constructed {
-				if eth.slaveService != nil {
-					eth.slaveService.Stop()
-				}
-				if eth.handler != nil {
-					eth.handler.downloader.Terminate()
-				}
-				if eth.txPool != nil {
-					eth.txPool.Close()
-				}
-				if eth.filterMaps != nil {
-					eth.filterMaps.Stop()
-				}
-				if eth.blockchain != nil {
-					eth.blockchain.Stop()
-				}
-				eth.discmix.Close()
-			}
-		}()
-		nodeConfig := stack.Config()
-		if nodeConfig.PrivateHost == "" || nodeConfig.PrivatePort < 0 || nodeConfig.PrivatePort > 65535 {
-			return nil, errors.New("QKC requires Node.PrivateHost and a valid Node.PrivatePort")
-		}
-		eth.slaveService, err = slaveconn.NewService(slaveconn.ServiceConfig{
-			ListenAddr:   net.JoinHostPort(nodeConfig.PrivateHost, strconv.Itoa(nodeConfig.PrivatePort)),
-			LocalChainID: chainConfig.ChainID, ConfiguredChainIDs: chainConfig.QuarkChain.ChainIDs,
-			// The caller must return before Node waits for service requests to exit.
-			Shutdown: sync.OnceFunc(func() { go stack.Close() }),
-		})
-		if err != nil {
-			return nil, err
-		}
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -453,19 +391,16 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// Only QKC chains use root/shard coordination. Non-QKC configurations remain
 	// usable by the original geth tests without attaching shard-only validation.
 	if eth.isQKC() {
+		// TODO(SlaveService): Replace the mock with a real ClusterClient implementation.
+		client := &shard.MockClusterClient{}
+		eth.clusterClient = client
 		shardChain := shard.NewShardChain(chainDb, eth.blockchain, eth.miner)
-		eth.shard, err = shard.New(shardChain, eth.slaveService)
+		eth.shard, err = shard.New(shardChain, eth.clusterClient)
 		if err != nil {
 			return nil, err
 		}
-		search := config.QKCMiningSearch
-		if search == nil && config.QKCSimulatedBlockTime > 0 {
-			search = shard.NewSimulatedSearch(config.QKCSimulatedBlockTime)
-		}
-		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{
-			Coinbase: stack.Config().CoinbaseAddress,
-			Search:   search,
-		})
+		client.Shard = eth.shard
+		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
 	}
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
@@ -484,7 +419,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	// Successful startup; push a marker and check previous unclean shutdowns.
 	eth.shutdownTracker.MarkStartup()
-	constructed = true
 
 	return eth, nil
 }
@@ -538,11 +472,11 @@ func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
 
 func (s *Ethereum) Miner() *miner.Miner { return s.miner }
 
-// QKC components are owned by Ethereum. Stop rejects new service calls and
-// waits for business requests and mining before closing the chain and database.
-func (s *Ethereum) Shard() *shard.Shard              { return s.shard }
-func (s *Ethereum) PoWMiner() *shard.PoWMiner        { return s.powMiner }
-func (s *Ethereum) SlaveService() *slaveconn.Service { return s.slaveService }
+// Shard and PoWMiner are owned by Ethereum and called by the cluster service
+// and MinerAPI. Ethereum.Stop must reject new calls and wait for in-flight
+// ones before closing the chain and database.
+func (s *Ethereum) Shard() *shard.Shard       { return s.shard }
+func (s *Ethereum) PoWMiner() *shard.PoWMiner { return s.powMiner }
 
 func (s *Ethereum) AccountManager() *accounts.Manager  { return s.accountManager }
 func (s *Ethereum) BlockChain() *core.BlockChain       { return s.blockchain }
@@ -603,44 +537,6 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
-	if s.slaveService != nil {
-		if err := s.slaveService.Start(qkcMiningBackend{s.shard, s.startQKCMining}); err != nil {
-			// Node does not Stop a Lifecycle whose Start failed.
-			s.Stop()
-			return err
-		}
-	}
-	return nil
-}
-
-// qkcMiningBackend starts mining only after Service initializes the shard.
-type qkcMiningBackend struct {
-	*shard.Shard
-	startMining func() error
-}
-
-func (b qkcMiningBackend) Init(root *qkctypes.RootBlock) error {
-	if err := b.Shard.Init(root); err != nil {
-		return err
-	}
-	return b.startMining()
-}
-
-// startQKCMining runs after the master checkpoint is initialized. Master connects
-// all slaves before sending the checkpoint; M2 must also wait for synchronization.
-func (s *Ethereum) startQKCMining() error {
-	s.qkcMu.Lock()
-	defer s.qkcMu.Unlock()
-	if s.qkcStopping {
-		return errors.New("QKC node is stopping")
-	}
-	mining := s.config.QKCMiningSearch != nil || s.config.QKCSimulatedBlockTime > 0
-	if mining {
-		if err := s.powMiner.StartLocalMining(); err != nil {
-			return err
-		}
-	}
-	log.Info("Initialized shard root", "hash", s.shard.RootTip(), "mining", mining)
 	return nil
 }
 
@@ -755,13 +651,10 @@ func (s *Ethereum) setupDiscovery() error {
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
-	if s.slaveService != nil {
-		s.qkcMu.Lock()
-		s.qkcStopping = true
-		s.qkcMu.Unlock()
-		s.slaveService.Stop()
-		s.powMiner.StopLocalMining()
-	}
+	// TODO(SlaveService): When replacing the QKC mock, update this shutdown order
+	// with the service integration: reject new requests, cancel and wait for
+	// request handlers and mining, then close cluster connections before the
+	// chain resources and database below.
 	s.discmix.Close()
 	if !s.isQKC() {
 		s.dropper.Stop()
@@ -773,6 +666,9 @@ func (s *Ethereum) Stop() error {
 		// TODO(M2): Restore matching handler/dropper Start and Stop calls
 		// when enabling geth P2P components for QKC.
 		s.handler.downloader.Terminate()
+		// Cancel local mining and wait for the mining loop to exit, including any
+		// block build, seal search or block import already in progress.
+		s.powMiner.StopLocalMining()
 	}
 
 	// Then stop everything else.

@@ -17,9 +17,14 @@
 package eth
 
 import (
+	"context"
+	"errors"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
 // MinerAPI provides an API to control the miner.
@@ -30,6 +35,27 @@ type MinerAPI struct {
 // NewMinerAPI creates a new MinerAPI instance.
 func NewMinerAPI(e *Ethereum) *MinerAPI {
 	return &MinerAPI{e}
+}
+
+// GetWork returns a QKC candidate for an external miner. Difficulty is the
+// effective PoSW difficulty; Number selects the Ethash epoch.
+func (api *MinerAPI) GetWork(ctx context.Context, coinbase common.Address) (*shard.MiningWork, error) {
+	if api.e.PoWMiner() == nil {
+		return nil, errors.New("mining work is only available on QuarkChain shards")
+	}
+	return api.e.PoWMiner().GetWork(ctx, coinbase)
+}
+
+// SubmitWork verifies and imports a sealed QKC candidate. Invalid seals return
+// an error and leave the work available for another submission.
+func (api *MinerAPI) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash) (bool, error) {
+	if api.e.PoWMiner() == nil {
+		return false, errors.New("mining work is only available on QuarkChain shards")
+	}
+	if err := api.e.PoWMiner().SubmitWork(sealHash, nonce, mixHash); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetExtra sets the extra data string that is included when this miner mines a block.

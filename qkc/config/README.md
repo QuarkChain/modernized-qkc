@@ -24,32 +24,47 @@ Each shard also has its own IPC filename. Runtime data under `qkc-data/` is igno
 by Git. With this binary on `PATH`, a configuration copied to `shard.toml` starts with
 `geth --config shard.toml`. Relative data paths resolve from the working directory.
 
-### Milestone 1: simulated internal mining
+### Milestone 1: external mining
 
-The shard TOMLs disable P2P and set `[Eth].QKCSimulatedBlockTime = 1000000000`
-(one second; zero disables local mining). Ethereum starts mining after `qkc m1`
-connects both shards and initializes R0.
-Build with `make geth qkc`, then use three terminals:
+Build and start the local demo from the repository root:
 
 ```sh
-# Terminal 1
-build/bin/geth --config qkc/config/devnet/shard-100001.toml
-
-# Terminal 2
-build/bin/geth --config qkc/config/devnet/shard-100002.toml
-
-# Terminal 3
+make qkc
 build/bin/qkc m1
 ```
 
-The driver reads `PrivateHost` / `PrivatePort` and chain IDs from both shard TOMLs
-(`--config` overrides them, repeat for each shard). It connects the shards and
-sends the [R0 fixture](devnet/root.toml) via PING, starting both miners. It prints
-R0's included header heights once, then logs each reported shard height and
-returns an ACK. IPC and HTTP are not required. Ctrl-C shuts down all three processes.
-Use fresh data directories for each run: the driver does not check existing
-heights, and initializing R0 restores the shard heads to genesis.
-Regenerate R0 if either shard genesis changes.
+The driver starts both shard nodes in this process and initializes each with the
+[R0 fixture](devnet/root.toml). 
+Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
+R0 restores shard heads to genesis. Regenerate R0 if either shard genesis changes.
+
+Shard 100001 uses `POW_ETHASH`; shard 100002 uses `POW_SIMULATE`. Local seal search
+is disabled. The nodes use the existing mock cluster client: R0 stays at height 0,
+with no R1 production or cross-shard delivery. 
+
+The devnet HTTP configurations enable the existing `miner` namespace. An external
+miner requests work for its coinbase address:
+
+```sh
+curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"miner_getWork","params":["0x2222222222222222222222222222222222222222"],"id":1}'
+```
+
+The result contains `SealHash`, `Number`, `Difficulty`, and `Time`. Numeric fields
+are decimal JSON numbers; parse `Difficulty` as an arbitrary-precision integer.
+Compute an Ethash seal over `SealHash`, using the epoch selected by `Number` and
+the **effective PoSW difficulty** supplied in `Difficulty`.
+Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
+
+```text
+miner_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
+```
+
+These are QKC mining RPCs, not the legacy Ethereum `eth_getWork` response format.
+A successful submission returns `true` after verification and import. Invalid
+Ethash seals return an RPC error without advancing the head, and the same work
+remains available for a corrected submission. Imported work cannot be submitted
+again; request new work when the head changes. 
 
 ### Test accounts
 
@@ -86,7 +101,7 @@ This starts the local blockchain with the existing PoSW engine and geth's node
 lifecycle and RPC services.
 
 Set `ConsensusType` under `[Eth.Genesis.Config.QuarkChain]` to `"POW_ETHASH"`
-or `"POW_SIMULATE"` (used by both devnet shards). Both use PoSW rules; simulation
+(shard 100001) or `"POW_SIMULATE"` (shard 100002). Both use PoSW rules; simulation
 skips Ethash seal verification. Omitting the field retains the legacy Ethash
 behavior. Unknown values, including `"NONE"`, are rejected.
 
@@ -97,10 +112,10 @@ For an existing database initialized without this field, keep omitting it or use
 a new data directory with the updated examples. A database-only restart uses the
 stored consensus type.
 
-TODO: initialize `ShardChain` from a Master root checkpoint, connect cluster
-transport, implement mining, and add shard-specific RPC. The `PrivateHost`,
-`PrivatePort`, and `CoinbaseAddress` fields under `[Node]` store the internal
-cluster endpoint and mining recipient.
+TODO: initialize `ShardChain` from a live Master root checkpoint and connect
+cluster transport. The `PrivateHost`, `PrivatePort`, and `CoinbaseAddress` fields
+under `[Node]` store the future cluster endpoint and local mining recipient.
+External mining work uses the coinbase supplied to `miner_getWork`.
 
 TOML uses case-sensitive Go field names, quoted big integers and rationals. `geth dumpconfig`
 omits Genesis, so keep the original configuration for initializing other nodes.
