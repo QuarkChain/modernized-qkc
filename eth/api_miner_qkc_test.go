@@ -70,6 +70,7 @@ func TestQKCMinerRPC(t *testing.T) {
 				if engine, ok := backend.Engine().(*posw.PoSW); !ok || engine.IsSimulate() {
 					t.Fatal("mining RPC must use real Ethash verification")
 				}
+				t.Logf("Started POW_ETHASH node: scheme=%s rpc=%s", scheme, stack.HTTPEndpoint())
 				client, err := rpc.DialHTTP(stack.HTTPEndpoint())
 				if err != nil {
 					t.Fatal(err)
@@ -81,9 +82,11 @@ func TestQKCMinerRPC(t *testing.T) {
 					t.Fatalf("work before R0 initialization: %v", err)
 				}
 				initQKCBackend(t, backend)
+				t.Logf("GetWork rejected before initialization; initialized R0=%s", backend.Shard().RootTip().TerminalString())
 				if err := client.Call(&work, "miner_getWork", coinbase); err != nil {
 					t.Fatal(err)
 				}
+				t.Logf("Received work: number=%d sealHash=%s difficulty=%s timestamp=%d", work.Number, work.SealHash.TerminalString(), work.Difficulty, work.Time)
 				sealHash := common.HexToHash("0x114b8254cd8786627fc377b4c561b99819c20f0346a6f0108f1eb290003430ba")
 				if work.SealHash != sealHash || work.Number != 1 || work.Time != 946684800 || work.Difficulty.Cmp(big.NewInt(2)) != 0 {
 					t.Fatalf("unexpected work vector: %+v", work)
@@ -110,11 +113,13 @@ func TestQKCMinerRPC(t *testing.T) {
 					if head := backend.BlockChain().CurrentBlock(); head.Hash() != backend.BlockChain().Genesis().Hash() {
 						t.Fatalf("%s advanced the head", test.name)
 					}
+					t.Logf("Rejected %s: nonce=%d error=%v; head remains at genesis", test.name, test.nonce.Uint64(), err)
 				}
 				var retry shard.MiningWork
 				if err := client.Call(&retry, "miner_getWork", coinbase); err != nil || retry.SealHash != sealHash {
 					t.Fatalf("invalid submission discarded work: %+v, %v", retry, err)
 				}
+				t.Logf("Resubmitting preserved work with valid seal: sealHash=%s nonce=%d mixHash=%s", retry.SealHash.TerminalString(), nonce.Uint64(), mixHash.TerminalString())
 				var accepted bool
 				if err := client.Call(&accepted, "miner_submitWork", sealHash, nonce, mixHash); err != nil || !accepted {
 					t.Fatalf("valid seal rejected: accepted=%t err=%v", accepted, err)
@@ -134,12 +139,15 @@ func TestQKCMinerRPC(t *testing.T) {
 				if !backend.BlockChain().HasBlockAndState(head.Hash(), 1) {
 					t.Fatal("sealed block and state were not imported")
 				}
+				t.Logf("Imported sealed block and state: number=%s hash=%s coinbase=%s", head.Number, head.Hash().TerminalString(), head.Coinbase)
 				if err := client.Call(&accepted, "miner_submitWork", sealHash, nonce, mixHash); err == nil || !strings.Contains(err.Error(), shard.ErrUnknownWork.Error()) {
 					t.Fatalf("imported work accepted again: %v", err)
 				}
+				t.Logf("Rejected replay of imported work: sealHash=%s", sealHash.TerminalString())
 				if err := client.Call(&work, "miner_getWork", coinbase); err != nil || work.Number != 2 || work.SealHash == sealHash {
 					t.Fatalf("work did not advance: %+v, %v", work, err)
 				}
+				t.Logf("Received next work: number=%d sealHash=%s difficulty=%s", work.Number, work.SealHash.TerminalString(), work.Difficulty)
 			})
 		})
 	}

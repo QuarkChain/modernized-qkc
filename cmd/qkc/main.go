@@ -31,7 +31,7 @@ func newApp() *cli.App {
 	app.Name = "qkc"
 	app.Flags = debug.Flags
 	// m1 is a temporary local-mining test driver.
-	app.Commands = []*cli.Command{checkQKCConfigCommand, m1Command}
+	app.Commands = []*cli.Command{checkQKCConfigCommand, m1Command, mineCommand}
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)
 		return debug.Setup(ctx)

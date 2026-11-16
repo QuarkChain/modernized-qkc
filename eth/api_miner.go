@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
@@ -43,7 +44,13 @@ func (api *MinerAPI) GetWork(ctx context.Context, coinbase common.Address) (*sha
 	if api.e.PoWMiner() == nil {
 		return nil, errors.New("mining work is only available on QuarkChain shards")
 	}
-	return api.e.PoWMiner().GetWork(ctx, coinbase)
+	chainID := api.e.BlockChain().Config().ChainID
+	work, err := api.e.PoWMiner().GetWork(ctx, coinbase)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("Served shard mining work", "chain", chainID, "coinbase", coinbase, "number", work.Number, "sealhash", work.SealHash, "difficulty", work.Difficulty)
+	return work, nil
 }
 
 // SubmitWork verifies and imports a sealed QKC candidate. Invalid seals return
@@ -52,9 +59,11 @@ func (api *MinerAPI) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mi
 	if api.e.PoWMiner() == nil {
 		return false, errors.New("mining work is only available on QuarkChain shards")
 	}
+	chainID := api.e.BlockChain().Config().ChainID
 	if err := api.e.PoWMiner().SubmitWork(sealHash, nonce, mixHash); err != nil {
 		return false, err
 	}
+	log.Info("Accepted shard mining work", "chain", chainID, "sealhash", sealHash, "nonce", nonce.Uint64())
 	return true, nil
 }
 

@@ -38,6 +38,21 @@ The driver starts both shard nodes in this process and initializes each with the
 Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
 R0 restores shard heads to genesis. Regenerate R0 if either shard genesis changes.
 
+QKC stores the genesis PoW difficulty in `[Eth.Genesis].Mixhash` as a 32-byte
+hex value. It must be at least `PoSW.MinimumDifficulty`; changing `Mixhash`
+also requires regenerating R0.
+
+In a second terminal, run the CPU test client to mine one real Ethash block:
+
+```sh
+build/bin/qkc mine
+# Optional endpoint and mining recipient overrides:
+build/bin/qkc mine --rpc http://127.0.0.1:18545 --coinbase 0x2222222222222222222222222222222222222222
+```
+
+This is a single-block client for a low-difficulty devnet. The client fetches work, searches nonces with the existing light Ethash algorithm,
+and submits a valid seal. It prints the work, seal and acceptance, then exits.
+
 Shard 100001 uses `POW_ETHASH`; shard 100002 uses `POW_SIMULATE`. Local seal search
 is disabled. The nodes use the existing mock cluster client: R0 stays at height 0,
 with no R1 production or cross-shard delivery. 
