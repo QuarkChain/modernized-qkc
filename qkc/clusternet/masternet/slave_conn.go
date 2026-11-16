@@ -1,5 +1,5 @@
-// Package masterconn implements master-side cluster connections.
-package masterconn
+// Package masternet implements master-side cluster connections.
+package masternet
 
 import (
 	"context"
@@ -11,16 +11,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
-	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
 // SlaveRequestHandler serves requests received from slaves. Calls may run
-// concurrently. Return *comm.RemoteError for business rejections; other errors
+// concurrently. Return *clusternet.RemoteError for business rejections; other errors
 // close the connection. sourceChainID is an independent copy of the configured
 // remote chain ID. The owner completes PING identity verification, slave
 // interconnection, and cluster initialization before starting business activity;
@@ -123,7 +123,7 @@ func (sc *SlaveConn) SendPing(ctx context.Context, rootTip *qkctypes.RootBlock) 
 // must call this on one slave at a time and await its response before sending
 // to the next slave; failure aborts cluster initialization without a retry.
 // The caller is responsible for setting an appropriate context deadline.
-func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []comm.SlaveInfo) error {
+func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []clusternet.SlaveInfo) error {
 	req := &wire.ConnectToSlavesRequest{SlaveInfoList: make([]*wire.SlaveInfo, len(slaves))}
 	for i, slave := range slaves {
 		if slave.Host == "" || slave.Port == 0 {
@@ -155,7 +155,7 @@ func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []comm.Slav
 }
 
 // SendAddRootBlock encodes and sends a root block. A nonzero remote
-// ErrorCode is returned as *comm.RemoteError; transport and context errors are
+// ErrorCode is returned as *clusternet.RemoteError; transport and context errors are
 // returned unchanged.
 func (sc *SlaveConn) SendAddRootBlock(ctx context.Context, root *qkctypes.RootBlock) error {
 	if root == nil {
@@ -175,15 +175,15 @@ func (sc *SlaveConn) SendAddRootBlock(ctx context.Context, root *qkctypes.RootBl
 		return fmt.Errorf("unexpected add root block response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return &comm.RemoteError{Code: result.ErrorCode}
+		return &clusternet.RemoteError{Code: result.ErrorCode}
 	}
 	return nil
 }
 
 // SendGetRootChainStakes returns the slave's staking response. A nonzero remote
-// ErrorCode is returned as *comm.RemoteError; transport and context errors are
+// ErrorCode is returned as *clusternet.RemoteError; transport and context errors are
 // returned unchanged. Business values are decoded before returning.
-func (sc *SlaveConn) SendGetRootChainStakes(ctx context.Context, address common.Address, shardBlockHash common.Hash) (*comm.RootChainStakesResult, error) {
+func (sc *SlaveConn) SendGetRootChainStakes(ctx context.Context, address common.Address, shardBlockHash common.Hash) (*clusternet.RootChainStakesResult, error) {
 	req := &wire.GetRootChainStakesRequest{Address: address, ShardBlockHash: shardBlockHash}
 	resp, err := sc.SendRPC(ctx, byte(wire.ClusterOpGetRootChainStakesRequest), req)
 	if err != nil {
@@ -194,9 +194,9 @@ func (sc *SlaveConn) SendGetRootChainStakes(ctx context.Context, address common.
 		return nil, fmt.Errorf("unexpected get root chain stakes response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return nil, &comm.RemoteError{Code: result.ErrorCode}
+		return nil, &clusternet.RemoteError{Code: result.ErrorCode}
 	}
-	return &comm.RootChainStakesResult{Stakes: result.Stakes.Clone(), Signer: result.Signer}, nil
+	return &clusternet.RootChainStakesResult{Stakes: result.Stakes.Clone(), Signer: result.Signer}, nil
 }
 
 // SendGetUnconfirmedHeaders asks a slave for its unconfirmed shard headers.
@@ -210,7 +210,7 @@ func (sc *SlaveConn) SendGetUnconfirmedHeaders(ctx context.Context) ([]*types.He
 		return nil, fmt.Errorf("unexpected get unconfirmed headers response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return nil, &comm.RemoteError{Code: result.ErrorCode}
+		return nil, &clusternet.RemoteError{Code: result.ErrorCode}
 	}
 	headers := make([]*types.Header, len(result.HeaderList))
 	for i, encoded := range result.HeaderList {

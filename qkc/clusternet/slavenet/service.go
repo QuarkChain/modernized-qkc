@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package slaveconn
+package slavenet
 
 import (
 	"context"
@@ -28,14 +28,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/comm"
+	"github.com/ethereum/go-ethereum/qkc/clusternet"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
 
 // ShardBackend supplies concurrent-safe business operations borrowed by Service.
 // Init errors close the master connection. Other methods may return
-// *comm.RemoteError as a protocol rejection; all other errors close the connection.
+// *clusternet.RemoteError as a protocol rejection; all other errors close the connection.
 type ShardBackend interface {
 	// The owner observes successful initialization through the backend before
 	// starting local business activity.
@@ -225,7 +225,7 @@ func (s *Service) acceptLoop(listener net.Listener) {
 // DialToSlave connects a slave advertised by Master through the connection manager.
 // It reuses known connections and does not retry or reconnect after failure.
 // Command failures are returned to Master, whose owner must abort cluster startup.
-func (s *Service) DialToSlave(ctx context.Context, info comm.SlaveInfo) error {
+func (s *Service) DialToSlave(ctx context.Context, info clusternet.SlaveInfo) error {
 	return s.xshardManager.DialToSlave(ctx, info)
 }
 
@@ -266,12 +266,12 @@ func (s *Service) AddRootBlock(root *qkctypes.RootBlock) error {
 	return err
 }
 
-func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (*comm.RootChainStakesResult, error) {
+func (s *Service) GetRootChainStakes(address common.Address, hash common.Hash) (*clusternet.RootChainStakesResult, error) {
 	stakes, signer, err := s.backend.GetRootChainStakes(address, hash)
 	if err != nil {
 		return nil, err
 	}
-	return &comm.RootChainStakesResult{Stakes: stakes, Signer: signer}, nil
+	return &clusternet.RootChainStakesResult{Stakes: stakes, Signer: signer}, nil
 }
 
 func (s *Service) GetUnconfirmedHeaders() ([]*types.Header, error) {

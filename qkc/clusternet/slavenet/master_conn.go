@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package slaveconn implements slave-side cluster connections.
-package slaveconn
+// Package slavenet implements slave-side cluster connections.
+package slavenet
 
 import (
 	"context"
@@ -28,27 +28,27 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
-	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
 // MasterRequestHandler serves requests received from the master. Calls may run
-// concurrently. Return *comm.RemoteError for business rejections; other errors
+// concurrently. Return *clusternet.RemoteError for business rejections; other errors
 // indicate handler failures and close the connection.
 type MasterRequestHandler interface {
 	CreateShards(rootTip *qkctypes.RootBlock) error
 	AddRootBlock(root *qkctypes.RootBlock) error
-	GetRootChainStakes(address common.Address, shardBlockHash common.Hash) (*comm.RootChainStakesResult, error)
+	GetRootChainStakes(address common.Address, shardBlockHash common.Hash) (*clusternet.RootChainStakesResult, error)
 	GetUnconfirmedHeaders() ([]*types.Header, error)
 }
 
 // SlaveDialer establishes outbound connections to advertised slaves.
 type SlaveDialer interface {
-	DialToSlave(ctx context.Context, info comm.SlaveInfo) error
+	DialToSlave(ctx context.Context, info clusternet.SlaveInfo) error
 }
 
 // MasterConnConfig configures the slave's connection to its master.
@@ -120,7 +120,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 }
 
 // SendAddShardBlockHeader reports a shard header and its coinbase reward to
-// the master. A nonzero business error code is returned as *comm.RemoteError.
+// the master. A nonzero business error code is returned as *clusternet.RemoteError.
 func (mc *MasterConn) SendAddShardBlockHeader(ctx context.Context, header *types.Header, coinbaseAmount *uint256.Int) error {
 	if header == nil {
 		return errors.New("shard block header must not be nil")
@@ -142,7 +142,7 @@ func (mc *MasterConn) SendAddShardBlockHeader(ctx context.Context, header *types
 		return fmt.Errorf("unexpected add shard block header response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return &comm.RemoteError{Code: result.ErrorCode}
+		return &clusternet.RemoteError{Code: result.ErrorCode}
 	}
 	return nil
 }
@@ -187,7 +187,7 @@ func (mc *MasterConn) handleConnectToSlaves(req wire.SSZMessage) (wire.SSZMessag
 		wg.Add(1)
 		go func(i int, info wire.SlaveInfo) {
 			defer wg.Done()
-			dialInfo := comm.SlaveInfo{Host: string(info.Host), Port: info.Port, ChainID: info.ChainID.ToBig()}
+			dialInfo := clusternet.SlaveInfo{Host: string(info.Host), Port: info.Port, ChainID: info.ChainID.ToBig()}
 			if err := mc.slaveDialer.DialToSlave(context.Background(), dialInfo); err != nil {
 				result.ResultList[i] = []byte(err.Error())
 			}
