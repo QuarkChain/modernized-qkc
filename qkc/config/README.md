@@ -61,7 +61,7 @@ miner requests work for its coinbase address:
 
 ```sh
 curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","method":"miner_getWork","params":["0x2222222222222222222222222222222222222222"],"id":1}'
+  --data '{"jsonrpc":"2.0","method":"miner_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
 ```
 
 The result contains `SealHash`, `Number`, `Difficulty`, and `Time`. Numeric fields
@@ -73,12 +73,6 @@ Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
 ```text
 miner_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
 ```
-
-These are QKC mining RPCs, not the legacy Ethereum `eth_getWork` response format.
-A successful submission returns `true` after verification and import. Invalid
-Ethash seals return an RPC error without advancing the head, and the same work
-remains available for a corrected submission. Imported work cannot be submitted
-again; request new work when the head changes. 
 
 ### Test accounts
 
@@ -126,10 +120,8 @@ For an existing database initialized without this field, keep omitting it or use
 a new data directory with the updated examples. A database-only restart uses the
 stored consensus type.
 
-TODO: initialize `ShardChain` from a live Master root checkpoint and connect
-cluster transport. The `PrivateHost`, `PrivatePort`, and `CoinbaseAddress` fields
-under `[Node]` store the future cluster endpoint and local mining recipient.
-External mining work uses the coinbase supplied to `miner_getWork`.
+TODO: initialize `ShardChain` from a Master root checkpoint and connect
+cluster transport. 
 
 TOML uses case-sensitive Go field names, quoted big integers and rationals. `geth dumpconfig`
 omits Genesis, so keep the original configuration for initializing other nodes.
