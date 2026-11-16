@@ -33,14 +33,13 @@ make qkc
 build/bin/qkc m1
 ```
 
-The driver starts both shard nodes in this process and initializes each with the
-[R0 fixture](devnet/root.toml). 
+The driver starts both shard nodes in this process, constructs R0 from their
+genesis headers, and initializes each with that root.
 Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
-R0 restores shard heads to genesis. Regenerate R0 if either shard genesis changes.
+R0 restores shard heads to genesis.
 
 QKC stores the genesis PoW difficulty in `[Eth.Genesis].Mixhash` as a 32-byte
-hex value. It must be at least `PoSW.MinimumDifficulty`; changing `Mixhash`
-also requires regenerating R0.
+hex value. It must be at least `PoSW.MinimumDifficulty`.
 
 In a second terminal, run the CPU test client to mine one real Ethash block:
 

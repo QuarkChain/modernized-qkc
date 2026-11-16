@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,9 +27,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth"
+	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/qkc/shard"
-	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/urfave/cli/v2"
 )
 
 func m1TestConfig(t *testing.T, chainID int) string {
@@ -51,18 +54,28 @@ func m1TestConfig(t *testing.T, chainID int) string {
 }
 
 func TestM1ShardRPC(t *testing.T) {
-	root, err := loadM1Root("../../qkc/config/devnet/root.toml")
+	chainIDs := []int{100001, 100002}
+	var stacks []*node.Node
+	var backends []*eth.Ethereum
+	for _, chainID := range chainIDs {
+		stack, backend, err := startM1Shard(m1TestConfig(t, chainID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { stack.Close() })
+		stacks = append(stacks, stack)
+		backends = append(backends, backend)
+	}
+	root, err := initM1Shards(backends)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, chainID := range []int{100001, 100002} {
+	for i, chainID := range chainIDs {
 		t.Run(fmt.Sprint(chainID), func(t *testing.T) {
-			stack, err := startM1Shard(m1TestConfig(t, chainID), root)
-			if err != nil {
-				t.Fatal(err)
+			if backends[i].Shard().RootTip() != root.Hash() {
+				t.Fatal("shards must share the same genesis root")
 			}
-			defer stack.Close()
-			client, err := rpc.DialHTTP(stack.HTTPEndpoint())
+			client, err := rpc.DialHTTP(stacks[i].HTTPEndpoint())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,19 +112,14 @@ func TestM1ShardRPC(t *testing.T) {
 	}
 }
 
-func TestM1InitializationFailure(t *testing.T) {
-	root, err := loadM1Root("../../qkc/config/devnet/root.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestM1StartupFailure(t *testing.T) {
 	path := m1TestConfig(t, 100001)
-	missingShard := qkctypes.NewRootBlock(root.Header(), nil, nil)
-	if stack, err := startM1Shard(path, missingShard); err == nil {
-		stack.Close()
-		t.Fatal("started without the shard genesis in R0")
+	app := &cli.App{Commands: []*cli.Command{m1Command}}
+	if err := app.Run([]string{"qkc", "m1", "--config", path, "--config", filepath.Join(t.TempDir(), "missing.toml")}); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing shard config: %v", err)
 	}
-	// Failed initialization must close the node and release its data directory.
-	stack, err := startM1Shard(path, root)
+	// A later startup failure must close earlier nodes and release their data directories.
+	stack, _, err := startM1Shard(path)
 	if err != nil {
 		t.Fatal(err)
 	}

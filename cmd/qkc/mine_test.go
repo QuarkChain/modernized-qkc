@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"math/big"
 	"os"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -35,13 +37,16 @@ import (
 )
 
 func TestMine(t *testing.T) {
-	root, err := loadM1Root("../../qkc/config/devnet/root.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
 	path := m1TestConfig(t, 100001)
 	data, err := os.ReadFile(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise nonce search at a nontrivial difficulty without changing devnet genesis.
+	data = []byte(strings.Replace(string(data),
+		fmt.Sprintf("Mixhash = %q", common.BigToHash(common.Big1).Hex()),
+		fmt.Sprintf("Mixhash = %q", common.BigToHash(big.NewInt(1024)).Hex()), 1))
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	var config struct {
@@ -53,12 +58,16 @@ func TestMine(t *testing.T) {
 		t.Fatal(err)
 	}
 	qkcConfig := config.Eth.Genesis.Config.QuarkChain
-	t.Logf("Loaded POW_ETHASH fixture: chain=%s genesisDifficulty=%s R0=%s", config.Eth.Genesis.Config.ChainID, config.Eth.Genesis.Mixhash.Big(), root.Hash().TerminalString())
-	stack, err := startM1Shard(path, root)
+	stack, backend, err := startM1Shard(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stack.Close()
+	root, err := initM1Shards([]*eth.Ethereum{backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Loaded POW_ETHASH fixture: chain=%s genesisDifficulty=%s R0=%s", config.Eth.Genesis.Config.ChainID, config.Eth.Genesis.Mixhash.Big(), root.Hash().TerminalString())
 	t.Logf("Started shard node and initialized R0: rpc=%s", stack.HTTPEndpoint())
 	coinbase := common.Address{0xaa}
 	client, err := rpc.DialHTTP(stack.HTTPEndpoint())
@@ -82,7 +91,7 @@ func TestMine(t *testing.T) {
 	if err := client.Call(&head, "eth_getBlockByNumber", "latest", false); err != nil {
 		t.Fatal(err)
 	}
-	if head == nil || head.Number.Uint64() != 1 || head.Coinbase != coinbase {
+	if head == nil || head.Number.Uint64() != 1 || head.Coinbase != coinbase || head.QKCDifficulty().Cmp(common.Big1) <= 0 {
 		t.Fatalf("client did not mine the expected block: %+v", head)
 	}
 	t.Logf("Verified imported block: number=%s hash=%s coinbase=%s difficulty=%s", head.Number, head.Hash().TerminalString(), head.Coinbase, head.QKCDifficulty())

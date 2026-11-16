@@ -28,11 +28,11 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/node"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/holiman/uint256"
 	"github.com/naoina/toml"
 	"github.com/urfave/cli/v2"
 )
@@ -41,7 +41,6 @@ var m1Command = &cli.Command{
 	Name:  "m1",
 	Usage: "Start local shards initialized with R0 for external mining",
 	Flags: []cli.Flag{
-		&cli.PathFlag{Name: "root", Value: "qkc/config/devnet/root.toml", Usage: "Root genesis TOML fixture"},
 		&cli.StringSliceFlag{Name: "config", Value: cli.NewStringSlice(
 			"qkc/config/devnet/shard-100001.toml",
 			"qkc/config/devnet/shard-100002.toml",
@@ -50,47 +49,12 @@ var m1Command = &cli.Command{
 	Action: runM1,
 }
 
-func loadM1Root(path string) (*qkctypes.RootBlock, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var fixture struct {
-		Hash              common.Hash
-		Header            *qkctypes.RootBlockHeader
-		ShardBlockHeaders qkctypes.ShardBlockHeaders
-		TrackingData      []byte
-	}
-	// Match geth's case-sensitive Go field names.
-	decoder := toml.Config{NormFieldName: func(_ reflect.Type, key string) string { return key }}
-	if err := decoder.Unmarshal(data, &fixture); err != nil {
-		return nil, err
-	}
-	if fixture.Header == nil || fixture.Header.Number != 0 || fixture.Header.ParentHash != (common.Hash{}) || len(fixture.ShardBlockHeaders) == 0 {
-		return nil, errors.New("expected a complete root genesis fixture")
-	}
-	for _, header := range fixture.ShardBlockHeaders {
-		if header == nil || header.Number == nil || header.Number.Sign() != 0 {
-			return nil, errors.New("root genesis must contain shard genesis headers")
-		}
-	}
-	// NewRootBlock recomputes this commitment, so check it before construction.
-	if fixture.Header.ShardHeaderHash != qkctypes.CalcShardHeaderHash(fixture.ShardBlockHeaders) {
-		return nil, errors.New("root genesis body commitment mismatch")
-	}
-	root := qkctypes.NewRootBlock(fixture.Header, fixture.ShardBlockHeaders, fixture.TrackingData)
-	if root.Hash() != fixture.Hash {
-		return nil, errors.New("root genesis hash mismatch")
-	}
-	return root, nil
-}
-
 // startM1Shard uses the ordinary Ethereum backend, including its mock cluster
 // client. This local demo does not coordinate shards or produce root blocks.
-func startM1Shard(path string, root *qkctypes.RootBlock) (*node.Node, error) {
+func startM1Shard(path string) (*node.Node, *eth.Ethereum, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg := struct {
 		Node node.Config
@@ -99,39 +63,65 @@ func startM1Shard(path string, root *qkctypes.RootBlock) (*node.Node, error) {
 	cfg.Node.Name = "geth"
 	decoder := toml.Config{NormFieldName: func(_ reflect.Type, key string) string { return key }}
 	if err := decoder.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if cfg.Eth.Genesis == nil || cfg.Eth.Genesis.Config == nil || cfg.Eth.Genesis.Config.QuarkChain == nil {
-		return nil, fmt.Errorf("%s: missing shard genesis", path)
+		return nil, nil, fmt.Errorf("%s: missing shard genesis", path)
 	}
 	if err := cfg.Eth.Genesis.ValidateQuarkChain(); err != nil {
-		return nil, fmt.Errorf("%s: invalid genesis: %w", path, err)
+		return nil, nil, fmt.Errorf("%s: invalid genesis: %w", path, err)
 	}
 	stack, err := node.New(&cfg.Node)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	backend, err := eth.New(stack, &cfg.Eth)
 	if err != nil {
 		stack.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if err := stack.Start(); err != nil {
 		stack.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	if err := backend.Shard().Init(root); err != nil {
-		stack.Close()
-		return nil, err
+	return stack, backend, nil
+}
+
+func initM1Shards(backends []*eth.Ethereum) (*qkctypes.RootBlock, error) {
+	var headers qkctypes.ShardBlockHeaders
+	for _, backend := range backends {
+		headers = append(headers, backend.BlockChain().Genesis().Header())
 	}
-	return stack, nil
+	root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+		Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
+	}, headers, nil)
+	for _, backend := range backends {
+		if err := backend.Shard().Init(root); err != nil {
+			return nil, err
+		}
+	}
+	return root, nil
 }
 
 func runM1(ctx *cli.Context) error {
 	if ctx.NArg() != 0 {
 		return errors.New("m1 takes no positional arguments")
 	}
-	root, err := loadM1Root(ctx.Path("root"))
+	signalCtx, stop := signal.NotifyContext(ctx.Context, os.Interrupt)
+	defer stop()
+	paths := ctx.StringSlice("config")
+	var stacks []*node.Node
+	var backends []*eth.Ethereum
+	for _, path := range paths {
+		stack, backend, err := startM1Shard(path)
+		if err != nil {
+			return fmt.Errorf("start %s: %w", path, err)
+		}
+		defer stack.Close()
+		stacks = append(stacks, stack)
+		backends = append(backends, backend)
+	}
+	root, err := initM1Shards(backends)
 	if err != nil {
 		return err
 	}
@@ -145,15 +135,8 @@ func runM1(ctx *cli.Context) error {
 		includedHeaders = append(includedHeaders, fmt.Sprintf("%s@%s", extra.ChainID.String(), header.Number.String()))
 	}
 	fmt.Fprintf(ctx.App.Writer, "root: %d -> [%s]\n", root.Number(), strings.Join(includedHeaders, ", "))
-	signalCtx, stop := signal.NotifyContext(ctx.Context, os.Interrupt)
-	defer stop()
-	for _, path := range ctx.StringSlice("config") {
-		stack, err := startM1Shard(path, root)
-		if err != nil {
-			return fmt.Errorf("start %s: %w", path, err)
-		}
-		defer stack.Close()
-		fmt.Fprintf(ctx.App.Writer, "%s: initialized R0 %s; HTTP %s\n", path, root.Hash(), stack.HTTPEndpoint())
+	for i, stack := range stacks {
+		fmt.Fprintf(ctx.App.Writer, "%s: initialized R0 %s; HTTP %s\n", paths[i], root.Hash(), stack.HTTPEndpoint())
 	}
 	<-signalCtx.Done()
 	return nil
