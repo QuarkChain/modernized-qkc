@@ -23,7 +23,7 @@ import (
 	"os/signal"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/consensus/posw"
+	posw "github.com/ethereum/go-ethereum/consensus/poswshard"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
