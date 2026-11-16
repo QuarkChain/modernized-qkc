@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package slaveconn
+package slavenet
 
 import (
 	"context"
@@ -27,9 +27,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/conn"
-	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
@@ -77,7 +77,7 @@ func TestRejectUnconfiguredSlave(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	if err := manager.DialToSlave(context.Background(), comm.SlaveInfo{ChainID: big.NewInt(3)}); err == nil || !strings.Contains(err.Error(), "not configured") {
+	if err := manager.DialToSlave(context.Background(), clusternet.SlaveInfo{ChainID: big.NewInt(3)}); err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("expected unconfigured slave error, got %v", err)
 	}
 
@@ -160,14 +160,14 @@ func TestXshardConnRemoteErrorKeepsConnection(t *testing.T) {
 	const errorCode = 404
 	peer := newTestXshardPeer(t, xshardHandlerFunc(func(hash common.Hash, _ []*types.DepositTx) error {
 		if hash == (common.Hash{1}) {
-			return &comm.RemoteError{Code: errorCode}
+			return &clusternet.RemoteError{Code: errorCode}
 		}
 		return nil
 	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := peer.SendAddXshardTxList(ctx, common.Hash{1}, nil)
-	var remoteErr *comm.RemoteError
+	var remoteErr *clusternet.RemoteError
 	if !errors.As(err, &remoteErr) || remoteErr.Code != errorCode {
 		t.Fatalf("expected RemoteError with code %d, got %T: %v", errorCode, err, err)
 	}
@@ -255,7 +255,7 @@ func TestXshardConnContextErrorsKeepConnection(t *testing.T) {
 				cancel()
 			}
 			err := <-result
-			var remoteErr *comm.RemoteError
+			var remoteErr *clusternet.RemoteError
 			if !errors.Is(err, tc.wantErr) || errors.As(err, &remoteErr) {
 				t.Fatalf("expected context error %v, got %T: %v", tc.wantErr, err, err)
 			}
@@ -302,7 +302,7 @@ func TestTCPXshardHandshakeAndRequest(t *testing.T) {
 	defer cancel()
 	serverID.SetInt64(0)
 	serverID = serverWireID.ToBig()
-	if err := client.DialToSlave(ctx, comm.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: serverID}); err != nil {
+	if err := client.DialToSlave(ctx, clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: serverID}); err != nil {
 		t.Fatal(err)
 	}
 	<-done
@@ -355,7 +355,7 @@ func TestDialToSlaveRejectsWrongChainID(t *testing.T) {
 	addr := listener.Addr().(*net.TCPAddr)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := client.DialToSlave(ctx, comm.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: big.NewInt(4)}); err == nil {
+	if err := client.DialToSlave(ctx, clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: big.NewInt(4)}); err == nil {
 		t.Fatal("expected slave chain ID mismatch")
 	}
 	if client.Lookup(big.NewInt(4)) != nil {

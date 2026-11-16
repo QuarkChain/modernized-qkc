@@ -1,4 +1,4 @@
-package masterconn
+package masternet
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/conn"
-	"github.com/ethereum/go-ethereum/qkc/slaveconn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
-	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
@@ -121,19 +121,19 @@ type businessHandler struct {
 
 func (h *businessHandler) CreateShards(root *qkctypes.RootBlock) error { h.roots <- root; return nil }
 func (h *businessHandler) AddRootBlock(root *qkctypes.RootBlock) error { h.roots <- root; return nil }
-func (h *businessHandler) GetRootChainStakes(address common.Address, hash common.Hash) (*comm.RootChainStakesResult, error) {
+func (h *businessHandler) GetRootChainStakes(address common.Address, hash common.Hash) (*clusternet.RootChainStakesResult, error) {
 	if address != h.address || hash != h.blockHash {
 		return nil, errors.New("unexpected stakes query")
 	}
-	return &comm.RootChainStakesResult{Stakes: uint256.NewInt(0x10203), Signer: common.Address{7}}, nil
+	return &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(0x10203), Signer: common.Address{7}}, nil
 }
 func (h *businessHandler) GetUnconfirmedHeaders() ([]*types.Header, error) {
 	return []*types.Header{testHeader()}, nil
 }
 
-type slaveDialerFunc func(context.Context, comm.SlaveInfo) error
+type slaveDialerFunc func(context.Context, clusternet.SlaveInfo) error
 
-func (f slaveDialerFunc) DialToSlave(ctx context.Context, info comm.SlaveInfo) error {
+func (f slaveDialerFunc) DialToSlave(ctx context.Context, info clusternet.SlaveInfo) error {
 	return f(ctx, info)
 }
 
@@ -150,14 +150,14 @@ func TestSlaveConnRPC(t *testing.T) {
 			}
 			source.SetInt64(0)
 			receivedHeader <- header
-			return &comm.RemoteError{Code: 9}
+			return &clusternet.RemoteError{Code: 9}
 		}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	targets := make(chan comm.SlaveInfo, 1)
-	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{Conn: remote, LocalChainID: wantID, Handler: h,
-		SlaveDialer: slaveDialerFunc(func(_ context.Context, info comm.SlaveInfo) error { targets <- info; return nil })})
+	targets := make(chan clusternet.SlaveInfo, 1)
+	mc, err := slavenet.NewMasterConn(slavenet.MasterConnConfig{Conn: remote, LocalChainID: wantID, Handler: h,
+		SlaveDialer: slaveDialerFunc(func(_ context.Context, info clusternet.SlaveInfo) error { targets <- info; return nil })})
 	if err != nil {
 		sc.Close()
 		remote.Close()
@@ -185,7 +185,7 @@ func TestSlaveConnRPC(t *testing.T) {
 	if got := <-h.roots; got.Hash() != root.Hash() {
 		t.Fatal("root block changed")
 	}
-	if err := sc.SendConnectToSlaves(ctx, []comm.SlaveInfo{{Host: "127.0.0.1", Port: 1234, ChainID: wantID}}); err != nil {
+	if err := sc.SendConnectToSlaves(ctx, []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: 1234, ChainID: wantID}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := <-targets; got.Host != "127.0.0.1" || got.Port != 1234 || got.ChainID.Cmp(wantID) != 0 {
@@ -206,7 +206,7 @@ func TestSlaveConnRPC(t *testing.T) {
 		t.Fatal("incorrect unconfirmed headers")
 	}
 	err = mc.SendAddShardBlockHeader(ctx, testHeader(), uint256.NewInt(0x10203))
-	var remoteErr *comm.RemoteError
+	var remoteErr *clusternet.RemoteError
 	if !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
 		t.Fatalf("expected rejection 9, got %v", err)
 	}
@@ -255,7 +255,7 @@ func TestSlaveConnConnectResults(t *testing.T) {
 					return &wire.ConnectToSlavesResponse{ResultList: test.results}, nil
 				},
 			})
-			err := sc.SendConnectToSlaves(slaveTestContext(t), []comm.SlaveInfo{{Host: "127.0.0.1", Port: 1, ChainID: big.NewInt(2)}, {Host: "127.0.0.1", Port: 2, ChainID: big.NewInt(3)}})
+			err := sc.SendConnectToSlaves(slaveTestContext(t), []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: 1, ChainID: big.NewInt(2)}, {Host: "127.0.0.1", Port: 2, ChainID: big.NewInt(3)}})
 			if test.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)
@@ -296,13 +296,13 @@ func TestSlaveConnRemoteErrorsKeepConnection(t *testing.T) {
 			if operation == "root block" {
 				err = sc.SendAddRootBlock(ctx, testRoot(1))
 			} else {
-				var response *comm.RootChainStakesResult
+				var response *clusternet.RootChainStakesResult
 				response, err = sc.SendGetRootChainStakes(ctx, common.Address{1}, common.Hash{})
 				if response != nil {
 					t.Fatal("business failure returned a success response")
 				}
 			}
-			var remoteErr *comm.RemoteError
+			var remoteErr *clusternet.RemoteError
 			if !errors.As(err, &remoteErr) || remoteErr.Code != code {
 				t.Fatalf("expected remote error code %d, got %v", code, err)
 			}
@@ -458,12 +458,12 @@ func TestSlaveConnRejectsInvalidBusinessInput(t *testing.T) {
 		t.Fatal("nil root block accepted")
 	}
 	for _, id := range []*big.Int{nil, new(big.Int), big.NewInt(-1), new(big.Int).Lsh(big.NewInt(1), 256)} {
-		if err := sc.SendConnectToSlaves(slaveTestContext(t), []comm.SlaveInfo{{Host: "127.0.0.1", Port: 1, ChainID: id}}); err == nil {
+		if err := sc.SendConnectToSlaves(slaveTestContext(t), []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: 1, ChainID: id}}); err == nil {
 			t.Fatalf("invalid chain ID accepted: %v", id)
 		}
 	}
-	for _, slave := range []comm.SlaveInfo{{Port: 1, ChainID: big.NewInt(2)}, {Host: "127.0.0.1", ChainID: big.NewInt(2)}} {
-		if err := sc.SendConnectToSlaves(slaveTestContext(t), []comm.SlaveInfo{slave}); err == nil {
+	for _, slave := range []clusternet.SlaveInfo{{Port: 1, ChainID: big.NewInt(2)}, {Host: "127.0.0.1", ChainID: big.NewInt(2)}} {
+		if err := sc.SendConnectToSlaves(slaveTestContext(t), []clusternet.SlaveInfo{slave}); err == nil {
 			t.Fatalf("invalid slave address accepted: %+v", slave)
 		}
 	}
