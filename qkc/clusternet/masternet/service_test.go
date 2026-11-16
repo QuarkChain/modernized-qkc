@@ -30,6 +30,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
 	"github.com/ethereum/go-ethereum/qkc/master"
@@ -38,6 +39,28 @@ import (
 )
 
 var _ master.ClusterClient = (*Service)(nil)
+
+func startAndWait(t *testing.T, s *Service, backend MasterBackend) error {
+	t.Helper()
+	if err := s.Start(backend); err != nil {
+		return err
+	}
+	return waitForService(t, s)
+}
+
+func waitForService(t *testing.T, s *Service) error {
+	t.Helper()
+	ctx := slaveTestContext(t)
+	select {
+	case <-s.WaitUntilReady():
+		if !s.IsActive() {
+			return errors.New("master service is not active")
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func noopShutdown() {}
 
@@ -64,10 +87,16 @@ type serviceShard struct {
 	rootErr     error
 	headersErr  error
 	initErr     error
+	initEntered chan struct{}
+	initRelease <-chan struct{}
 	deposits    chan common.Hash
 }
 
 func (b *serviceShard) Init(root *qkctypes.RootBlock) error {
+	if b.initEntered != nil {
+		close(b.initEntered)
+		<-b.initRelease
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.checkpoint = root.Hash()
@@ -119,7 +148,7 @@ func serviceClusterWithIDs(t *testing.T, ids []*big.Int) ([]*slavenet.Service, [
 		}
 		t.Cleanup(func() { s.Stop() })
 		addr := s.Addr().(*net.TCPAddr)
-		cfg.Slaves = append(cfg.Slaves, clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: ids[i]})
+		cfg.SlaveInfos = append(cfg.SlaveInfos, clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: ids[i]})
 		slaves[i], backends[i] = s, b
 	}
 	return slaves, backends, cfg
@@ -149,13 +178,10 @@ func TestServiceCluster(t *testing.T) {
 				reports <- id.Int64()
 				return &clusternet.RemoteError{Code: 7}
 			}}
-			if err := s.BroadcastRootBlock(slaveTestContext(t), testRoot(4)); err == nil {
-				t.Fatal("business RPC allowed before Start")
-			}
-			if err := s.Start(backend); err != nil {
+			if err := startAndWait(t, s, backend); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.Start(backend); err == nil {
+			if err := startAndWait(t, s, backend); err == nil {
 				t.Fatal("started twice")
 			}
 			for _, shard := range shards {
@@ -228,7 +254,7 @@ func TestServiceCluster(t *testing.T) {
 			if err := s.BroadcastRootBlock(ctx, root); err == nil {
 				t.Fatal("business RPC allowed after Stop")
 			}
-			if err := s.Start(backend); err == nil {
+			if err := startAndWait(t, s, backend); err == nil {
 				t.Fatal("stopped service restarted")
 			}
 		})
@@ -237,7 +263,7 @@ func TestServiceCluster(t *testing.T) {
 
 func TestServiceConfig(t *testing.T) {
 	base := func() ServiceConfig {
-		return ServiceConfig{Slaves: []clusternet.SlaveInfo{{Host: "localhost", Port: 1234, ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown}
+		return ServiceConfig{SlaveInfos: []clusternet.SlaveInfo{{Host: "localhost", Port: 1234, ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown}
 	}
 	for _, change := range []func(*ServiceConfig){
 		func(c *ServiceConfig) { c.Shutdown = nil },
@@ -245,12 +271,12 @@ func TestServiceConfig(t *testing.T) {
 		func(c *ServiceConfig) { c.ConfiguredChainIDs[0] = nil },
 		func(c *ServiceConfig) { c.ConfiguredChainIDs[0] = new(big.Int).Lsh(big.NewInt(1), 256) },
 		func(c *ServiceConfig) { c.ConfiguredChainIDs = append(c.ConfiguredChainIDs, big.NewInt(1)) },
-		func(c *ServiceConfig) { c.Slaves = nil },
-		func(c *ServiceConfig) { c.Slaves[0].ChainID = nil },
-		func(c *ServiceConfig) { c.Slaves[0].ChainID = big.NewInt(2) },
-		func(c *ServiceConfig) { c.Slaves = append(c.Slaves, c.Slaves[0]) },
-		func(c *ServiceConfig) { c.Slaves[0].Host = "" },
-		func(c *ServiceConfig) { c.Slaves[0].Port = 0 },
+		func(c *ServiceConfig) { c.SlaveInfos = nil },
+		func(c *ServiceConfig) { c.SlaveInfos[0].ChainID = nil },
+		func(c *ServiceConfig) { c.SlaveInfos[0].ChainID = big.NewInt(2) },
+		func(c *ServiceConfig) { c.SlaveInfos = append(c.SlaveInfos, c.SlaveInfos[0]) },
+		func(c *ServiceConfig) { c.SlaveInfos[0].Host = "" },
+		func(c *ServiceConfig) { c.SlaveInfos[0].Port = 0 },
 		func(c *ServiceConfig) { c.StartupTimeout = -time.Second },
 		func(c *ServiceConfig) { c.MaxPayloadSize = ^uint32(0) },
 	} {
@@ -265,11 +291,11 @@ func TestServiceConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Start(nil); err == nil {
+	if err := startAndWait(t, s, nil); err == nil {
 		t.Fatal("nil backend accepted")
 	}
 	s.Stop()
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); err == nil {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err == nil {
 		t.Fatal("Start after Stop accepted")
 	}
 }
@@ -293,7 +319,7 @@ func TestServiceChainMapping(t *testing.T) {
 				cfg.ConfiguredChainIDs = append(cfg.ConfiguredChainIDs, big.NewInt(id))
 			}
 			for _, id := range test.slaves {
-				cfg.Slaves = append(cfg.Slaves, clusternet.SlaveInfo{Host: "localhost", Port: 1234, ChainID: big.NewInt(id)})
+				cfg.SlaveInfos = append(cfg.SlaveInfos, clusternet.SlaveInfo{Host: "localhost", Port: 1234, ChainID: big.NewInt(id)})
 			}
 			_, err := NewService(cfg)
 			if (err == nil) != test.valid {
@@ -304,15 +330,16 @@ func TestServiceChainMapping(t *testing.T) {
 }
 
 func TestServiceStartupFailure(t *testing.T) {
-	for _, failure := range []string{"identity", "init", "checkpoint", "nil checkpoint", "dial"} {
+	for _, failure := range []string{"identity", "init", "checkpoint", "nil checkpoint"} {
 		t.Run(failure, func(t *testing.T) {
 			_, shards, cfg := serviceCluster(t, 2)
 			var calls atomic.Int32
-			cfg.Shutdown = func() { calls.Add(1) }
+			requested := make(chan struct{})
+			cfg.Shutdown = func() { calls.Add(1); close(requested) }
 			backend := &serviceBackend{root: testRoot(1)}
 			switch failure {
 			case "identity":
-				cfg.Slaves[0].ChainID, cfg.Slaves[1].ChainID = cfg.Slaves[1].ChainID, cfg.Slaves[0].ChainID
+				cfg.SlaveInfos[0].ChainID, cfg.SlaveInfos[1].ChainID = cfg.SlaveInfos[1].ChainID, cfg.SlaveInfos[0].ChainID
 			case "init":
 				shards[0].mu.Lock()
 				shards[0].initErr = errors.New("invalid checkpoint")
@@ -321,28 +348,27 @@ func TestServiceStartupFailure(t *testing.T) {
 				backend.rootErr = errors.New("checkpoint unavailable")
 			case "nil checkpoint":
 				backend.root = nil
-			case "dial":
-				listener, err := net.Listen("tcp", "127.0.0.1:0")
-				if err != nil {
-					t.Fatal(err)
-				}
-				cfg.Slaves[0].Port = uint16(listener.Addr().(*net.TCPAddr).Port)
-				listener.Close()
 			}
 			s := newServiceForTest(t, cfg)
-			if err := s.Start(backend); err == nil {
+			if err := startAndWait(t, s, backend); err == nil {
 				t.Fatal("startup unexpectedly succeeded")
 			}
+			select {
+			case <-requested:
+			case <-slaveTestContext(t).Done():
+				t.Fatal("initialization failure did not notify owner")
+			}
+			s.Stop()
 			for _, sc := range s.connections() {
 				if !sc.IsClosed() {
 					t.Fatal("failed startup leaked connection")
 				}
 			}
 			s.shutdown()
-			if calls.Load() != 0 {
-				t.Fatal("failed startup notified Shutdown")
+			if calls.Load() != 1 {
+				t.Fatal("failed startup did not notify Shutdown once")
 			}
-			if err := s.Start(backend); err == nil {
+			if err := startAndWait(t, s, backend); err == nil {
 				t.Fatal("retried failed startup")
 			}
 		})
@@ -354,7 +380,7 @@ func TestServiceBusinessRejection(t *testing.T) {
 	var calls atomic.Int32
 	cfg.Shutdown = func() { calls.Add(1) }
 	s := newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := slaveTestContext(t)
@@ -390,7 +416,7 @@ func TestServiceUnexpectedDisconnect(t *testing.T) {
 	var s *Service
 	cfg.Shutdown = func() { calls.Add(1); go func() { s.Stop(); close(done) }() }
 	s = newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err != nil {
 		t.Fatal(err)
 	}
 	var stopped sync.WaitGroup
@@ -428,7 +454,7 @@ func TestServiceStopDrainsReports(t *testing.T) {
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
 			defer unblock()
-			if err := s.Start(&serviceBackend{root: testRoot(1), report: func(*big.Int, *types.Header, *uint256.Int) error { close(entered); <-release; return nil }}); err != nil {
+			if err := startAndWait(t, s, &serviceBackend{root: testRoot(1), report: func(*big.Int, *types.Header, *uint256.Int) error { close(entered); <-release; return nil }}); err != nil {
 				t.Fatal(err)
 			}
 			ctx := slaveTestContext(t)
@@ -493,9 +519,9 @@ func TestServiceStartupTimeout(t *testing.T) {
 			accepted <- nc
 		}
 	}()
-	cfg := ServiceConfig{Slaves: []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, StartupTimeout: 100 * time.Millisecond, Shutdown: noopShutdown}
+	cfg := ServiceConfig{SlaveInfos: []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, StartupTimeout: 100 * time.Millisecond, Shutdown: noopShutdown}
 	s := newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); !errors.Is(err, context.DeadlineExceeded) {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err == nil {
 		t.Fatalf("startup timeout: %v", err)
 	}
 	select {
@@ -504,30 +530,10 @@ func TestServiceStartupTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("slave not dialed")
 	}
+	s.Stop()
 	for _, sc := range s.connections() {
 		if !sc.IsClosed() {
 			t.Fatal("timed-out connection left open")
-		}
-	}
-}
-
-func TestServiceRequiresAllConfiguredConnections(t *testing.T) {
-	_, _, cfg := serviceCluster(t, 2)
-	s := newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
-		t.Fatal(err)
-	}
-	s.mu.Lock()
-	missing := s.conns["2"]
-	delete(s.conns, "2")
-	s.mu.Unlock()
-	defer func() { s.mu.Lock(); s.conns["2"] = missing; s.mu.Unlock() }()
-	for _, call := range []func() error{
-		func() error { return s.BroadcastRootBlock(slaveTestContext(t), testRoot(2)) },
-		func() error { _, err := s.GetUnconfirmedHeaderList(slaveTestContext(t)); return err },
-	} {
-		if err := call(); err == nil || !strings.Contains(err.Error(), "no slave connection") {
-			t.Fatalf("missing connection omitted: %v", err)
 		}
 	}
 }
@@ -548,24 +554,31 @@ func TestServiceInterconnectionFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { second.Stop() })
 	cfg.ConfiguredChainIDs = ids
-	cfg.Slaves = append(cfg.Slaves, clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(second.Addr().(*net.TCPAddr).Port), ChainID: ids[1]})
+	cfg.SlaveInfos = append(cfg.SlaveInfos, clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(second.Addr().(*net.TCPAddr).Port), ChainID: ids[1]})
 	var calls atomic.Int32
-	cfg.Shutdown = func() { calls.Add(1) }
+	requested := make(chan struct{})
+	cfg.Shutdown = func() { calls.Add(1); close(requested) }
 	s := newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); err == nil || !strings.Contains(err.Error(), "interconnect") {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err == nil {
 		t.Fatalf("interconnection failure: %v", err)
 	}
 	if shards[0].initialized.Load() != 0 || backend.initialized.Load() != 0 {
 		t.Fatal("initialized shards after failed interconnection")
 	}
+	select {
+	case <-requested:
+	case <-slaveTestContext(t).Done():
+		t.Fatal("interconnection failure did not notify owner")
+	}
+	s.Stop()
 	for _, sc := range s.connections() {
 		if !sc.IsClosed() {
 			t.Fatal("failed interconnection left a slave open")
 		}
 	}
 	s.shutdown()
-	if calls.Load() != 0 {
-		t.Fatal("failed interconnection requested shutdown")
+	if calls.Load() != 1 {
+		t.Fatal("failed interconnection did not request shutdown once")
 	}
 }
 
@@ -576,7 +589,7 @@ func TestServiceUint256Values(t *testing.T) {
 	s := newServiceForTest(t, cfg)
 	amount := new(uint256.Int).SetAllOne()
 	reports := make(chan *big.Int, len(ids))
-	if err := s.Start(&serviceBackend{root: testRoot(1), report: func(id *big.Int, _ *types.Header, got *uint256.Int) error {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1), report: func(id *big.Int, _ *types.Header, got *uint256.Int) error {
 		if !got.Eq(amount) {
 			return errors.New("truncated coinbase amount")
 		}
@@ -612,5 +625,233 @@ func TestServiceUint256Values(t *testing.T) {
 		if err := slaves[i].BroadcastXShardTxList(ctx, ids[1-i], common.Hash{}, nil); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestServiceBroadcastUnavailable(t *testing.T) {
+	for _, s := range []*Service{
+		{},
+		{state: ServiceStateStarting, conns: map[string]*SlaveConn{"1": {}}},
+		{state: ServiceStateStarting},
+	} {
+		if err := s.broadcastToSlaves(func(*SlaveConn) error {
+			t.Fatal("broadcast sent before cluster initialization completed")
+			return nil
+		}); err == nil {
+			t.Fatal("unavailable cluster accepted broadcast")
+		}
+	}
+}
+
+func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		nc, err := listener.Accept()
+		if err == nil {
+			accepted <- nc
+		}
+	}()
+	var calls atomic.Int32
+	s := newServiceForTest(t, ServiceConfig{
+		SlaveInfos:         []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}},
+		ConfiguredChainIDs: []*big.Int{big.NewInt(1)},
+		Shutdown:           func() { calls.Add(1) },
+		StartupTimeout:     500 * time.Millisecond,
+	})
+	select {
+	case <-s.WaitUntilReady():
+		t.Fatal("unstarted service reported ready")
+	default:
+	}
+	// The peer never answers identity PING; Start must return anyway.
+	returned := make(chan error, 1)
+	go func() { returned <- s.Start(&serviceBackend{root: testRoot(1)}) }()
+	ctx := slaveTestContext(t)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Start blocked on initialization")
+	}
+	select {
+	case nc := <-accepted:
+		defer nc.Close()
+	case <-ctx.Done():
+		t.Fatal("initialization did not connect")
+	}
+	if s.connection(big.NewInt(1)) != nil {
+		t.Fatal("initializing connection exposed to business calls")
+	}
+	if err := s.BroadcastRootBlock(ctx, testRoot(2)); err == nil {
+		t.Fatal("initializing service accepted broadcast")
+	}
+	s.mu.Lock()
+	state := s.state
+	s.mu.Unlock()
+	if state != ServiceStateStarting {
+		t.Fatalf("readiness wait changed lifecycle: %v", state)
+	}
+	stopped := make(chan struct{})
+	go func() { s.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("Stop did not wait for initialization timeout")
+	}
+	if err := waitForService(t, s); err == nil {
+		t.Fatalf("initialization should finish on its own timeout: %v", err)
+	}
+	s.shutdown()
+	if calls.Load() != 0 {
+		t.Fatal("active stop requested Shutdown")
+	}
+	if s.state != ServiceStateStopped {
+		t.Fatalf("state after Stop: %v", s.state)
+	}
+}
+
+func TestServiceActiveAfterAllInitializationPongs(t *testing.T) {
+	_, shards, cfg := serviceCluster(t, 2)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	for _, shard := range shards {
+		shard.initEntered = make(chan struct{})
+		shard.initRelease = release
+	}
+	s := newServiceForTest(t, cfg)
+	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := slaveTestContext(t)
+	// Reaching shard.Init proves identity PING and slave interconnection finished.
+	for _, shard := range shards {
+		select {
+		case <-shard.initEntered:
+		case <-ctx.Done():
+			t.Fatal("second PING did not reach every shard")
+		}
+	}
+	if err := s.BroadcastRootBlock(ctx, testRoot(2)); err == nil {
+		t.Fatal("broadcast accepted before initialization PONGs")
+	}
+	if _, err := s.GetUnconfirmedHeaderList(ctx); err == nil {
+		t.Fatal("header query accepted before initialization PONGs")
+	}
+	if _, err := s.GetRootChainStakes(ctx, big.NewInt(1), common.Address{}, common.Hash{}); err == nil {
+		t.Fatal("stakes query accepted before initialization PONGs")
+	}
+	select {
+	case <-s.initDone:
+		t.Fatal("initialization finished before PONGs")
+	default:
+	}
+	unblock()
+	if err := waitForService(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BroadcastRootBlock(ctx, testRoot(2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetUnconfirmedHeaderList(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetRootChainStakes(ctx, big.NewInt(1), common.Address{}, common.Hash{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type serviceLogWriter func([]byte) (int, error)
+
+func (w serviceLogWriter) Write(p []byte) (int, error) { return w(p) }
+
+func TestServiceDialRetry(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stop=%t", stop), func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := listener.Addr().(*net.TCPAddr)
+			listener.Close()
+			attempts := make(chan struct{}, 1)
+			var shutdowns atomic.Int32
+			cfg := ServiceConfig{
+				SlaveInfos:         []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: big.NewInt(1)}},
+				ConfiguredChainIDs: []*big.Int{big.NewInt(1)},
+				StartupTimeout:     time.Second,
+				Shutdown:           func() { shutdowns.Add(1) },
+				Logger: log.NewLogger(log.JSONHandler(serviceLogWriter(func(p []byte) (int, error) {
+					if strings.Contains(string(p), "Failed to connect to slave, retrying") {
+						select {
+						case attempts <- struct{}{}:
+						default:
+						}
+					}
+					return len(p), nil
+				}))),
+			}
+			s := newServiceForTest(t, cfg)
+			if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+				t.Fatal(err)
+			}
+			ctx := slaveTestContext(t)
+			select {
+			case <-attempts:
+			case <-ctx.Done():
+				t.Fatal("dial failure was not retried")
+			}
+			select {
+			case <-s.initDone:
+				t.Fatal("dial failure ended initialization")
+			default:
+			}
+			if stop {
+				stopped := make(chan struct{})
+				go func() { s.Stop(); close(stopped) }()
+				select {
+				case <-stopped:
+				case <-ctx.Done():
+					t.Fatal("Stop did not end dial retries")
+				}
+				if err := waitForService(t, s); err == nil {
+					t.Fatalf("stopped dial retry: %v", err)
+				}
+			} else {
+				// A second failure confirms initialization keeps retrying.
+				select {
+				case <-attempts:
+				case <-ctx.Done():
+					t.Fatal("dial did not retry")
+				}
+				slave, err := slavenet.NewService(slavenet.ServiceConfig{
+					ListenAddr: addr.String(), LocalChainID: big.NewInt(1),
+					ConfiguredChainIDs: cfg.ConfiguredChainIDs, Shutdown: noopShutdown,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := slave.Start(&serviceShard{id: 1}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { slave.Stop() })
+				if err := waitForService(t, s); err != nil {
+					t.Fatal(err)
+				}
+				// Stop master first so slave cleanup is not a passive failure.
+				s.Stop()
+			}
+			if shutdowns.Load() != 0 {
+				t.Fatal("initial dial failure requested shutdown")
+			}
+		})
 	}
 }

@@ -28,255 +28,227 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
-	"golang.org/x/sync/errgroup"
 )
 
 // MasterBackend supplies concurrent-safe business operations borrowed by Service.
 // Business rejections use *clusternet.RemoteError; other handler errors close the connection.
 type MasterBackend interface {
 	// RootTip returns the recovered checkpoint used to initialize all shards.
-	// It must return promptly; startup cancellation does not interrupt backend calls.
+	// It must return promptly; communication timeouts do not interrupt backend calls.
 	RootTip() (*qkctypes.RootBlock, error)
 	AddShardBlockHeader(sourceChainID *big.Int, header *types.Header, coinbaseAmount *uint256.Int) error
 }
 
-// ServiceConfig supplies deployment settings for one slave per configured chain.
-type ServiceConfig struct {
-	Slaves             []clusternet.SlaveInfo
-	ConfiguredChainIDs []*big.Int
-	MaxPayloadSize     uint32
-	// StartupTimeout bounds cluster initialization communication. Zero uses one minute.
-	StartupTimeout time.Duration
-	Logger         log.Logger
-	// Shutdown requests asynchronous node shutdown after an unexpected slave
-	// disconnect. It is called at most once, never as a result of Stop or failed
-	// startup (reported by Start). It must return promptly. The owner stops Service
-	// before releasing master resources and stops the rest of the cluster.
-	Shutdown func()
-}
+// ServiceState is the master communication service lifecycle.
+type ServiceState uint8
+
+const (
+	ServiceStateCreated ServiceState = iota
+	ServiceStateStarting
+	ServiceStateActive
+	ServiceStateStopped
+)
 
 // Service owns master-to-slave connections, not root-chain or mining resources.
 // Assembly is NewService -> master.New(client=Service) -> Start(master).
-// Start completes identity checks, sequential slave interconnection, and shard
-// initialization before returning. The owner then recovers unfinished root
-// broadcasts before starting normal business activity. Startup is attempted once;
-// failed startup closes and drains every connection, without retry or reconnect.
+// Start launches cluster initialization; WaitUntilReady waits for identity
+// checks, slave interconnection, and shard initialization. The owner then recovers
+// unfinished root broadcasts before starting normal business activity. Startup is attempted once;
+// failures request node shutdown; the owner calls Stop to drain connections.
+// Initial TCP dials retry until connected or stopped. Established connections
+// are never reconnected.
 type Service struct {
 	cfg     ServiceConfig
 	backend MasterBackend
 
 	mu           sync.Mutex            // protects lifecycle and connection ownership
 	conns        map[string]*SlaveConn // includes connections still verifying identity
-	started      bool
-	ready        bool
-	stopping     bool
-	startCancel  context.CancelFunc
-	stopOnce     sync.Once
+	state        ServiceState
+	initDone     chan struct{}
 	shutdownOnce sync.Once
+	stopOnce     sync.Once
 }
 
 var _ SlaveRequestHandler = (*Service)(nil)
 
-// -- Communication lifecycle and topology ------------------------------------
+// -- Public lifecycle methods ------------------------------------------------
 
 // NewService validates configuration without opening connections.
 // The caller must not modify configuration slices or chain IDs afterward.
 func NewService(cfg ServiceConfig) (*Service, error) {
-	if len(cfg.ConfiguredChainIDs) == 0 {
-		return nil, errors.New("configured chain IDs must not be empty")
-	}
-	if cfg.Shutdown == nil {
-		return nil, errors.New("missing node shutdown callback")
-	}
-	if len(cfg.ConfiguredChainIDs) != len(cfg.Slaves) {
-		return nil, errors.New("configured chain IDs and slaves must have equal counts")
-	}
-	payloadSize, err := conn.ClusterPayloadSize(cfg.MaxPayloadSize)
-	if err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	cfg.MaxPayloadSize = payloadSize
-	if cfg.StartupTimeout < 0 {
-		return nil, errors.New("negative cluster startup timeout")
-	}
-	if cfg.StartupTimeout == 0 {
-		cfg.StartupTimeout = time.Minute
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = log.Root()
-	}
-	configured := make(map[string]struct{}, len(cfg.ConfiguredChainIDs))
-	for _, id := range cfg.ConfiguredChainIDs {
-		if err := conn.ValidateSlaveChainID(id); err != nil {
-			return nil, err
-		}
-		configured[id.String()] = struct{}{}
-	}
-	for i, info := range cfg.Slaves {
-		if info.Host == "" || info.Port == 0 {
-			return nil, fmt.Errorf("invalid slave address at index %d", i)
-		}
-		if err := conn.ValidateSlaveChainID(info.ChainID); err != nil {
-			return nil, err
-		}
-		key := info.ChainID.String()
-		if _, ok := configured[key]; !ok {
-			return nil, fmt.Errorf("slave chain ID %s is unconfigured or duplicated", key)
-		}
-		delete(configured, key)
-	}
-	return &Service{cfg: cfg, conns: make(map[string]*SlaveConn)}, nil
+	return &Service{cfg: cfg, conns: make(map[string]*SlaveConn), initDone: make(chan struct{})}, nil
 }
 
-// Start installs the backend and synchronously initializes the whole cluster.
-// The owner calls Start and Stop serially. Startup failure closes connections
-// and drains handlers before returning; restart requires a new service.
-func (s *Service) Start(backend MasterBackend) (err error) {
-	if s.started || s.stopping {
+// Start installs the backend and launches cluster initialization without waiting.
+// The owner calls Start and Stop serially. Initialization failure requests node
+// shutdown; restart requires a new service.
+func (s *Service) Start(backend MasterBackend) error {
+	if s.state != ServiceStateCreated {
 		return errors.New("master service already started or stopped")
 	}
 	if backend == nil {
 		return errors.New("missing master backend")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.StartupTimeout)
-	s.backend, s.started, s.startCancel = backend, true, cancel
-	defer func() {
-		cancel()
+	s.backend, s.state = backend, ServiceStateStarting
+	go func() {
+		err := s.initCluster()
+		close(s.initDone)
 		if err != nil {
-			s.Stop()
+			s.cfg.Logger.Debug("Cluster initialization failed", "err", err)
+			s.shutdown()
 		}
 	}()
-	root, err := backend.RootTip()
-	if err != nil {
-		return fmt.Errorf("get root checkpoint: %w", err)
-	}
-	if root == nil {
-		return errors.New("missing root checkpoint")
-	}
-	if err := s.connectSlaves(ctx); err != nil {
-		return err
-	}
-	// All slaves must see their master before any xshard dial. Each topology
-	// response is awaited before the next slave is asked to dial, as in Python.
-	for _, info := range s.cfg.Slaves {
-		if err := s.connection(info.ChainID).SendConnectToSlaves(ctx, s.cfg.Slaves); err != nil {
-			return fmt.Errorf("interconnect slave %s: %w", info.ChainID, err)
-		}
-	}
-	group, initCtx := errgroup.WithContext(ctx)
-	for _, info := range s.cfg.Slaves {
-		group.Go(func() error {
-			if err := s.connection(info.ChainID).SendPing(initCtx, root); err != nil {
-				return fmt.Errorf("initialize slave %s: %w", info.ChainID, err)
-			}
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	for _, sc := range s.conns {
-		if sc.IsClosed() {
-			return fmt.Errorf("slave %s disconnected during startup", sc.RemoteChainID())
-		}
-	}
-	s.ready = true
 	return nil
 }
 
-func (s *Service) connectSlaves(ctx context.Context) error {
-	group, dialCtx := errgroup.WithContext(ctx)
-	for _, info := range s.cfg.Slaves {
-		group.Go(func() error {
-			addr := net.JoinHostPort(info.Host, strconv.Itoa(int(info.Port)))
-			nc, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
-			if err != nil {
-				return fmt.Errorf("dial slave %s at %s: %w", info.ChainID, addr, err)
-			}
-			sc, err := NewSlaveConn(SlaveConnConfig{Conn: nc, RemoteChainID: info.ChainID, MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s, Logger: s.cfg.Logger})
-			if err != nil {
-				nc.Close()
-				return err
-			}
-			s.mu.Lock()
-			s.conns[info.ChainID.String()] = sc
-			s.mu.Unlock()
-			go func() {
-				<-sc.WaitUntilClosed()
-				s.shutdown()
-			}()
-			sc.Start()
-			if err := sc.SendPing(dialCtx, nil); err != nil {
-				return fmt.Errorf("identify slave %s: %w", info.ChainID, err)
-			}
-			return nil
-		})
-	}
-	return group.Wait()
-}
-
-// Stop closes every connection before waiting and drains all
-// admitted handlers. It does not cancel backend calls or stop backend resources.
+// Stop ends dial retries, waits for initialization, closes connections, and drains
+// admitted handlers. Initialization operations finish or reach their own timeout.
+// It does not cancel backend calls or stop backend resources.
 // The owner may release master resources after Stop returns. Normal Stop does
 // not request Shutdown. Never call Stop from a request handler; Shutdown must
 // arrange it asynchronously.
 func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
-		s.stopping, s.ready = true, false
+		if s.state == ServiceStateCreated {
+			close(s.initDone) // no initialization task will run
+		}
+		s.state = ServiceStateStopped
 		s.mu.Unlock()
-		for _, sc := range s.connections() {
+
+		<-s.initDone
+		conns := s.connections()
+		for _, sc := range conns {
 			sc.Close()
 		}
-		for _, sc := range s.connections() {
+		for _, sc := range conns {
 			sc.WaitHandlers()
 		}
 	})
 	return nil
 }
 
-// shutdown forwards the first unexpected disconnect to the owner. During
-// startup it cancels initialization instead, leaving Start to report the failure.
-// Stop marks the service as stopping before closing connections, so those
-// disconnects never request node shutdown. The owner performs cleanup via Stop.
-func (s *Service) shutdown() {
-	s.mu.Lock()
-	stopping, ready, cancel := s.stopping, s.ready, s.startCancel
-	s.mu.Unlock()
-	if stopping {
-		return
-	}
-	if !ready {
-		if cancel != nil {
-			cancel()
-		}
-		return
-	}
-	s.shutdownOnce.Do(func() {
-		s.mu.Lock()
-		stopping := s.stopping
-		s.mu.Unlock()
-		if stopping {
-			return
-		}
-		s.cfg.Shutdown()
-	})
-}
+// WaitUntilReady returns a channel closed when initialization finishes or the
+// service is stopped before Start. Use IsActive to check whether it is ready.
+func (s *Service) WaitUntilReady() <-chan struct{} { return s.initDone }
 
-func (s *Service) connection(chainID *big.Int) *SlaveConn {
+// IsActive reports whether initialization succeeded and the service is running.
+func (s *Service) IsActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.conns[chainID.String()]
+	return s.state == ServiceStateActive
+}
+
+// -- Private initialization and connection helpers ----------------------------
+
+func (s *Service) initCluster() error {
+	if err := s.connectSlaves(); err != nil {
+		return err
+	}
+	// All slaves must see their master before any xshard dial. Each topology
+	// response is awaited before the next slave is asked to dial, as in Python.
+	for _, sc := range s.conns {
+		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.StartupTimeout)
+		err := sc.SendConnectToSlaves(ctx, s.cfg.SlaveInfos)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("interconnect slave %s: %w", sc.RemoteChainID(), err)
+		}
+	}
+	root, err := s.backend.RootTip()
+	if err != nil {
+		return fmt.Errorf("get root checkpoint: %w", err)
+	}
+	if root == nil {
+		return errors.New("missing root checkpoint")
+	}
+	errs := make([]error, len(s.cfg.SlaveInfos))
+	var wg sync.WaitGroup
+	for i, info := range s.cfg.SlaveInfos {
+		sc := s.conns[info.ChainID.String()]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.pingSlave(sc, root); err != nil {
+				errs[i] = fmt.Errorf("initialize slave %s: %w", sc.RemoteChainID(), err)
+			}
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != ServiceStateStarting {
+		return errors.New("master service stopped during initialization")
+	}
+	s.state = ServiceStateActive
+	return nil
+}
+
+func (s *Service) connectSlaves() error {
+	errs := make([]error, len(s.cfg.SlaveInfos))
+	var wg sync.WaitGroup
+	for i, info := range s.cfg.SlaveInfos {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = s.connectSlave(info)
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// pingSlave bounds both identity verification and shard initialization RPCs.
+func (s *Service) pingSlave(sc *SlaveConn, root *qkctypes.RootBlock) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.StartupTimeout)
+	defer cancel()
+	return sc.SendPing(ctx, root)
+}
+
+func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
+	addr := net.JoinHostPort(info.Host, strconv.Itoa(int(info.Port)))
+	var nc net.Conn
+	for {
+		s.mu.Lock()
+		stopped := s.state == ServiceStateStopped
+		s.mu.Unlock()
+		if stopped {
+			return context.Canceled
+		}
+		var err error
+		nc, err = net.DialTimeout("tcp", addr, s.cfg.StartupTimeout)
+		if err == nil {
+			break
+		}
+		s.cfg.Logger.Warn("Failed to connect to slave, retrying", "chain", info.ChainID, "addr", addr, "err", err)
+		time.Sleep(slaveConnectRetryDelay)
+	}
+	sc, err := NewSlaveConn(SlaveConnConfig{Conn: nc, RemoteChainID: info.ChainID, MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s, Logger: s.cfg.Logger})
+	if err != nil {
+		nc.Close()
+		return err
+	}
+	s.mu.Lock()
+	s.conns[info.ChainID.String()] = sc
+	s.mu.Unlock()
+	go func() {
+		<-sc.WaitUntilClosed()
+		s.shutdown()
+	}()
+	sc.Start()
+	if err := s.pingSlave(sc, nil); err != nil {
+		return fmt.Errorf("identify slave %s: %w", info.ChainID, err)
+	}
+	return nil
 }
 
 func (s *Service) connections() []*SlaveConn {
@@ -289,24 +261,58 @@ func (s *Service) connections() []*SlaveConn {
 	return result
 }
 
-func (s *Service) readyConnections() ([]*SlaveConn, error) {
+// connection looks up a slave by chain ID without exposing connections to callers.
+func (s *Service) connection(chainID *big.Int) *SlaveConn {
+	if chainID == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.ready || s.stopping {
-		return nil, errors.New("master service is not ready")
+	if s.state != ServiceStateActive {
+		return nil
 	}
-	result := make([]*SlaveConn, 0, len(s.cfg.Slaves))
-	for _, info := range s.cfg.Slaves {
-		sc := s.conns[info.ChainID.String()]
-		if sc == nil {
-			return nil, fmt.Errorf("no slave connection for chain %s", info.ChainID)
+	return s.conns[chainID.String()]
+}
+
+// shutdown reports passive failure once. Stop marks the service as stopped
+// before closing connections, so active shutdown is not reported.
+func (s *Service) shutdown() {
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		stopped := s.state == ServiceStateStopped
+		s.mu.Unlock()
+		if stopped {
+			return
 		}
-		result = append(result, sc)
-	}
-	return result, nil
+		s.cfg.Shutdown()
+	})
 }
 
 // -- Business calls into communication (master.ClusterClient) -----------------
+
+// broadcastToSlaves sends to every slave concurrently and joins all failures.
+func (s *Service) broadcastToSlaves(send func(*SlaveConn) error) error {
+	s.mu.Lock()
+	active := s.state == ServiceStateActive
+	s.mu.Unlock()
+	if !active {
+		return errors.New("master service is not ready")
+	}
+	conns := s.connections()
+	errs := make([]error, len(conns))
+	var wg sync.WaitGroup
+	for i, sc := range conns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := send(sc); err != nil {
+				errs[i] = fmt.Errorf("slave %s: %w", sc.RemoteChainID(), err)
+			}
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
 
 // BroadcastRootBlock implements master.ClusterClient. Every configured slave
 // must acknowledge the root; partial delivery is returned as an error for retry.
@@ -314,7 +320,7 @@ func (s *Service) BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBl
 	if block == nil {
 		return errors.New("missing root block")
 	}
-	return s.forEachSlave(ctx, func(ctx context.Context, sc *SlaveConn) error { return sc.SendAddRootBlock(ctx, block) })
+	return s.broadcastToSlaves(func(sc *SlaveConn) error { return sc.SendAddRootBlock(ctx, block) })
 }
 
 // GetUnconfirmedHeaderList collects all chains, failing rather than omitting a
@@ -322,7 +328,7 @@ func (s *Service) BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBl
 func (s *Service) GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*types.Header, error) {
 	headers := make(map[string][]*types.Header)
 	var mu sync.Mutex
-	err := s.forEachSlave(ctx, func(ctx context.Context, sc *SlaveConn) error {
+	err := s.broadcastToSlaves(func(sc *SlaveConn) error {
 		list, err := sc.SendGetUnconfirmedHeaders(ctx)
 		if err != nil {
 			return err
@@ -338,49 +344,18 @@ func (s *Service) GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*t
 	return headers, nil
 }
 
-func (s *Service) forEachSlave(ctx context.Context, call func(context.Context, *SlaveConn) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	conns, err := s.readyConnections()
-	if err != nil {
-		return err
-	}
-	group, ctx := errgroup.WithContext(ctx)
-	for _, sc := range conns {
-		group.Go(func() error {
-			if err := call(ctx, sc); err != nil {
-				return fmt.Errorf("slave %s: %w", sc.RemoteChainID(), err)
-			}
-			return nil
-		})
-	}
-	return group.Wait()
-}
-
 // GetRootChainStakes routes a query to the configured chain.
 func (s *Service) GetRootChainStakes(ctx context.Context, chainID *big.Int, address common.Address, hash common.Hash) (*clusternet.RootChainStakesResult, error) {
-	if chainID == nil {
-		return nil, errors.New("missing chain ID")
+	sc := s.connection(chainID)
+	if sc == nil {
+		return nil, fmt.Errorf("no slave connection for chain %v", chainID)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	conns, err := s.readyConnections()
-	if err != nil {
-		return nil, err
-	}
-	for _, sc := range conns {
-		if sc.RemoteChainID().Cmp(chainID) == 0 {
-			return sc.SendGetRootChainStakes(ctx, address, hash)
-		}
-	}
-	return nil, fmt.Errorf("no slave connection for chain %s", chainID)
+	return sc.SendGetRootChainStakes(ctx, address, hash)
 }
 
 // -- Request handlers calling business methods -------------------------------
 
-// AddShardBlockHeader forwards a slave's decoded report to the borrowed backend.
+// AddShardBlockHeader forwards the slave report to the backend.
 func (s *Service) AddShardBlockHeader(chainID *big.Int, header *types.Header, amount *uint256.Int) error {
 	return s.backend.AddShardBlockHeader(chainID, header, amount)
 }
