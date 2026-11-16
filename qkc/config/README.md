@@ -33,8 +33,9 @@ make qkc
 build/bin/qkc m1
 ```
 
-The driver starts both shard nodes in this process, constructs R0 from their
-genesis headers, and initializes each with that root.
+By default, the driver starts Ethash shard 100001, constructs R0 from its genesis
+header, and initializes the shard with that root. Use repeated `--config` flags
+to explicitly select multiple shard configurations.
 Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
 R0 restores shard heads to genesis.
 
@@ -44,17 +45,16 @@ hex value. It must be at least `PoSW.MinimumDifficulty`.
 In a second terminal, run the CPU test client to mine one real Ethash block:
 
 ```sh
-build/bin/qkc mine
 # Optional endpoint and mining recipient overrides:
-build/bin/qkc mine --rpc http://127.0.0.1:18545 --coinbase 0x2222222222222222222222222222222222222222
+build/bin/qkc mine --rpc http://127.0.0.1:18545 --coinbase 0x222222222222222222222222222222222222222A
 ```
 
 This is a single-block client for a low-difficulty devnet. The client fetches work, searches nonces with the existing light Ethash algorithm,
 and submits a valid seal. It prints the work, seal and acceptance, then exits.
 
-Shard 100001 uses `POW_ETHASH`; shard 100002 uses `POW_SIMULATE`. Local seal search
-is disabled. The nodes use the existing mock cluster client: R0 stays at height 0,
-with no R1 production or cross-shard delivery. 
+Shard 100001 uses `POW_ETHASH`; the optional shard 100002 uses `POW_SIMULATE`.
+Local seal search is disabled. The nodes use the existing mock cluster client:
+R0 stays at height 0, with no R1 production or cross-shard delivery.
 
 The devnet HTTP configurations enable the existing `miner` namespace. An external
 miner requests work for its coinbase address:

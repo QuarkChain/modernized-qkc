@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,6 +36,25 @@ import (
 	"github.com/naoina/toml"
 	"github.com/urfave/cli/v2"
 )
+
+func m1TestConfig(t *testing.T, chainID int) string {
+	t.Helper()
+	data, err := os.ReadFile(fmt.Sprintf("../../qkc/config/devnet/shard-%d.toml", chainID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	text := string(data)
+	text = strings.Replace(text, "[Eth]", "[Eth]\nDatabaseCache = 16\nTrieCleanCache = 16\nTrieDirtyCache = 16\nSnapshotCache = 0", 1)
+	text = strings.Replace(text, fmt.Sprintf("DataDir = %q", fmt.Sprintf("./qkc-data/shard-%d", chainID)), fmt.Sprintf("DataDir = %q", dir), 1)
+	text = strings.Replace(text, fmt.Sprintf("IPCPath = %q", fmt.Sprintf("qkc-shard-%d.ipc", chainID)), `IPCPath = ""`, 1)
+	text = strings.Replace(text, fmt.Sprintf("HTTPPort = %d", 18545+chainID-100001), "HTTPPort = 0", 1)
+	path := filepath.Join(dir, "shard.toml")
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestMine(t *testing.T) {
 	path := m1TestConfig(t, 100001)

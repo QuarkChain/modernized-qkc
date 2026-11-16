@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
@@ -43,7 +42,6 @@ var m1Command = &cli.Command{
 	Flags: []cli.Flag{
 		&cli.StringSliceFlag{Name: "config", Value: cli.NewStringSlice(
 			"qkc/config/devnet/shard-100001.toml",
-			"qkc/config/devnet/shard-100002.toml",
 		), Usage: "Native geth shard TOML (repeat for each shard)"},
 	},
 	Action: runM1,
@@ -125,16 +123,6 @@ func runM1(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	// R0's included headers remain fixed while the live shard heads advance.
-	var includedHeaders []string
-	for i, header := range root.ShardBlockHeaders() {
-		extra, err := header.QKCExtra()
-		if err != nil {
-			return fmt.Errorf("decode shard header %d: %w", i, err)
-		}
-		includedHeaders = append(includedHeaders, fmt.Sprintf("%s@%s", extra.ChainID.String(), header.Number.String()))
-	}
-	fmt.Fprintf(ctx.App.Writer, "root: %d -> [%s]\n", root.Number(), strings.Join(includedHeaders, ", "))
 	for i, stack := range stacks {
 		fmt.Fprintf(ctx.App.Writer, "%s: initialized R0 %s; HTTP %s\n", paths[i], root.Hash(), stack.HTTPEndpoint())
 	}
