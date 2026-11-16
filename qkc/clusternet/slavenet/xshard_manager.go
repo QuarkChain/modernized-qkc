@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package slaveconn
+package slavenet
 
 import (
 	"context"
@@ -26,8 +26,8 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/comm"
-	"github.com/ethereum/go-ethereum/qkc/conn"
+	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
 )
 
 // XshardConnManager manages the local slave's cross-shard connections to other slaves,
@@ -108,7 +108,7 @@ func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, 
 
 // DialToSlave establishes an outbound cross-shard connection to the slave
 // described by slaveInfo. Its ChainID identifies the chain hosted by that slave.
-func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo comm.SlaveInfo) error {
+func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo clusternet.SlaveInfo) error {
 	if err := conn.ValidateSlaveChainID(slaveInfo.ChainID); err != nil {
 		return err
 	}

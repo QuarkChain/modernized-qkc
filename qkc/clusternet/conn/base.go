@@ -28,7 +28,7 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 )
 
 // TypedHandler processes a deserialized request and returns a deserialized
