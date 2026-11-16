@@ -36,6 +36,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/holiman/uint256"
 )
 
 // -- fake transport -----------------------------------------------------------
@@ -213,7 +214,7 @@ func validPongPayload(t *testing.T) []byte {
 
 func validPingPayload(t *testing.T) []byte {
 	t.Helper()
-	payload, err := (&wire.PingRequest{ChainID: [wire.UInt256Length]byte{1}}).MarshalSSZ()
+	payload, err := (&wire.PingRequest{ChainID: uint256.Int{1}}).MarshalSSZ()
 	if err != nil {
 		t.Fatalf("serialize ping: %v", err)
 	}
@@ -840,7 +841,7 @@ func TestBaseConn_DuplicateResponseDoesNotCompleteNextRPC(t *testing.T) {
 			feedFrame(t, tr, previous)
 			feedFrame(t, tr, previous)
 		}
-		chainID := [wire.UInt256Length]byte{byte(i + 1)}
+		chainID := uint256.Int{uint64(i + 1)}
 		payload, err := (&wire.PongResponse{ChainID: chainID}).MarshalSSZ()
 		if err != nil {
 			t.Fatal(err)
@@ -1079,7 +1080,7 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result := make(chan rpcResult, 1)
-	req := &wire.PingRequest{ChainID: [wire.UInt256Length]byte{1}}
+	req := &wire.PingRequest{ChainID: uint256.Int{1}}
 	go func() {
 		resp, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), req)
 		result <- rpcResult{resp, err}
@@ -1092,7 +1093,7 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 	if !errors.Is(err, wire.ErrInvalidClusterFrame) || conn.pendingLen() != 1 {
 		t.Fatalf("invalid RPC: error=%v pending=%d", err, conn.pendingLen())
 	}
-	payload, err := (&wire.PongResponse{ChainID: [wire.UInt256Length]byte{1}}).MarshalSSZ()
+	payload, err := (&wire.PongResponse{ChainID: uint256.Int{1}}).MarshalSSZ()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1768,7 +1769,7 @@ func TestBaseConn_SendRPCZeroPeerID(t *testing.T) {
 	conn.Start()
 	defer conn.Close()
 
-	req := &wire.PingRequest{ChainID: [wire.UInt256Length]byte{1}}
+	req := &wire.PingRequest{ChainID: uint256.Int{1}}
 	result := make(chan rpcResult, 1)
 	go func() {
 		resp, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), req)
@@ -2572,7 +2573,7 @@ func TestSimulation_ClusterFrameGoldenBytes(t *testing.T) {
 			byte(wire.ClusterOpPing): func(req wire.SSZMessage) (wire.SSZMessage, error) {
 				ping := req.(*wire.PingRequest)
 				gotPing = append(gotPing, ping)
-				return &wire.PongResponse{ChainID: [wire.UInt256Length]byte{1}}, nil
+				return &wire.PongResponse{ChainID: uint256.Int{1}}, nil
 			},
 		},
 	})
@@ -2604,7 +2605,7 @@ func TestSimulation_ClusterFrameGoldenBytes(t *testing.T) {
 	if len(gotPing) != 2 {
 		t.Fatalf("handler invoked %d times, want 2", len(gotPing))
 	}
-	if gotPing[0].ChainID != ([wire.UInt256Length]byte{1}) {
+	if gotPing[0].ChainID != (uint256.Int{1}) {
 		t.Fatalf("deserialized ping mismatch: %+v", gotPing[0])
 	}
 	if gotPing[0].HasRootTip {
@@ -2627,7 +2628,7 @@ func TestSimulation_FullLifecycle(t *testing.T) {
 				if slow.Load() {
 					time.Sleep(300 * time.Millisecond)
 				}
-				return &wire.PongResponse{ChainID: [wire.UInt256Length]byte{1}}, nil
+				return &wire.PongResponse{ChainID: uint256.Int{1}}, nil
 			},
 		},
 	})
@@ -2662,7 +2663,7 @@ func TestSimulation_FullLifecycle(t *testing.T) {
 		t.Fatal("client never became active")
 	}
 
-	pingRequest := &wire.PingRequest{ChainID: [wire.UInt256Length]byte{1}}
+	pingRequest := &wire.PingRequest{ChainID: uint256.Int{1}}
 
 	// -- Concurrent RPCs in both directions over the same connection.
 	const callers = 8
