@@ -187,10 +187,7 @@ func TestXshardConnRejectsUnsupportedDepositVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sszChainID, err := wire.ChainIDToSSZ(chainID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sszChainID := *uint256.MustFromBig(chainID)
 	response, err := x.handleAddXshardTxList(&wire.AddXshardTxListRequest{ChainID: sszChainID, DepositTxList: []wire.Data{encoded}})
 	if err == nil || !strings.Contains(err.Error(), "unsupported deposit version 1") {
 		t.Fatalf("expected unsupported deposit version error, got %v", err)
@@ -276,10 +273,7 @@ func TestTCPXshardHandshakeAndRequest(t *testing.T) {
 	serverID := new(big.Int).Lsh(big.NewInt(1), 80)
 	clientID := new(big.Int).Add(serverID, big.NewInt(1))
 	configuredIDs := []*big.Int{serverID, clientID}
-	serverWireID, err := wire.ChainIDToSSZ(serverID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	serverWireID := *uint256.MustFromBig(serverID)
 	server, err := NewXshardConnManager(serverID, configuredIDs, 0, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +301,7 @@ func TestTCPXshardHandshakeAndRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	serverID.SetInt64(0)
-	serverID = wire.ChainIDFromSSZ(serverWireID)
+	serverID = serverWireID.ToBig()
 	if err := client.DialToSlave(ctx, comm.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: serverID}); err != nil {
 		t.Fatal(err)
 	}

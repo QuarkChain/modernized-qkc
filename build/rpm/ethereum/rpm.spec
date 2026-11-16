@@ -16,7 +16,7 @@ Source0:        {{.SourceName}}
 # 1.24.6 bootstrap (src/cmd/dist/notgo124.go), but the floor is pinned to the
 # go.mod minimum instead: it is the stricter of the two, and it keeps the system
 # Go able to build go-ethereum outright should the bundled build ever be dropped.
-BuildRequires:  golang >= 1.25
+BuildRequires:  golang >= 1.26
 BuildRequires:  gcc
 {{range .Executables}}Requires:       {{$.ExeName .}} = %{version}-%{release}
 {{end}}

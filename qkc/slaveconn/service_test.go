@@ -163,9 +163,8 @@ func TestServiceClusterRoundTrip(t *testing.T) {
 
 	// Ask the service to connect through the real Master topology handler.
 	addr := b.Addr().(*net.TCPAddr)
-	chainID, _ := wire.ChainIDToSSZ(big.NewInt(2))
 	response := serviceRPC(t, am, wire.ClusterOpConnectToSlavesRequest, &wire.ConnectToSlavesRequest{
-		SlaveInfoList: []wire.SlaveInfo{{Host: []byte("127.0.0.1"), Port: uint16(addr.Port), ChainID: chainID}},
+		SlaveInfoList: []*wire.SlaveInfo{{Host: []byte("127.0.0.1"), Port: uint16(addr.Port), ChainID: uint256.Int{2}}},
 	}).(*wire.ConnectToSlavesResponse)
 	if len(response.ResultList) != 1 || len(response.ResultList[0]) != 0 {
 		t.Fatalf("dial response: %+v", response)

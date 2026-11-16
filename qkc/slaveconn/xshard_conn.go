@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/conn"
 	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/holiman/uint256"
 )
 
 // XshardRequestHandler serves cross-shard requests received from other slaves,
@@ -112,11 +113,7 @@ func (x *XshardConn) SendAddXshardTxList(ctx context.Context, shardBlockHash com
 	if x.remoteChainID == nil {
 		return errors.New("remote chain ID is unknown")
 	}
-	chainID, err := wire.ChainIDToSSZ(x.remoteChainID)
-	if err != nil {
-		return fmt.Errorf("encode destination chain ID: %w", err)
-	}
-	request := &wire.AddXshardTxListRequest{ChainID: chainID, ShardBlockHash: shardBlockHash}
+	request := &wire.AddXshardTxListRequest{ChainID: *uint256.MustFromBig(x.remoteChainID), ShardBlockHash: shardBlockHash}
 	request.DepositTxList = make([]wire.Data, len(deposits))
 	for i, deposit := range deposits {
 		if deposit == nil {
@@ -150,7 +147,7 @@ func (x *XshardConn) SendAddXshardTxList(ctx context.Context, shardBlockHash com
 // signals the manager. Inbound PONGs are sent after the manager registers the connection.
 func (x *XshardConn) handlePing(req wire.SSZMessage) (wire.SSZMessage, error) {
 	ping := req.(*wire.PingRequest)
-	id := wire.ChainIDFromSSZ(ping.ChainID)
+	id := ping.ChainID.ToBig()
 	if err := conn.ValidateSlaveChainID(id); err != nil {
 		return nil, err
 	}
@@ -176,22 +173,14 @@ func (x *XshardConn) handlePing(req wire.SSZMessage) (wire.SSZMessage, error) {
 		}
 	}
 
-	chainID, err := wire.ChainIDToSSZ(x.localChainID)
-	if err != nil {
-		return nil, err
-	}
-	return &wire.PongResponse{ChainID: chainID}, nil
+	return &wire.PongResponse{ChainID: *uint256.MustFromBig(x.localChainID)}, nil
 }
 
 // handleAddXshardTxList delegates to the business handler.
 func (x *XshardConn) handleAddXshardTxList(req wire.SSZMessage) (wire.SSZMessage, error) {
 	request := req.(*wire.AddXshardTxListRequest)
-	localChainID, err := wire.ChainIDToSSZ(x.localChainID)
-	if err != nil {
-		return nil, err
-	}
-	if request.ChainID != localChainID {
-		return nil, fmt.Errorf("xshard request targets chain %s, local chain is %s", wire.ChainIDFromSSZ(request.ChainID), x.localChainID)
+	if request.ChainID != *uint256.MustFromBig(x.localChainID) {
+		return nil, fmt.Errorf("xshard request targets chain %s, local chain is %s", request.ChainID.ToBig(), x.localChainID)
 	}
 	deposits := make([]*types.DepositTx, len(request.DepositTxList))
 	for i, encoded := range request.DepositTxList {
@@ -203,7 +192,7 @@ func (x *XshardConn) handleAddXshardTxList(req wire.SSZMessage) (wire.SSZMessage
 			return nil, fmt.Errorf("decode deposit transaction %d: unsupported deposit version %d", i, deposits[i].Version)
 		}
 	}
-	err = x.handler.AddXshardTxList(request.ShardBlockHash, deposits)
+	err := x.handler.AddXshardTxList(request.ShardBlockHash, deposits)
 	code, err := wire.ErrorCode(err)
 	if err != nil {
 		return nil, err
@@ -230,11 +219,7 @@ func (x *XshardConn) waitUntilPingReceived() bool {
 
 // sendPing sends PING and returns the remote slave's chain ID.
 func (x *XshardConn) sendPing(ctx context.Context) (*big.Int, error) {
-	chainID, err := wire.ChainIDToSSZ(x.localChainID)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := x.SendRPC(ctx, byte(wire.ClusterOpPing), &wire.PingRequest{ChainID: chainID})
+	resp, err := x.SendRPC(ctx, byte(wire.ClusterOpPing), &wire.PingRequest{ChainID: *uint256.MustFromBig(x.localChainID)})
 	if err != nil {
 		return nil, err
 	}
@@ -242,5 +227,5 @@ func (x *XshardConn) sendPing(ctx context.Context) (*big.Int, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected ping response %T", resp)
 	}
-	return wire.ChainIDFromSSZ(pong.ChainID), nil
+	return pong.ChainID.ToBig(), nil
 }
