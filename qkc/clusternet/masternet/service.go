@@ -49,6 +49,7 @@ const (
 	ServiceStateCreated ServiceState = iota
 	ServiceStateStarting
 	ServiceStateActive
+	// ServiceStateStopped is set when Stop begins; cleanup may still be running.
 	ServiceStateStopped
 )
 
@@ -86,8 +87,10 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 }
 
 // Start installs the backend and launches cluster initialization without waiting.
-// The owner calls Start and Stop serially. Initialization failure requests node
-// shutdown; restart requires a new service.
+// The owner calls Start once per instance, before concurrent use, and calls Stop
+// after Start returns. State is installed before the initialization goroutine
+// starts, so startup needs no lock. Initialization failure requests node shutdown;
+// restarting the cluster requires new service instances.
 func (s *Service) Start(backend MasterBackend) error {
 	if s.state != ServiceStateCreated {
 		return errors.New("master service already started or stopped")
@@ -107,8 +110,8 @@ func (s *Service) Start(backend MasterBackend) error {
 	return nil
 }
 
-// Stop ends dial retries, waits for initialization, closes connections, and drains
-// admitted handlers. Initialization operations finish or reach their own timeout.
+// Stop marks the service stopped, waits for initialization to finish, then closes
+// connections and drains admitted handlers. In-flight operations finish or time out.
 // It does not cancel backend calls or stop backend resources.
 // The owner may release master resources after Stop returns. Normal Stop does
 // not request Shutdown. Never call Stop from a request handler; Shutdown must
@@ -138,10 +141,7 @@ func (s *Service) Stop() error {
 // before closing connections, so active shutdown is not reported.
 func (s *Service) shutdown() {
 	s.shutdownOnce.Do(func() {
-		s.mu.Lock()
-		stopped := s.state == ServiceStateStopped
-		s.mu.Unlock()
-		if stopped {
+		if s.isStopped() {
 			return
 		}
 		s.cfg.Shutdown()
@@ -152,73 +152,12 @@ func (s *Service) shutdown() {
 // Call it only after Start succeeds, then use IsActive to check readiness.
 func (s *Service) WaitUntilReady() <-chan struct{} { return s.initDone }
 
-// IsActive reports whether initialization succeeded and the service is running.
+// IsActive reports whether initialization succeeded and Stop has not begun.
+// It does not check connection health; Shutdown asks the owner to call Stop.
 func (s *Service) IsActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state == ServiceStateActive
-}
-
-// -- Private initialization and connection helpers ----------------------------
-
-func (s *Service) initCluster() error {
-	// 1. Connect to slaves and send identity PINGs concurrently.
-	err := s.connectSlaves()
-	if s.isStopped() {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	// 2. Ask slaves to interconnect, waiting for each response before the next command.
-	for _, sc := range s.conns {
-		ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
-		err := sc.SendConnectToSlaves(ctx, s.cfg.SlaveInfos)
-		cancel()
-		if s.isStopped() {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("interconnect slave %s: %w", sc.RemoteChainID(), err)
-		}
-	}
-
-	// 3. Send PINGs with the root tip concurrently to initialize all shard chains.
-	root, err := s.backend.RootTip()
-	if err != nil {
-		return fmt.Errorf("get root checkpoint: %w", err)
-	}
-	if root == nil {
-		return errors.New("missing root checkpoint")
-	}
-	errs := make([]error, len(s.cfg.SlaveInfos))
-	var wg sync.WaitGroup
-	for i, info := range s.cfg.SlaveInfos {
-		sc := s.conns[info.ChainID.String()]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := s.pingSlave(sc, root); err != nil {
-				errs[i] = fmt.Errorf("initialize slave %s: %w", sc.RemoteChainID(), err)
-			}
-		}()
-	}
-	wg.Wait()
-	if s.isStopped() {
-		return nil
-	}
-	if err := errors.Join(errs...); err != nil {
-		return err
-	}
-
-	// 4. update state
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.state == ServiceStateStarting {
-		s.state = ServiceStateActive
-	}
-	return nil
 }
 
 func (s *Service) isStopped() bool {
@@ -227,28 +166,55 @@ func (s *Service) isStopped() bool {
 	return s.state == ServiceStateStopped
 }
 
-func (s *Service) connectSlaves() error {
-	errs := make([]error, len(s.cfg.SlaveInfos))
-	var wg sync.WaitGroup
-	for i, info := range s.cfg.SlaveInfos {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = s.connectSlave(info)
-		}()
+// -- Private initialization and connection helpers ----------------------------
+
+func (s *Service) initCluster() error {
+	steps := []func() error{
+		// 1. Establish every slave connection sequentially, retrying until connected.
+		s.connectSlaves,
+		// 2. Send identity-only PINGs concurrently after all connections exist.
+		func() error { return s.pingSlaves(nil) },
+		// 3. Ask slaves to interconnect, waiting for each response before the next command.
+		s.interconnectSlaves,
+		// 4. Send PINGs with the root tip concurrently to initialize all shard chains.
+		s.initShards,
 	}
-	wg.Wait()
-	return errors.Join(errs...)
+	for _, step := range steps {
+		err := step()
+		if s.isStopped() {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	// 5. Publish readiness only after every initialization PONG succeeds.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == ServiceStateStarting {
+		s.state = ServiceStateActive
+	}
+	return nil
+}
+
+func (s *Service) connectSlaves() error {
+	for _, info := range s.cfg.SlaveInfos {
+		if err := s.connectSlave(info); err != nil {
+			return err
+		}
+		if s.isStopped() {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 	addr := net.JoinHostPort(info.Host, strconv.Itoa(int(info.Port)))
 	var nc net.Conn
 	for {
-		s.mu.Lock()
-		stopped := s.state == ServiceStateStopped
-		s.mu.Unlock()
-		if stopped {
+		if s.isStopped() {
 			return nil
 		}
 		var err error
@@ -272,17 +238,60 @@ func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 		s.shutdown()
 	}()
 	sc.Start()
-	if err := s.pingSlave(sc, nil); err != nil {
-		return fmt.Errorf("identify slave %s: %w", info.ChainID, err)
+	return nil
+}
+
+func (s *Service) pingSlaves(root *qkctypes.RootBlock) error {
+	action := "identify"
+	if root != nil {
+		action = "initialize"
+	}
+	errs := make([]error, len(s.cfg.SlaveInfos))
+	var wg sync.WaitGroup
+	for i, info := range s.cfg.SlaveInfos {
+		sc := s.conns[info.ChainID.String()]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
+			defer cancel()
+			if err := sc.SendPing(ctx, root); err != nil {
+				errs[i] = fmt.Errorf("%s slave %s: %w", action, sc.RemoteChainID(), err)
+			}
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+func (s *Service) interconnectSlaves() error {
+	for _, info := range s.cfg.SlaveInfos {
+		sc := s.conns[info.ChainID.String()]
+		callCtx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
+		err := sc.SendConnectToSlaves(callCtx, s.cfg.SlaveInfos)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("interconnect slave %s: %w", sc.RemoteChainID(), err)
+		}
+		if s.isStopped() {
+			return nil
+		}
 	}
 	return nil
 }
 
-// pingSlave bounds both identity verification and shard initialization RPCs.
-func (s *Service) pingSlave(sc *SlaveConn, root *qkctypes.RootBlock) error {
-	ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
-	defer cancel()
-	return sc.SendPing(ctx, root)
+func (s *Service) initShards() error {
+	root, err := s.backend.RootTip()
+	if err != nil {
+		return fmt.Errorf("get root checkpoint: %w", err)
+	}
+	if root == nil {
+		return errors.New("missing root checkpoint")
+	}
+	if s.isStopped() {
+		return nil
+	}
+	return s.pingSlaves(root)
 }
 
 func (s *Service) connections() []*SlaveConn {
@@ -312,10 +321,7 @@ func (s *Service) connection(chainID *big.Int) *SlaveConn {
 
 // broadcastToSlaves sends to every slave concurrently and joins all failures.
 func (s *Service) broadcastToSlaves(send func(*SlaveConn) error) error {
-	s.mu.Lock()
-	active := s.state == ServiceStateActive
-	s.mu.Unlock()
-	if !active {
+	if !s.IsActive() {
 		return errors.New("master service is not ready")
 	}
 	conns := s.connections()

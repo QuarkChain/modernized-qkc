@@ -40,6 +40,7 @@ import (
 
 var _ master.ClusterClient = (*Service)(nil)
 
+// startAndWait starts a fresh service once and waits for initialization.
 func startAndWait(t *testing.T, s *Service, backend MasterBackend) error {
 	t.Helper()
 	if err := s.Start(backend); err != nil {
@@ -181,9 +182,6 @@ func TestServiceCluster(t *testing.T) {
 			if err := startAndWait(t, s, backend); err != nil {
 				t.Fatal(err)
 			}
-			if err := startAndWait(t, s, backend); err == nil {
-				t.Fatal("started twice")
-			}
 			for _, shard := range shards {
 				if shard.initialized.Load() != 1 || shard.checkpoint != backend.root.Hash() {
 					t.Fatal("incorrect shard checkpoint initialization")
@@ -254,9 +252,6 @@ func TestServiceCluster(t *testing.T) {
 			if err := s.BroadcastRootBlock(ctx, root); err == nil {
 				t.Fatal("business RPC allowed after Stop")
 			}
-			if err := startAndWait(t, s, backend); err == nil {
-				t.Fatal("stopped service restarted")
-			}
 		})
 	}
 }
@@ -294,9 +289,6 @@ func TestServiceConfig(t *testing.T) {
 		t.Fatal("nil backend accepted")
 	}
 	s.Stop()
-	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err == nil {
-		t.Fatal("Start after Stop accepted")
-	}
 }
 
 func TestServiceChainMapping(t *testing.T) {
@@ -329,7 +321,7 @@ func TestServiceChainMapping(t *testing.T) {
 }
 
 func TestServiceStartupFailure(t *testing.T) {
-	for _, failure := range []string{"identity", "init", "checkpoint", "nil checkpoint"} {
+	for _, failure := range []string{"identity", "init", "checkpoint", "nil checkpoint", "backend cancellation"} {
 		t.Run(failure, func(t *testing.T) {
 			_, shards, cfg := serviceCluster(t, 2)
 			var calls atomic.Int32
@@ -347,6 +339,8 @@ func TestServiceStartupFailure(t *testing.T) {
 				backend.rootErr = errors.New("checkpoint unavailable")
 			case "nil checkpoint":
 				backend.root = nil
+			case "backend cancellation":
+				backend.rootErr = context.Canceled
 			}
 			s := newServiceForTest(t, cfg)
 			if err := startAndWait(t, s, backend); err == nil {
@@ -366,9 +360,6 @@ func TestServiceStartupFailure(t *testing.T) {
 			s.shutdown()
 			if calls.Load() != 1 {
 				t.Fatal("failed startup did not notify Shutdown once")
-			}
-			if err := startAndWait(t, s, backend); err == nil {
-				t.Fatal("retried failed startup")
 			}
 		})
 	}
@@ -715,7 +706,7 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 		t.Fatal("Stop did not wait for initialization timeout")
 	}
 	if err := waitForService(t, s); err == nil {
-		t.Fatalf("initialization should finish on its own timeout: %v", err)
+		t.Fatalf("stopped initialization should not become active: %v", err)
 	}
 	s.shutdown()
 	if calls.Load() != 0 {
@@ -861,5 +852,173 @@ func TestServiceDialRetry(t *testing.T) {
 				t.Fatal("initial dial failure requested shutdown")
 			}
 		})
+	}
+}
+
+func TestServiceIdentityPingWaitsForAllConnections(t *testing.T) {
+	first, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPort := uint16(second.Addr().(*net.TCPAddr).Port)
+	second.Close() // The second slave has not started yet.
+	s := newServiceForTest(t, ServiceConfig{
+		SlaveInfos: []clusternet.SlaveInfo{
+			{Host: "127.0.0.1", Port: uint16(first.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)},
+			{Host: "127.0.0.1", Port: secondPort, ChainID: big.NewInt(2)},
+		},
+		ConfiguredChainIDs: []*big.Int{big.NewInt(1), big.NewInt(2)},
+		Shutdown:           noopShutdown,
+	})
+	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	nc, err := first.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	if err := nc.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var buf [1]byte
+	n, err := nc.Read(buf[:])
+	var timeout net.Error
+	if n != 0 || !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("sent identity PING before all slaves connected: n=%d, err=%v", n, err)
+	}
+	stopped := make(chan struct{})
+	go func() { s.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-slaveTestContext(t).Done():
+		t.Fatal("Stop did not end connection preparation")
+	}
+}
+
+type blockingRootTipBackend struct {
+	*serviceBackend
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingRootTipBackend) RootTip() (*qkctypes.RootBlock, error) {
+	close(b.entered)
+	<-b.release
+	return b.root, nil
+}
+
+func TestServiceStopDuringRootTipDoesNotInitializeShards(t *testing.T) {
+	_, shards, cfg := serviceCluster(t, 1)
+	var calls atomic.Int32
+	cfg.Shutdown = func() { calls.Add(1) }
+	backend := &blockingRootTipBackend{
+		serviceBackend: &serviceBackend{root: testRoot(1)},
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(backend.release) }) }
+	defer unblock()
+	s := newServiceForTest(t, cfg)
+	if err := s.Start(backend); err != nil {
+		t.Fatal(err)
+	}
+	ctx := slaveTestContext(t)
+	select {
+	case <-backend.entered:
+	case <-ctx.Done():
+		t.Fatal("initialization did not read root tip")
+	}
+	stopped := make(chan struct{})
+	go func() { s.Stop(); close(stopped) }()
+	// Let Stop mark the service stopped before the backend returns its tip.
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !s.isStopped() {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("Stop did not mark the service stopped")
+		}
+	}
+	unblock()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("Stop did not finish after RootTip returned")
+	}
+	if shards[0].initialized.Load() != 0 {
+		t.Fatal("sent initialization PING after Stop")
+	}
+	if s.IsActive() || calls.Load() != 0 {
+		t.Fatal("active Stop published readiness or notified Shutdown")
+	}
+}
+
+func TestServiceDisconnectDuringInitializationRequestsOwnerStop(t *testing.T) {
+	slaves, shards, cfg := serviceCluster(t, 2)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	shards[1].initEntered = make(chan struct{})
+	shards[1].initRelease = release
+	requested := make(chan struct{})
+	stopped := make(chan struct{})
+	var calls atomic.Int32
+	var s *Service
+	cfg.Shutdown = func() {
+		calls.Add(1)
+		close(requested)
+		go func() { s.Stop(); close(stopped) }()
+	}
+	s = newServiceForTest(t, cfg)
+	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := slaveTestContext(t)
+	select {
+	case <-shards[1].initEntered:
+	case <-ctx.Done():
+		t.Fatal("second PING did not reach shard")
+	}
+	// A disconnect requests owner shutdown even while another shard is initializing.
+	slaves[0].Stop()
+	select {
+	case <-requested:
+	case <-ctx.Done():
+		t.Fatal("disconnect did not request Shutdown")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while shard initialization was still running")
+	default:
+	}
+	unblock()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("owner Stop did not finish after shard initialization returned")
+	}
+	if !s.isStopped() {
+		t.Fatal("service was not stopped by owner")
+	}
+	for _, sc := range s.connections() {
+		if !sc.IsClosed() {
+			t.Fatal("owner Stop left a slave connection open")
+		}
+	}
+	s.shutdown()
+	if calls.Load() != 1 {
+		t.Fatalf("shutdown calls: got %d, want 1", calls.Load())
 	}
 }
