@@ -147,6 +147,8 @@ func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain, builder *mine
 //
 // For a non-genesis root, its header and shard confirmation must already be
 // stored locally. Restore the shard head to the stored confirmation.
+// TODO(recovery): If the master's persisted tip is absent locally, restore its
+// locally stored direct parent before importing the supplied root block.
 //
 // Set the canonical shard head before publishing rootTip. Until initialization
 // succeeds, errors leave rootTip nil and allow retry. Init does not stop the blockchain.
@@ -186,8 +188,13 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 			return fmt.Errorf("store genesis root %x: %w", root.Hash(), err)
 		}
 	} else {
-		// Step 2b: recover only locally stored checkpoints. The received body
-		// is not a source of recovery data.
+		// Step 2b: recover a locally stored checkpoint.
+		// TODO(recovery): If the supplied root block is truly absent locally, load
+		// and validate its direct parent and confirmation, restore the shard head
+		// at that parent, then import the supplied root through the normal path.
+		// Distinguish absence from read/decode failures; missing parents,
+		// confirmations, minor blocks, state or required cross-shard data must
+		// return an error, never fall back to genesis or skip.
 		rootHeader = rawdb.ReadRootBlockHeader(c.db, root.Hash())
 		if rootHeader == nil {
 			return fmt.Errorf("%w: %w: %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, root.Hash())
@@ -451,8 +458,7 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 // InsertRootBlock validates a root block against the shard chain, stores it,
 // and makes it the root tip if the fork choice rule selects it, moving the
 // canonical head onto the shard chain it confirms. It reports whether the root
-// tip changed. Known roots still participate in fork choice, so replay after
-// Init can advance a restored checkpoint. Head and root writes are not one
+// tip changed. Known roots still participate in fork choice. Head and root writes are not one
 // transaction; a failed root-batch write may leave the head changed. Subsequent
 // root imports or service initialization may restore consistency.
 // It mirrors ShardState.add_root_block in pyquarkchain.
@@ -460,6 +466,9 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 // Unlike shard blocks, root blocks are chosen by total difficulty: "Switch to
 // the root block with higher total diff". On a tie, the root tip stays.
 func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
+	// TODO(recovery): Extract a lock-held import helper so Init can import the
+	// supplied root block after restoring its locally stored direct parent;
+	// do not reacquire c.mu or leave rootTip initialized after a failed Init.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -467,12 +476,8 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	if rootTip == nil {
 		return false, ErrRootChainUninitialized
 	}
-	// Step 1: determine whether the root can replace the tip. On restart, master
-	// rolls back one root block and initializes shards at that checkpoint before
-	// rebroadcasting the next root. Shards that already stored it must still
-	// advance their tip, matching pyquarkchain's recovery behavior. Unlike Python,
-	// skip known roots that cannot replace the tip to avoid repeated validation
-	// and DB writes on duplicate delivery.
+	// Step 1: determine whether the root can replace the tip. Skip known roots
+	// that cannot replace it to avoid repeated validation and writes on duplicates.
 	switched := root.TotalDifficulty().Cmp(&rootTip.TotalDifficulty) > 0
 	if !switched && rawdb.HasRootBlock(c.db, root.Hash()) {
 		return false, nil
@@ -764,22 +769,15 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 // discard that candidate and collect headers again after checkpoint synchronization.
 // Headers not yet reported to master must also be filtered out by master.
 //
-// pyquarkchain writes a committing hash before inserting a root block locally.
-// If the block becomes the new tip, master updates its local root tip before
-// broadcasting the block to all shards. The hash is cleared only after all
-// shards accept the block. If a shard import fails, completed imports are not
-// undone and the committing hash is kept.
+// Startup uses the master's persisted tip rather than a committing marker.
+// TODO(recovery): Restore the supplied root block directly if stored locally;
+// otherwise restore its local direct parent and import the supplied root block.
+// Missing required data must return an error.
 //
-// If propagation cannot finish during normal operation, restart recovery can
-// be used: RootDb selects the parent of the persisted non-genesis root tip.
-// Master initializes the shards from that checkpoint, then rebroadcasts the
-// committing root block. Neither pyquarkchain nor goquarkchain checks committing
-// before root construction.
-//
-// TODO: In master, check that the parent root is fully committed before
-// collecting shard headers. While committing, wait with context cancellation
-// or return an error for the caller to retry, so this problem is caught before
-// building rather than during construction or later validation.
+// TODO: In master, ensure every shard has acknowledged the candidate parent
+// before collecting shard headers. While propagation is incomplete, wait with
+// context cancellation or return an error, so inconsistent checkpoints are
+// caught before building rather than during construction or later validation.
 // Use a lock to keep the parent fixed through header collection and building.
 //
 // Another option is to validate the returned headers against shard root tip.

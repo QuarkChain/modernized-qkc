@@ -69,11 +69,13 @@ type RootChain struct {
 
 var _ posw.RootChainReader = (*RootChain)(nil)
 
-// New recovers the persisted head's parent (or genesis) as the runtime tip,
-// matching pyquarkchain's RootDb recovery without changing the stored head.
+// New recovers the persisted root head as the runtime tip, as in goquarkchain,
+// without rewinding or changing the stored head.
 // It binds the supplied client and engine without taking ownership of them or
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // Genesis, canonical indices and cumulative confirmations must already be stored.
+// TODO: Root insertion must persist the block, its confirmations and canonical
+// head updates atomically so recovery never observes a partially stored tip.
 func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
 	if config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing root configuration, cluster client, database or engine")
@@ -85,23 +87,11 @@ func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Databas
 	if hash == (common.Hash{}) {
 		return nil, fmt.Errorf("%w: persisted root head", ErrRootDataMissing)
 	}
-	tip := rawdb.ReadRootBlockHeader(db, hash)
+	tip := rawdb.ReadRootBlock(db, hash)
 	if tip == nil {
 		return nil, fmt.Errorf("%w: persisted root tip", ErrRootDataMissing)
 	}
 	if tip.Hash() != hash {
-		return nil, fmt.Errorf("root header does not match stored hash %x", hash)
-	}
-	// Match pyquarkchain's RootDb recovery: use the persisted head's parent as
-	// the runtime tip unless it is genesis, without rewriting the stored head.
-	if tip.Number != 0 {
-		hash = tip.ParentHash
-	}
-	checkpoint := rawdb.ReadRootBlock(db, hash)
-	if checkpoint == nil {
-		return nil, fmt.Errorf("%w: recovery checkpoint", ErrRootDataMissing)
-	}
-	if checkpoint.Hash() != hash {
 		return nil, fmt.Errorf("root block does not match stored hash %x", hash)
 	}
 	c := &RootChain{
@@ -112,8 +102,8 @@ func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Databas
 	if err := c.checkConfirmations(hash); err != nil {
 		return nil, err
 	}
-	c.blockCache.Add(hash, checkpoint)
-	c.tip.Store(checkpoint.Header())
+	c.blockCache.Add(hash, tip)
+	c.tip.Store(tip.Header())
 	return c, nil
 }
 
@@ -134,9 +124,17 @@ func (c *RootChain) checkConfirmations(hash common.Hash) error {
 	return nil
 }
 
-// Init initializes shards at the recovered tip, then replays pending root delivery.
-// Connections must be ready before this call. On failure, Init returns an error;
-// the backend is responsible for aborting startup and stopping the node.
+// Init sends the persisted root tip recovered by New to every shard in PING.
+// Shards that already store this root block restore their confirmed shard head
+// from it. Otherwise, they must restore its locally stored direct parent, then
+// import the supplied root block through the normal root-block path. Missing
+// parents or required shard blocks, state or cross-shard data must return an error.
+// TODO(shard): Implement recovery when the supplied root block is absent locally;
+// ShardChain.Init currently requires non-genesis roots and their confirmations
+// to already be stored locally.
+// Connections must be ready before this call. Init waits for all shards to
+// succeed before publishing Ready. On failure, the backend must abort startup
+// and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
 // a cluster restart. Repeating a successful Init is a no-op.
 // Init does not change the local tip.
@@ -158,37 +156,9 @@ func (c *RootChain) Init(ctx context.Context) error {
 	if block == nil {
 		return fmt.Errorf("%w: recovery checkpoint", ErrRootDataMissing)
 	}
-	// Initialize all shards at the recovered checkpoint before replaying root
-	// blocks, matching pyquarkchain's __init_shards startup step.
+	// Every shard must acknowledge initialization at the master's persisted tip.
 	if err := c.client.Ping(ctx, block); err != nil {
 		return fmt.Errorf("initialize shards: %w", err)
-	}
-	// A committing marker records root delivery that may have been interrupted.
-	// Replay it after shard initialization; retain it for the next cluster restart
-	// if replay fails.
-	pending, err := rawdb.ReadRootCommittingHash(c.db)
-	if err != nil {
-		return fmt.Errorf("read committing root: %w", err)
-	}
-	if pending != (common.Hash{}) {
-		block, err := c.GetRootBlock(pending)
-		if err != nil {
-			return err
-		}
-		// A committing marker must reference a stored block. An unavailable block
-		// indicates a persistence invariant violation or a storage failure; retain
-		// the marker and abort startup rather than silently discard it.
-		// TODO: Root insertion must atomically store each new block with its
-		// committing marker; known blocks must already be stored before marking.
-		if block == nil {
-			return fmt.Errorf("%w: committing root %x", ErrRootDataMissing, pending)
-		}
-		if err := c.client.BroadcastRootBlock(ctx, block); err != nil {
-			return fmt.Errorf("replay root block: %w", err)
-		}
-		if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
-			return fmt.Errorf("clear committing root: %w", err)
-		}
 	}
 	c.ready.Store(true)
 	return nil
@@ -228,7 +198,7 @@ func (c *RootChain) GetRootHeader(hash common.Hash) (*types.RootBlockHeader, err
 // GetRootBlock reads a block by hash from any stored branch.
 // Like geth, missing or unreadable data and SSZ decode failures return nil
 // without an error; decoded blocks with the wrong hash return an error.
-// Recovery stops on a nil block and retains any pending delivery marker.
+// Startup stops if its persisted tip cannot be loaded.
 // Returned blocks are shared through the cache and must not be modified.
 func (c *RootChain) GetRootBlock(hash common.Hash) (*types.RootBlock, error) {
 	if block, ok := c.blockCache.Get(hash); ok {
@@ -255,8 +225,7 @@ func (c *RootChain) GetRootHeaderByNumber(number uint32) (*types.RootBlockHeader
 	return c.GetRootHeader(hash)
 }
 
-// GetRootBlockByNumber follows the stored canonical index, which may include
-// blocks above the recovery checkpoint.
+// GetRootBlockByNumber follows the stored canonical index.
 // A missing or unreadable index returns nil without an error, as in geth.
 func (c *RootChain) GetRootBlockByNumber(number uint32) (*types.RootBlock, error) {
 	hash := rawdb.ReadRootCanonicalHash(c.db, number)

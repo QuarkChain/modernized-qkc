@@ -19,7 +19,6 @@ package root
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
 	"testing"
 	"testing/synctest"
@@ -38,13 +37,11 @@ import (
 // Record cluster startup RPCs and inject failures without real connections.
 type rootClient struct {
 	ClusterClient
-	calls        []string
-	checkpoints  []common.Hash
-	broadcasts   []common.Hash
-	pingErr      error
-	broadcastErr error
-	onPing       func(context.Context, *types.RootBlock) error
-	onBroadcast  func(context.Context, *types.RootBlock) error
+	calls       []string
+	checkpoints []common.Hash
+	broadcasts  []common.Hash
+	pingErr     error
+	onPing      func(context.Context, *types.RootBlock) error
 }
 
 func (c *rootClient) Ping(ctx context.Context, block *types.RootBlock) error {
@@ -65,24 +62,13 @@ func (c *rootClient) BroadcastRootBlock(ctx context.Context, block *types.RootBl
 	}
 	c.calls = append(c.calls, "broadcast")
 	c.broadcasts = append(c.broadcasts, block.Hash())
-	if c.onBroadcast != nil {
-		return c.onBroadcast(ctx, block)
-	}
-	return c.broadcastErr
+	return nil
 }
 
 // Inject storage failures during recovery and initialization.
 type rootDB struct {
 	ethdb.Database
-	readErr   error
-	deleteErr error
-}
-
-func (db *rootDB) Delete(key []byte) error {
-	if db.deleteErr != nil {
-		return db.deleteErr
-	}
-	return db.Database.Delete(key)
+	readErr error
 }
 
 func (db *rootDB) Get(key []byte) ([]byte, error) {
@@ -200,11 +186,9 @@ func TestRootGenesisRecovery(t *testing.T) {
 	}
 }
 
-// RootDb.__recover_from_db selects A from persisted head B without rewriting
-// tipHash. Repeated restarts must select A again rather than stepping back further.
-// Number reads follow the stored canonical index, independently of the checkpoint.
-// Hash reads also retain side branches.
-func TestRootRecoveryKeepsCheckpoint(t *testing.T) {
+// Recovery selects the persisted head on every restart, retaining canonical and
+// side-branch queries without rewinding the stored head.
+func TestRootRecoveryKeepsPersistedTip(t *testing.T) {
 	f := newRootEnv(t)
 	a := f.block(f.genesis, 1)
 	f.store(a, true)
@@ -214,8 +198,8 @@ func TestRootRecoveryKeepsCheckpoint(t *testing.T) {
 	f.store(side, false)
 	for range 2 {
 		c := f.open()
-		if c.RootTip().Hash() != a.Hash() {
-			t.Fatal("restart selected the wrong checkpoint")
+		if c.RootTip().Hash() != b.Hash() {
+			t.Fatal("restart did not select the persisted tip")
 		}
 		if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != b.Hash() {
 			t.Fatal("recovery changed the persisted head")
@@ -252,36 +236,34 @@ func TestRootNewRejectsMissingHead(t *testing.T) {
 // Local recovery failures are constructor errors. Repairing the database permits
 // another construction attempt without advancing or rewinding the stored head.
 func TestRootNewRejectsMissingRecoveryData(t *testing.T) {
-	for _, missing := range []string{"parent block", "parent confirmation", "shard confirmation"} {
+	for _, missing := range []string{"snapshot", "empty snapshot", "shard confirmation"} {
 		t.Run(missing, func(t *testing.T) {
 			f := newRootEnv(t)
-			a := f.block(f.genesis, 1)
+			tip := f.block(f.genesis, 1)
+			qkcrawdb.WriteRootBlock(f.db, tip)
+			if err := qkcrawdb.WriteRootHeadBlockHash(f.db, tip.Hash()); err != nil {
+				t.Fatal(err)
+			}
 			switch missing {
-			case "parent confirmation":
-				f.store(a, false)
-				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, a.Hash(), nil); err != nil {
+			case "empty snapshot":
+				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), nil); err != nil {
 					t.Fatal(err)
 				}
 			case "shard confirmation":
-				f.store(a, false)
-				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, a.Hash(), map[string]common.Hash{"10001": f.confirmed["10001"]}); err != nil {
+				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), map[string]common.Hash{"10001": f.confirmed["10001"]}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			b := f.block(a, 2)
-			f.store(b, true)
-			chain, err := New(f.config, f.client, f.db, f.engine)
-			if err == nil || chain != nil {
-				t.Fatal("missing recovery data accepted", err)
+			if chain, err := New(f.config, f.client, f.db, f.engine); err == nil || chain != nil {
+				t.Fatal("missing persisted tip confirmations accepted", err)
 			}
-			if missing == "parent block" && !errors.Is(err, ErrRootDataMissing) {
-				t.Fatal("missing parent block lost its error classification", err)
+			if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), f.confirmed); err != nil {
+				t.Fatal(err)
 			}
-			f.store(a, false)
-			if c := f.open(); c.RootTip().Hash() != a.Hash() {
-				t.Fatal("recovery after repair selected the wrong checkpoint")
+			if c := f.open(); c.RootTip().Hash() != tip.Hash() {
+				t.Fatal("recovery after repair did not select the persisted tip")
 			}
-			if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != b.Hash() {
+			if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != tip.Hash() {
 				t.Fatal("recovery changed the persisted head", err)
 			}
 		})
@@ -346,102 +328,68 @@ func TestRootInitGenesis(t *testing.T) {
 	}
 }
 
-// PING uses the checkpoint already selected by New. Pending replay must not
-// rewind the tip again, change the persisted head or publish readiness early.
-func TestRootInitReplaysPending(t *testing.T) {
+// PING carries the complete persisted tip. Legacy markers are ignored, even
+// when they reference a missing block, and startup does not broadcast roots.
+func TestRootInitUsesPersistedTip(t *testing.T) {
 	f := newRootEnv(t)
-	a := f.block(f.genesis, 1).WithBody(nil, []byte("checkpoint"))
+	a := f.block(f.genesis, 1)
 	f.store(a, true)
-	pending := f.block(a, 2)
-	f.store(pending, true)
-	if err := qkcrawdb.WriteRootCommittingHash(f.db, pending.Hash()); err != nil {
+	b := f.block(a, 2).WithBody(nil, []byte("persisted tip"))
+	f.store(b, true)
+	legacyKey, legacyHash := []byte("qkc_root_committing"), common.Hash{0xff}
+	if err := f.db.Put(legacyKey, legacyHash.Bytes()); err != nil {
 		t.Fatal(err)
 	}
 	c := f.open()
-	if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != pending.Hash() || len(f.client.calls) != 0 {
-		t.Fatal("local recovery changed pending delivery or made cluster RPCs", err)
+	if c.RootTip().Hash() != b.Hash() || c.Ready() || len(f.client.calls) != 0 {
+		t.Fatal("local recovery did not select the persisted tip before cluster initialization")
 	}
 	f.client.onPing = func(_ context.Context, block *types.RootBlock) error {
-		if c.Ready() || block.Hash() != a.Hash() || string(block.TrackingData()) != "checkpoint" {
-			t.Fatal("PING did not carry the recovered checkpoint before readiness")
-		}
-		if c.RootTip().Hash() != a.Hash() {
-			t.Fatal("local tip was unavailable before initialization")
+		if c.Ready() || block.Hash() != b.Hash() || string(block.TrackingData()) != "persisted tip" {
+			t.Fatal("PING did not carry the complete persisted tip before readiness")
 		}
 		return nil
 	}
-	f.client.onBroadcast = func(_ context.Context, block *types.RootBlock) error {
-		if len(f.client.calls) != 2 || f.client.calls[0] != "ping" || block.Hash() != pending.Hash() || c.Ready() {
-			t.Fatal("pending replay ran out of order or published readiness early")
-		}
-		if header, err := c.GetRootHeader(block.ParentHash()); err != nil || header == nil {
-			t.Fatal("root reader callback failed", err)
-		}
-		return nil
+	if err := c.Init(context.Background()); err != nil || !c.Ready() || c.RootTip().Hash() != b.Hash() {
+		t.Fatal("initialization at persisted tip failed", err)
 	}
-	if err := c.Init(context.Background()); err != nil || !c.Ready() || c.RootTip().Hash() != a.Hash() {
-		t.Fatal("startup replay failed", err)
+	if len(f.client.calls) != 1 || f.client.calls[0] != "ping" || len(f.client.broadcasts) != 0 {
+		t.Fatal("startup must only initialize shards with PING at the persisted tip")
 	}
-	if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != (common.Hash{}) {
-		t.Fatal("startup left pending delivery", err)
+	if data, err := f.db.Get(legacyKey); err != nil || common.BytesToHash(data) != legacyHash {
+		t.Fatal("startup modified the unused legacy marker", err)
 	}
-	if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != pending.Hash() {
+	if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != b.Hash() {
 		t.Fatal("startup changed the persisted head", err)
 	}
 }
 
-// RPC and marker failures keep the chain unready and retain pending delivery.
-func TestRootInitFailureRetainsPendingDelivery(t *testing.T) {
-	for _, stage := range []string{"ping", "broadcast", "clear marker", "read marker", "missing block", "cancel before init", "cancel ping", "cancel broadcast"} {
+// PING failures and cancellation keep the chain unready without changing its tip.
+func TestRootInitFailure(t *testing.T) {
+	for _, stage := range []string{"ping", "cancel before init", "cancel ping"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newRootEnv(t)
-			pending := f.block(f.genesis, 1)
-			if stage != "missing block" {
-				f.store(pending, false)
-			}
-			if err := qkcrawdb.WriteRootCommittingHash(f.db, pending.Hash()); err != nil {
-				t.Fatal(err)
-			}
 			failure := errors.New("startup failed")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			switch stage {
 			case "ping":
 				f.client.pingErr = failure
-			case "broadcast":
-				f.client.broadcastErr = failure
-			case "clear marker":
-				f.db.deleteErr = failure
-			case "read marker":
-				f.client.onPing = func(context.Context, *types.RootBlock) error {
-					f.db.readErr = failure
-					return nil
-				}
-			case "missing block":
-				failure = ErrRootDataMissing
-				f.chain = f.open()
-				if len(f.client.calls) != 0 {
-					t.Fatal("local recovery made cluster RPCs")
-				}
 			case "cancel before init":
 				failure = context.Canceled
 				cancel()
 			case "cancel ping":
 				failure = context.Canceled
 				f.client.onPing = func(ctx context.Context, _ *types.RootBlock) error { cancel(); return ctx.Err() }
-			case "cancel broadcast":
-				failure = context.Canceled
-				f.client.onBroadcast = func(ctx context.Context, _ *types.RootBlock) error { cancel(); return ctx.Err() }
 			}
 			if err := f.chain.Init(ctx); !errors.Is(err, failure) || f.chain.Ready() {
 				t.Fatal("failed startup lost the error or published readiness", err)
 			}
-			if stage != "broadcast" && stage != "clear marker" && stage != "cancel broadcast" && len(f.client.broadcasts) != 0 {
-				t.Fatal("pending replay ran after an earlier failure")
+			if f.chain.RootTip().Hash() != f.genesis.Hash() || len(f.client.broadcasts) != 0 {
+				t.Fatal("failed startup changed the tip or broadcast a block")
 			}
-			// Inspect persisted state without the injected read failure.
-			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db.Database); err != nil || hash != pending.Hash() {
-				t.Fatal("failure lost pending delivery", err)
+			if stage == "cancel before init" && len(f.client.calls) != 0 {
+				t.Fatal("canceled startup made cluster RPCs")
 			}
 		})
 	}
@@ -530,27 +478,11 @@ func TestRootCloseWaitsForInit(t *testing.T) {
 }
 
 func TestRootInitFinalizesSuccessfulRPCDespiteCancellation(t *testing.T) {
-	for _, replay := range []bool{false, true} {
-		t.Run(fmt.Sprintf("replay=%t", replay), func(t *testing.T) {
-			f := newRootEnv(t)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if replay {
-				pending := f.block(f.genesis, 1)
-				f.store(pending, false)
-				if err := qkcrawdb.WriteRootCommittingHash(f.db, pending.Hash()); err != nil {
-					t.Fatal(err)
-				}
-				f.client.onBroadcast = func(context.Context, *types.RootBlock) error { cancel(); return nil }
-			} else {
-				f.client.onPing = func(context.Context, *types.RootBlock) error { cancel(); return nil }
-			}
-			if err := f.chain.Init(ctx); err != nil || !f.chain.Ready() {
-				t.Fatal("successful startup did not finish local finalization", err)
-			}
-			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != (common.Hash{}) {
-				t.Fatal("successful startup left pending delivery", err)
-			}
-		})
+	f := newRootEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.client.onPing = func(context.Context, *types.RootBlock) error { cancel(); return nil }
+	if err := f.chain.Init(ctx); err != nil || !f.chain.Ready() {
+		t.Fatal("successful startup did not publish readiness", err)
 	}
 }

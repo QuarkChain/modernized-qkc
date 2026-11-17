@@ -114,9 +114,6 @@ func TestRootChainStorage(t *testing.T) {
 	if err := WriteRootHeadBlockHash(batch, hash); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteRootCommittingHash(batch, hash); err != nil {
-		t.Fatal(err)
-	}
 	if stored := ReadRootBlock(db, hash); stored != nil {
 		t.Fatalf("uncommitted block visible: %v", stored)
 	}
@@ -129,13 +126,8 @@ func TestRootChainStorage(t *testing.T) {
 	if header := ReadRootBlockHeader(db, hash); header == nil || header.Hash() != hash {
 		t.Fatalf("header round trip: %v", header)
 	}
-	for _, read := range []func() (common.Hash, error){
-		func() (common.Hash, error) { return ReadRootHeadBlockHash(db) },
-		func() (common.Hash, error) { return ReadRootCommittingHash(db) },
-	} {
-		if got, err := read(); err != nil || got != hash {
-			t.Fatalf("hash round trip: have %x, want %x, error %v", got, hash, err)
-		}
+	if got, err := ReadRootHeadBlockHash(db); err != nil || got != hash {
+		t.Fatalf("head hash round trip: have %x, want %x, error %v", got, hash, err)
 	}
 	if got := ReadRootCanonicalHash(db, 1); got != hash {
 		t.Fatalf("canonical hash round trip: have %x, want %x", got, hash)
@@ -147,12 +139,6 @@ func TestRootChainStorage(t *testing.T) {
 	delete(got, "10001")
 	if again, err := ReadRootConfirmedShardBlocks(db, hash); err != nil || !reflect.DeepEqual(again, confirmed) {
 		t.Fatal("confirmation reads failed or share mutable data", err)
-	}
-	if err := DeleteRootCommittingHash(db); err != nil {
-		t.Fatal(err)
-	}
-	if hash, err := ReadRootCommittingHash(db); err != nil || hash != (common.Hash{}) {
-		t.Fatal("pending delivery was not cleared", err)
 	}
 }
 
@@ -183,21 +169,6 @@ func TestRootChainStorageReadFailure(t *testing.T) {
 	}
 }
 
-type recoveryHashReader struct {
-	exists bool
-	hasErr error
-	data   []byte
-	getErr error
-}
-
-func (db recoveryHashReader) Has([]byte) (bool, error) { return db.exists, db.hasErr }
-func (db recoveryHashReader) Get([]byte) ([]byte, error) {
-	if !db.exists || db.hasErr != nil {
-		panic("Get called after absence or Has failure")
-	}
-	return db.data, db.getErr
-}
-
 func TestRootHeadBlockHashReadErrors(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	t.Cleanup(func() { db.Close() })
@@ -208,32 +179,6 @@ func TestRootHeadBlockHashReadErrors(t *testing.T) {
 	reader := rootReadFailure{Database: db, err: failure}
 	if hash, err := ReadRootHeadBlockHash(reader); hash != (common.Hash{}) || !errors.Is(err, failure) {
 		t.Fatalf("head read error lost: hash %x, error %v", hash, err)
-	}
-}
-
-func TestRootCommittingHashReads(t *testing.T) {
-	failure := errors.New("database read failed")
-	hash := common.Hash{1}
-	for _, test := range []struct {
-		name    string
-		db      recoveryHashReader
-		want    common.Hash
-		wantErr bool
-	}{
-		{"absent", recoveryHashReader{}, common.Hash{}, false},
-		{"stored", recoveryHashReader{exists: true, data: hash.Bytes()}, hash, false},
-		{"has failure", recoveryHashReader{hasErr: failure}, common.Hash{}, true},
-		{"get failure", recoveryHashReader{exists: true, getErr: failure}, common.Hash{}, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := ReadRootCommittingHash(test.db)
-			if got != test.want || (err != nil) != test.wantErr {
-				t.Fatalf("have %x, %v; want %x, error %v", got, err, test.want, test.wantErr)
-			}
-			if (test.db.hasErr != nil || test.db.getErr != nil) && !errors.Is(err, failure) {
-				t.Fatal("read error cause lost", err)
-			}
-		})
 	}
 }
 
@@ -379,8 +324,6 @@ func TestRootChainWriteErrors(t *testing.T) {
 		write func() error
 	}{
 		{"root head", func() error { return WriteRootHeadBlockHash(db, hash) }},
-		{"committing root", func() error { return WriteRootCommittingHash(db, hash) }},
-		{"clear committing root", func() error { return DeleteRootCommittingHash(db) }},
 		{"canonical root", func() error { return WriteRootCanonicalHash(db, hash, 1) }},
 		{"root confirmations", func() error { return WriteRootConfirmedShardBlocks(db, hash, map[string]common.Hash{"10001": hash}) }},
 	} {

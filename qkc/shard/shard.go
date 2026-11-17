@@ -65,14 +65,11 @@ func New(chain *ShardChain, client ClusterClient) (*Shard, error) {
 	return &Shard{chain: chain, clusterClient: client}, nil
 }
 
-// Init uses the checkpoint received from master to set the root tip and restore
-// the shard head to its last confirmed block. Root-chain recovery is responsible
-// for selecting the checkpoint before calling Init. On restart, pyquarkchain's
-// RootDb.__recover_from_db selects the parent of the persisted non-genesis root
-// tip, since the latest root may not have reached every shard.
+// Init restores shard state from the master's persisted root tip.
+// TODO(recovery): If the supplied root block is absent locally, restore its local
+// direct parent, then import the supplied root block. ShardChain.Init currently
+// requires non-genesis roots and their confirmations to already be stored locally.
 func (s *Shard) Init(root *qkctypes.RootBlock) error {
-	// TODO: Implement the one-block rewind in RootChain restart recovery and
-	// have master pass the recovered checkpoint here. This is RootChain's work.
 	return s.chain.Init(root)
 }
 

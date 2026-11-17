@@ -98,31 +98,6 @@ func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
 	return db.Put(rootHeadBlockKey, hash.Bytes())
 }
 
-// ReadRootCommittingHash retrieves the root whose shard delivery is incomplete.
-// An absent marker returns the zero hash without an error.
-// Read failures must remain errors: treating them as absence would let recovery
-// skip pending delivery. An unavailable block instead stops recovery with the
-// marker retained, so ordinary block lookups can keep geth's nil convention.
-func ReadRootCommittingHash(db ethdb.KeyValueReader) (common.Hash, error) {
-	// Get uses backend-specific not-found errors.
-	exists, err := db.Has(rootCommittingKey)
-	if err != nil || !exists {
-		return common.Hash{}, err
-	}
-	data, err := db.Get(rootCommittingKey)
-	return common.BytesToHash(data), err
-}
-
-// WriteRootCommittingHash stores the root awaiting shard delivery.
-func WriteRootCommittingHash(db ethdb.KeyValueWriter, hash common.Hash) error {
-	return db.Put(rootCommittingKey, hash.Bytes())
-}
-
-// DeleteRootCommittingHash clears the root awaiting shard delivery.
-func DeleteRootCommittingHash(db ethdb.KeyValueWriter) error {
-	return db.Delete(rootCommittingKey)
-}
-
 // ReadRootCanonicalHash retrieves the hash assigned to a canonical root height.
 // Like core/rawdb.ReadCanonicalHash, it does not expose Get errors. A zero hash
 // therefore does not distinguish an absent index from a failed read.
