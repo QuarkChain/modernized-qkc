@@ -55,7 +55,7 @@ const (
 
 // Service owns master-to-slave connections, not root-chain or mining resources.
 // Assembly is NewService -> master.New(client=Service) -> Start(master).
-// Start launches cluster initialization; WaitUntilReady waits for identity
+// Start launches cluster initialization; WaitForInitialization waits for identity
 // checks, slave interconnection, and shard initialization. The owner then recovers
 // unfinished root broadcasts before starting normal business activity. Startup is attempted once;
 // failures request node shutdown; the owner calls Stop to drain connections.
@@ -101,11 +101,11 @@ func (s *Service) Start(backend MasterBackend) error {
 	s.backend, s.state = backend, ServiceStateStarting
 	go func() {
 		err := s.initCluster()
-		close(s.initDone)
 		if err != nil {
-			s.cfg.Logger.Debug("Cluster initialization failed", "err", err)
+			s.cfg.Logger.Error("Cluster initialization failed", "err", err)
 			s.shutdown()
 		}
+		close(s.initDone)
 	}()
 	return nil
 }
@@ -148,9 +148,10 @@ func (s *Service) shutdown() {
 	})
 }
 
-// WaitUntilReady returns a channel closed when initialization finishes.
+// WaitForInitialization returns a channel closed when initialization finishes,
+// whether it succeeds, fails, or is stopped.
 // Call it only after Start succeeds, then use IsActive to check readiness.
-func (s *Service) WaitUntilReady() <-chan struct{} { return s.initDone }
+func (s *Service) WaitForInitialization() <-chan struct{} { return s.initDone }
 
 // IsActive reports whether initialization succeeded and Stop has not begun.
 // It does not check connection health; Shutdown asks the owner to call Stop.
@@ -222,7 +223,7 @@ func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 		if err == nil {
 			break
 		}
-		s.cfg.Logger.Warn("Failed to connect to slave, retrying", "chain", info.ChainID, "addr", addr, "err", err)
+		s.cfg.Logger.Debug("Failed to connect to slave, retrying", "chain", info.ChainID, "addr", addr, "err", err)
 		time.Sleep(slaveConnectRetryDelay)
 	}
 	sc, err := NewSlaveConn(SlaveConnConfig{Conn: nc, RemoteChainID: info.ChainID, MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s, Logger: s.cfg.Logger})

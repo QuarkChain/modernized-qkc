@@ -53,7 +53,7 @@ func waitForService(t *testing.T, s *Service) error {
 	t.Helper()
 	ctx := slaveTestContext(t)
 	select {
-	case <-s.WaitUntilReady():
+	case <-s.WaitForInitialization():
 		if !s.IsActive() {
 			return errors.New("master service is not active")
 		}
@@ -516,7 +516,7 @@ func TestServiceStartupTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-s.WaitUntilReady():
+	case <-s.WaitForInitialization():
 		if s.IsActive() {
 			t.Fatal("unresponsive slave became active")
 		}
@@ -663,7 +663,7 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 		Shutdown:           func() { calls.Add(1) },
 	})
 	select {
-	case <-s.WaitUntilReady():
+	case <-s.WaitForInitialization():
 		t.Fatal("unstarted service reported ready")
 	default:
 	}
