@@ -116,13 +116,13 @@ func (s *Service) Start(backend MasterBackend) error {
 func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
-		if s.state == ServiceStateCreated {
-			close(s.initDone) // no initialization task will run
-		}
+		state := s.state
 		s.state = ServiceStateStopped
 		s.mu.Unlock()
 
-		<-s.initDone
+		if state != ServiceStateCreated {
+			<-s.initDone
+		}
 		conns := s.connections()
 		for _, sc := range conns {
 			sc.Close()
@@ -134,8 +134,22 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-// WaitUntilReady returns a channel closed when initialization finishes or the
-// service is stopped before Start. Use IsActive to check whether it is ready.
+// shutdown reports passive failure once. Stop marks the service as stopped
+// before closing connections, so active shutdown is not reported.
+func (s *Service) shutdown() {
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		stopped := s.state == ServiceStateStopped
+		s.mu.Unlock()
+		if stopped {
+			return
+		}
+		s.cfg.Shutdown()
+	})
+}
+
+// WaitUntilReady returns a channel closed when initialization finishes.
+// Call it only after Start succeeds, then use IsActive to check readiness.
 func (s *Service) WaitUntilReady() <-chan struct{} { return s.initDone }
 
 // IsActive reports whether initialization succeeded and the service is running.
@@ -148,19 +162,29 @@ func (s *Service) IsActive() bool {
 // -- Private initialization and connection helpers ----------------------------
 
 func (s *Service) initCluster() error {
-	if err := s.connectSlaves(); err != nil {
+	// 1. Connect to slaves and send identity PINGs concurrently.
+	err := s.connectSlaves()
+	if s.isStopped() {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	// All slaves must see their master before any xshard dial. Each topology
-	// response is awaited before the next slave is asked to dial, as in Python.
+
+	// 2. Ask slaves to interconnect, waiting for each response before the next command.
 	for _, sc := range s.conns {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.StartupTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
 		err := sc.SendConnectToSlaves(ctx, s.cfg.SlaveInfos)
 		cancel()
+		if s.isStopped() {
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("interconnect slave %s: %w", sc.RemoteChainID(), err)
 		}
 	}
+
+	// 3. Send PINGs with the root tip concurrently to initialize all shard chains.
 	root, err := s.backend.RootTip()
 	if err != nil {
 		return fmt.Errorf("get root checkpoint: %w", err)
@@ -181,16 +205,26 @@ func (s *Service) initCluster() error {
 		}()
 	}
 	wg.Wait()
+	if s.isStopped() {
+		return nil
+	}
 	if err := errors.Join(errs...); err != nil {
 		return err
 	}
+
+	// 4. update state
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != ServiceStateStarting {
-		return errors.New("master service stopped during initialization")
+	if s.state == ServiceStateStarting {
+		s.state = ServiceStateActive
 	}
-	s.state = ServiceStateActive
 	return nil
+}
+
+func (s *Service) isStopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state == ServiceStateStopped
 }
 
 func (s *Service) connectSlaves() error {
@@ -207,13 +241,6 @@ func (s *Service) connectSlaves() error {
 	return errors.Join(errs...)
 }
 
-// pingSlave bounds both identity verification and shard initialization RPCs.
-func (s *Service) pingSlave(sc *SlaveConn, root *qkctypes.RootBlock) error {
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.StartupTimeout)
-	defer cancel()
-	return sc.SendPing(ctx, root)
-}
-
 func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 	addr := net.JoinHostPort(info.Host, strconv.Itoa(int(info.Port)))
 	var nc net.Conn
@@ -222,10 +249,10 @@ func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 		stopped := s.state == ServiceStateStopped
 		s.mu.Unlock()
 		if stopped {
-			return context.Canceled
+			return nil
 		}
 		var err error
-		nc, err = net.DialTimeout("tcp", addr, s.cfg.StartupTimeout)
+		nc, err = net.DialTimeout("tcp", addr, startupNetworkTimeout)
 		if err == nil {
 			break
 		}
@@ -251,6 +278,13 @@ func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 	return nil
 }
 
+// pingSlave bounds both identity verification and shard initialization RPCs.
+func (s *Service) pingSlave(sc *SlaveConn, root *qkctypes.RootBlock) error {
+	ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
+	defer cancel()
+	return sc.SendPing(ctx, root)
+}
+
 func (s *Service) connections() []*SlaveConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -272,20 +306,6 @@ func (s *Service) connection(chainID *big.Int) *SlaveConn {
 		return nil
 	}
 	return s.conns[chainID.String()]
-}
-
-// shutdown reports passive failure once. Stop marks the service as stopped
-// before closing connections, so active shutdown is not reported.
-func (s *Service) shutdown() {
-	s.shutdownOnce.Do(func() {
-		s.mu.Lock()
-		stopped := s.state == ServiceStateStopped
-		s.mu.Unlock()
-		if stopped {
-			return
-		}
-		s.cfg.Shutdown()
-	})
 }
 
 // -- Business calls into communication (master.ClusterClient) -----------------

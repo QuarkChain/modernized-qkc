@@ -136,7 +136,7 @@ func serviceClusterWithIDs(t *testing.T, ids []*big.Int) ([]*slavenet.Service, [
 	n := len(ids)
 	slaves := make([]*slavenet.Service, n)
 	backends := make([]*serviceShard, n)
-	cfg := ServiceConfig{ConfiguredChainIDs: ids, StartupTimeout: 5 * time.Second, Shutdown: noopShutdown}
+	cfg := ServiceConfig{ConfiguredChainIDs: ids, Shutdown: noopShutdown}
 	for i := range slaves {
 		b := &serviceShard{id: int64(i + 1), deposits: make(chan common.Hash, n)}
 		s, err := slavenet.NewService(slavenet.ServiceConfig{ListenAddr: "127.0.0.1:0", LocalChainID: ids[i], ConfiguredChainIDs: ids, Shutdown: noopShutdown})
@@ -277,7 +277,6 @@ func TestServiceConfig(t *testing.T) {
 		func(c *ServiceConfig) { c.SlaveInfos = append(c.SlaveInfos, c.SlaveInfos[0]) },
 		func(c *ServiceConfig) { c.SlaveInfos[0].Host = "" },
 		func(c *ServiceConfig) { c.SlaveInfos[0].Port = 0 },
-		func(c *ServiceConfig) { c.StartupTimeout = -time.Second },
 		func(c *ServiceConfig) { c.MaxPayloadSize = ^uint32(0) },
 	} {
 		cfg := base()
@@ -507,6 +506,7 @@ func TestServiceStopDrainsReports(t *testing.T) {
 }
 
 func TestServiceStartupTimeout(t *testing.T) {
+	t.Parallel()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -519,10 +519,18 @@ func TestServiceStartupTimeout(t *testing.T) {
 			accepted <- nc
 		}
 	}()
-	cfg := ServiceConfig{SlaveInfos: []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, StartupTimeout: 100 * time.Millisecond, Shutdown: noopShutdown}
+	cfg := ServiceConfig{SlaveInfos: []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown}
 	s := newServiceForTest(t, cfg)
-	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err == nil {
-		t.Fatalf("startup timeout: %v", err)
+	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.WaitUntilReady():
+		if s.IsActive() {
+			t.Fatal("unresponsive slave became active")
+		}
+	case <-time.After(startupNetworkTimeout + 5*time.Second):
+		t.Fatal("identity PING did not time out")
 	}
 	select {
 	case nc := <-accepted:
@@ -644,6 +652,7 @@ func TestServiceBroadcastUnavailable(t *testing.T) {
 }
 
 func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
+	t.Parallel()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -661,7 +670,6 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 		SlaveInfos:         []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}},
 		ConfiguredChainIDs: []*big.Int{big.NewInt(1)},
 		Shutdown:           func() { calls.Add(1) },
-		StartupTimeout:     500 * time.Millisecond,
 	})
 	select {
 	case <-s.WaitUntilReady():
@@ -671,7 +679,8 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	// The peer never answers identity PING; Start must return anyway.
 	returned := make(chan error, 1)
 	go func() { returned <- s.Start(&serviceBackend{root: testRoot(1)}) }()
-	ctx := slaveTestContext(t)
+	ctx, cancel := context.WithTimeout(t.Context(), startupNetworkTimeout+5*time.Second)
+	defer cancel()
 	select {
 	case err := <-returned:
 		if err != nil {
@@ -787,7 +796,6 @@ func TestServiceDialRetry(t *testing.T) {
 			cfg := ServiceConfig{
 				SlaveInfos:         []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: big.NewInt(1)}},
 				ConfiguredChainIDs: []*big.Int{big.NewInt(1)},
-				StartupTimeout:     time.Second,
 				Shutdown:           func() { shutdowns.Add(1) },
 				Logger: log.NewLogger(log.JSONHandler(serviceLogWriter(func(p []byte) (int, error) {
 					if strings.Contains(string(p), "Failed to connect to slave, retrying") {

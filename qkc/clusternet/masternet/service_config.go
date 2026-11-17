@@ -30,14 +30,15 @@ import (
 // slaveConnectRetryDelay matches Python master dial retry pacing.
 const slaveConnectRetryDelay = time.Second
 
+// startupNetworkTimeout bounds each startup dial and RPC, not the retry period.
+const startupNetworkTimeout = 20 * time.Second
+
 // ServiceConfig supplies deployment settings for one slave per configured chain.
 type ServiceConfig struct {
 	SlaveInfos         []clusternet.SlaveInfo
 	ConfiguredChainIDs []*big.Int
 	MaxPayloadSize     uint32
-	// StartupTimeout bounds each startup dial or RPC. Zero uses one minute.
-	StartupTimeout time.Duration
-	Logger         log.Logger
+	Logger             log.Logger
 	// Shutdown requests asynchronous node shutdown after an unexpected slave
 	// disconnect or initialization failure. It is called at most once, never
 	// as a result of Stop. It must return promptly. The owner stops Service
@@ -61,12 +62,6 @@ func (cfg *ServiceConfig) validate() error {
 		return err
 	}
 	cfg.MaxPayloadSize = payloadSize
-	if cfg.StartupTimeout < 0 {
-		return errors.New("negative cluster startup timeout")
-	}
-	if cfg.StartupTimeout == 0 {
-		cfg.StartupTimeout = time.Minute
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.Root()
 	}
