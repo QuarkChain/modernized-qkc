@@ -53,8 +53,8 @@ This is a single-block client for a low-difficulty devnet. The client fetches wo
 and submits a valid seal. It prints the work, seal and acceptance, then exits.
 
 Shard 100001 uses `POW_ETHASH`; the optional shard 100002 uses `POW_SIMULATE`.
-Local seal search is disabled. The nodes use the existing mock cluster client:
-R0 stays at height 0, with no R1 production or cross-shard delivery.
+Local seal search is disabled. The driver relays deposits between started shards
+and confirms mined shard blocks with offline roots; the mock cluster client logs calls.
 
 The devnet HTTP configurations enable the existing `miner` namespace. An external
 miner requests work for its coinbase address:
@@ -73,6 +73,62 @@ Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
 ```text
 miner_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
 ```
+
+### Cross-shard transaction test
+
+Run the self-contained two-shard test:
+
+```sh
+go test ./cmd/qkc -run '^TestM1XShardTransfer$' -count=1 -v
+```
+
+It checks a transfer from shard 100001 to 100002, root confirmation, balances and
+fees, and that repeated deposit or root delivery does not credit the recipient twice.
+
+For manual testing, start both shards:
+
+```sh
+build/bin/qkc m1 --config qkc/config/devnet/shard-100001.toml \
+  --config qkc/config/devnet/shard-100002.toml
+```
+
+In another terminal, send 1 QKC from shard A (100001) to an address on shard B
+(100002), using the funded developer test account:
+
+```sh
+XSHARD_A_RPC=http://127.0.0.1:18545
+XSHARD_B_RPC=http://127.0.0.1:18546
+XSHARD_TO=0x00000000000000000000000000000000000000be
+XSHARD_TEST_KEY=0xb71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291
+
+cast balance "$XSHARD_TO" --rpc-url "$XSHARD_B_RPC"
+
+XSHARD_TX=$(cast send 0x000000000000000000000000000000514b430100 \
+  'send(uint256,address,uint256,uint64,bool,bytes)' \
+  100002 "$XSHARD_TO" 1000000000000000000 9000 true 0x \
+  --rpc-url "$XSHARD_A_RPC" --chain 100001 \
+  --private-key "$XSHARD_TEST_KEY" \
+  --legacy --gas-price 2000000000 --gas-limit 120000 \
+  --value 1000018000000000000 --async)
+
+build/bin/qkc mine --rpc "$XSHARD_A_RPC"
+cast receipt "$XSHARD_TX" --rpc-url "$XSHARD_A_RPC"
+```
+
+The `send` value is 1 QKC (`10^18` base units). The call's `--value` also prepays
+destination gas: `10^18 + 9000 * 2000000000 = 1000018000000000000`. Source transaction
+gas is charged separately. `--legacy` fixes the effective gas price at 2 gwei;
+`--async` returns the transaction hash before it is mined.
+
+Wait for `m1` to print `R1 ... confirmed ... after deposit delivery` (on a fresh
+run), then mine on B and check the recipient:
+
+```sh
+build/bin/qkc mine --rpc "$XSHARD_B_RPC"
+cast balance "$XSHARD_TO" --rpc-url "$XSHARD_B_RPC"
+```
+
+The balance increases by `1000000000000000000` base units.
 
 ### Test accounts
 
