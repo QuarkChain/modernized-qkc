@@ -34,6 +34,8 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/shard"
+	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 	"github.com/urfave/cli/v2"
 )
@@ -41,12 +43,13 @@ import (
 func TestM1XShardTransfer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
+	control := &m1RootAPI{ctx: ctx}
 	// Start source shard A (100001) and destination shard B (100002) on a shared R0.
 	var backends []*eth.Ethereum
 	var clients []*ethclient.Client
 	var endpoints []string
 	for _, id := range []int{100001, 100002} {
-		stack, backend, err := startM1Shard(m1TestConfig(t, id))
+		stack, backend, err := startM1Shard(m1TestConfig(t, id), rpc.API{Namespace: "m1", Service: control})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -61,12 +64,33 @@ func TestM1XShardTransfer(t *testing.T) {
 		endpoints = append(endpoints, stack.HTTPEndpoint())
 		t.Logf("Started shard %d: rpc=%s", id, stack.HTTPEndpoint())
 	}
+	var earlyOutput bytes.Buffer
+	earlyApp := &cli.App{Commands: []*cli.Command{m1Command}, Writer: &earlyOutput}
+	if err := earlyApp.RunContext(ctx, []string{"qkc", "m1", "root", "--rpc", endpoints[0]}); err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("root command before R0 initialization: %v", err)
+	}
 	r0, err := initM1Shards(backends)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if idle, err := advanceM1Root(ctx, backends, r0); err != nil || idle.Hash() != r0.Hash() {
-		t.Fatalf("idle driver changed R0: %v", err)
+	control.mu.Lock()
+	control.backends, control.root = backends, r0
+	control.mu.Unlock()
+	advanceRoot := func(endpoint string) *qkctypes.RootBlock {
+		t.Helper()
+		var output bytes.Buffer
+		app := &cli.App{Commands: []*cli.Command{m1Command}, Writer: &output}
+		if err := app.RunContext(ctx, []string{"qkc", "m1", "root", "--rpc", endpoint}); err != nil {
+			t.Fatal(err)
+		}
+		root := qkcrawdb.ReadRootBlock(backends[0].ChainDb(), backends[0].Shard().RootTip())
+		if root == nil || !strings.Contains(output.String(), root.Hash().Hex()) {
+			t.Fatalf("root command did not report the stored root: %s", &output)
+		}
+		return root
+	}
+	if idle := advanceRoot(endpoints[0]); idle.Hash() != r0.Hash() {
+		t.Fatal("idle command changed R0")
 	}
 	t.Logf("Initialized shared R0 %s; idle driver kept the root unchanged", r0.Hash().TerminalString())
 	a, b := backends[0], backends[1]
@@ -160,10 +184,7 @@ func TestM1XShardTransfer(t *testing.T) {
 	}
 	t.Log("Primed B mining work on R0 before confirming A1")
 	// Deliver A1's deposit and confirm A1 in R1; B must wait for B1 to credit it.
-	r1, err := advanceM1Root(ctx, backends, r0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r1 := advanceRoot(endpoints[0])
 	if r1.Number() != 1 || r1.ParentHash() != r0.Hash() || len(r1.ShardBlockHeaders()) != 1 || r1.ShardBlockHeaders()[0].Hash() != a1.Hash() {
 		t.Fatal("R1 does not confirm A1 on R0")
 	}
@@ -245,10 +266,7 @@ func TestM1XShardTransfer(t *testing.T) {
 		t.Logf("Verified B%d %s: root R%d, cursor %+v, transactions %d, xshardGasUsed %d, recipient delta %s wei", height, block.Hash().TerminalString(), root.Number(), extra.Cursor, len(block.Transactions()), extra.XShardGasUsed, delta)
 		if height == 2 {
 			// Confirm B1 and B2 too: their empty lists must reach A before R2.
-			root, err = advanceM1Root(ctx, backends, root)
-			if err != nil {
-				t.Fatal(err)
-			}
+			root = advanceRoot(endpoints[1])
 			if root.Number() != 2 || root.ParentHash() != r1.Hash() || len(root.ShardBlockHeaders()) != 2 {
 				t.Fatal("R2 does not confirm B1 and B2")
 			}
@@ -266,8 +284,8 @@ func TestM1XShardTransfer(t *testing.T) {
 					t.Fatalf("A did not receive B%d's empty deposit list", n)
 				}
 			}
-			if idle, err := advanceM1Root(ctx, backends, root); err != nil || idle.Hash() != root.Hash() {
-				t.Fatalf("idle driver changed R2: %v", err)
+			if idle := advanceRoot(endpoints[0]); idle.Hash() != root.Hash() {
+				t.Fatal("idle command changed R2")
 			}
 			t.Logf("Verified R2 %s: confirmed B1 and B2, delivered both empty deposit lists to A", root.Hash().TerminalString())
 		}

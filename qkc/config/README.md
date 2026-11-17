@@ -53,8 +53,16 @@ This is a single-block client for a low-difficulty devnet. The client fetches wo
 and submits a valid seal. It prints the work, seal and acceptance, then exits.
 
 Shard 100001 uses `POW_ETHASH`; the optional shard 100002 uses `POW_SIMULATE`.
-Local seal search is disabled. The driver relays deposits between started shards
-and confirms mined shard blocks with offline roots; the mock cluster client logs calls.
+Local seal search is disabled. Root confirmation is manual:
+
+```sh
+build/bin/qkc m1 root --rpc http://127.0.0.1:18545
+```
+
+The command relays pending deposits between started shards, confirms their blocks
+with one offline root, and returns the current root tip. With no pending blocks,
+the tip stays unchanged. It accepts the HTTP endpoint of any shard started by the
+same `m1` process. The mock cluster client continues to log calls.
 
 The devnet HTTP configurations enable the existing `miner` namespace. An external
 miner requests work for its coinbase address:
@@ -120,10 +128,10 @@ destination gas: `10^18 + 9000 * 2000000000 = 1000018000000000000`. Source trans
 gas is charged separately. `--legacy` fixes the effective gas price at 2 gwei;
 `--async` returns the transaction hash before it is mined.
 
-Wait for `m1` to print `R1 ... confirmed ... after deposit delivery` (on a fresh
-run), then mine on B and check the recipient:
+Explicitly confirm A1 in R1 (on a fresh run), then mine on B and check the recipient:
 
 ```sh
+build/bin/qkc m1 root --rpc "$XSHARD_A_RPC"
 build/bin/qkc mine --rpc "$XSHARD_B_RPC"
 cast balance "$XSHARD_TO" --rpc-url "$XSHARD_B_RPC"
 ```
