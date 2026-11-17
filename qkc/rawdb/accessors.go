@@ -36,12 +36,16 @@ func HasRootBlock(db ethdb.KeyValueReader, hash common.Hash) bool {
 }
 
 // ReadRootBlockSSZ retrieves a root block in its raw SSZ database encoding.
+// Like core/rawdb.ReadHeaderRLP, this low-level accessor does not expose Get
+// errors. Empty data alone therefore does not prove that the record is absent.
 func ReadRootBlockSSZ(db ethdb.KeyValueReader, hash common.Hash) []byte {
 	data, _ := db.Get(rootBlockKey(hash))
 	return data
 }
 
 // ReadRootBlock retrieves the root block corresponding to the hash.
+// It follows core/rawdb.ReadHeader's convention: invalid encodings are logged
+// and return nil. Nil means no usable block, not necessarily an absent record.
 func ReadRootBlock(db ethdb.KeyValueReader, hash common.Hash) *types.RootBlock {
 	data := ReadRootBlockSSZ(db, hash)
 	if len(data) == 0 {
@@ -57,6 +61,8 @@ func ReadRootBlock(db ethdb.KeyValueReader, hash common.Hash) *types.RootBlock {
 
 // ReadRootBlockHeader retrieves the header of the root block corresponding to
 // the hash, without decoding the shard block headers it confirms.
+// Like ReadRootBlock, it returns nil for missing data or invalid encoding and
+// does not expose storage errors; nil is not proof that the record is absent.
 func ReadRootBlockHeader(db ethdb.KeyValueReader, hash common.Hash) *types.RootBlockHeader {
 	data := ReadRootBlockSSZ(db, hash)
 	if len(data) == 0 {
@@ -94,6 +100,9 @@ func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
 
 // ReadRootCommittingHash retrieves the root whose shard delivery is incomplete.
 // An absent marker returns the zero hash without an error.
+// Read failures must remain errors: treating them as absence would let recovery
+// skip pending delivery. An unavailable block instead stops recovery with the
+// marker retained, so ordinary block lookups can keep geth's nil convention.
 func ReadRootCommittingHash(db ethdb.KeyValueReader) (common.Hash, error) {
 	// Get uses backend-specific not-found errors.
 	exists, err := db.Has(rootCommittingKey)
@@ -115,6 +124,8 @@ func DeleteRootCommittingHash(db ethdb.KeyValueWriter) error {
 }
 
 // ReadRootCanonicalHash retrieves the hash assigned to a canonical root height.
+// Like core/rawdb.ReadCanonicalHash, it does not expose Get errors. A zero hash
+// therefore does not distinguish an absent index from a failed read.
 func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint32) common.Hash {
 	data, _ := db.Get(rootCanonicalKey(number))
 	return common.BytesToHash(data)

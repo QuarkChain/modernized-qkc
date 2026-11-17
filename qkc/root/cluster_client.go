@@ -33,8 +33,8 @@ import (
 type ClusterClient interface {
 	// Ping sends the checkpoint in PING to every configured shard host and waits
 	// for initialization to finish. Missing connections and RPC failures return
-	// errors. Like Python SlaveServer.create_shards, receivers skip shards that
-	// are already initialized, so startup can retry after partial success.
+	// errors. Receivers may already be initialized after partial success, so the
+	// caller must abort startup instead of repeating PING.
 	Ping(ctx context.Context, checkpoint *qkctypes.RootBlock) error
 
 	// BroadcastRootBlock sends block to every ShardNode in the cluster and waits
@@ -42,7 +42,7 @@ type ClusterClient interface {
 	// (returned as *clusternet.RemoteError), or a ShardNode without a connection is
 	// returned as an error, so a disconnected chain never silently misses the
 	// root block. If only some hosts acknowledge the block, the caller must
-	// retain it as uncommitted and retry the complete broadcast.
+	// retain it as uncommitted so recovery can replay the complete broadcast.
 	BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock) error
 
 	// GetUnconfirmedHeaderList collects unconfirmed shard headers from the cluster,

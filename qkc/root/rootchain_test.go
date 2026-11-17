@@ -391,7 +391,7 @@ func TestRootInitReplaysPending(t *testing.T) {
 }
 
 // RPC and marker failures keep the chain unready and retain pending delivery.
-func TestRootInitFailureAndRetry(t *testing.T) {
+func TestRootInitFailureRetainsPendingDelivery(t *testing.T) {
 	for _, stage := range []string{"ping", "broadcast", "clear marker", "read marker", "missing block", "cancel before init", "cancel ping", "cancel broadcast"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newRootEnv(t)
@@ -439,20 +439,9 @@ func TestRootInitFailureAndRetry(t *testing.T) {
 			if stage != "broadcast" && stage != "clear marker" && stage != "cancel broadcast" && len(f.client.broadcasts) != 0 {
 				t.Fatal("pending replay ran after an earlier failure")
 			}
-			f.client.pingErr, f.client.broadcastErr, f.client.onPing = nil, nil, nil
-			f.client.onBroadcast = nil
-			f.db.readErr, f.db.deleteErr = nil, nil
-			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != pending.Hash() {
+			// Inspect persisted state without the injected read failure.
+			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db.Database); err != nil || hash != pending.Hash() {
 				t.Fatal("failure lost pending delivery", err)
-			}
-			if stage == "missing block" {
-				f.store(pending, false)
-			}
-			if err := f.chain.Init(context.Background()); err != nil || !f.chain.Ready() || f.chain.RootTip().Hash() != f.genesis.Hash() {
-				t.Fatal("startup retry failed", err)
-			}
-			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != (common.Hash{}) {
-				t.Fatal("retry left pending delivery", err)
 			}
 		})
 	}
