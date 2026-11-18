@@ -77,9 +77,10 @@ func NewRootBlockBuilder(config *params.QuarkChainConfig, chain poswroot.RootCha
 	}, nil
 }
 
-// BuildBlock returns a finalized, unsealed root candidate. The shard lists must
-// refer to the selected parent. When collecting them over RPC, the caller must keep
-// that parent fixed and fully propagated: each shard reads its own current root tip.
+// BuildBlock returns a finalized, unsealed root candidate on the selected parent.
+// Since shards collect headers at their own root tips, the builder skips headers
+// already confirmed by the parent and omits linked lists that do not connect to it.
+// The caller must still ensure the selected headers reference the parent's root branch.
 // Signing, sealing and importing the result belong to the caller.
 func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockArgs) (*qkctypes.RootBlock, error) {
 	if err := ctx.Err(); err != nil {
@@ -136,34 +137,42 @@ func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockA
 	return block, nil
 }
 
-// appendShardHeaders takes a continuous prefix extending this parent's last
-// confirmation. An unreported header or one newer than the root defers its descendants too.
-func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *qkctypes.RootBlock, chainID *big.Int, previousHash common.Hash, headers []*types.Header) error {
-	for index, header := range headers[:min(uint64(len(headers)), builder.maxPerShard)] {
+// appendShardHeaders counts only new headers against the per-shard limit.
+// An unreported header or one newer than the root defers its descendants too.
+func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *qkctypes.RootBlock, chainID *big.Int, confirmed common.Hash, headers []*types.Header) error {
+	if len(headers) == 0 {
+		return nil
+	}
+	if confirmed == (common.Hash{}) {
+		return errors.New("missing shard confirmation at the parent root")
+	}
+	aligned := headers[0] != nil && headers[0].ParentHash == confirmed
+	var previousHash common.Hash
+	var added uint64
+	for index, header := range headers {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if header == nil || header.Number == nil || header.Number.Sign() <= 0 {
+		if header == nil || header.Number == nil || header.Number.Sign() < 0 || (aligned && header.Number.Sign() == 0) {
 			return fmt.Errorf("missing header or invalid height at index %d", index)
 		}
 		if index > 0 && header.Number.Cmp(new(big.Int).Add(headers[index-1].Number, common.Big1)) != 0 {
 			return fmt.Errorf("nonconsecutive shard heights %v and %v", headers[index-1].Number, header.Number)
 		}
-		if header.Time > block.Time() {
+		if aligned && header.Time > block.Time() {
 			break
 		}
 		hash := header.Hash()
-		amount, err := builder.chain.GetShardBlockCoinbaseAmount(hash)
-		if err != nil {
-			return fmt.Errorf("read report for %s: %w", hash, err)
+		if aligned {
+			amount, err := builder.chain.GetShardBlockCoinbaseAmount(hash)
+			if err != nil {
+				return fmt.Errorf("read report for %s: %w", hash, err)
+			}
+			if amount == nil {
+				break
+			}
 		}
-		if amount == nil {
-			break
-		}
-		if previousHash == (common.Hash{}) {
-			return errors.New("missing shard confirmation at the parent root")
-		}
-		if header.ParentHash != previousHash {
+		if index > 0 && header.ParentHash != previousHash {
 			return fmt.Errorf("header %s at height %v does not extend %s", hash, header.Number, previousHash)
 		}
 		extra, err := header.QKCExtra()
@@ -173,8 +182,16 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 		if extra.ChainID.Cmp(chainID) != 0 {
 			return fmt.Errorf("header %s belongs to shard %v", hash, extra.ChainID)
 		}
-		block.AddShardBlockHeader(header)
 		previousHash = hash
+		if !aligned {
+			aligned = hash == confirmed
+			continue
+		}
+		block.AddShardBlockHeader(header)
+		added++
+		if added == builder.maxPerShard {
+			break
+		}
 	}
 	return nil
 }

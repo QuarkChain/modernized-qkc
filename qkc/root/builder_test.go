@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -168,6 +169,55 @@ func TestBuildEmptyRootBlock(t *testing.T) {
 	})
 }
 
+func TestBuildRootBlockAlignsShardConfirmations(t *testing.T) {
+	builder, chain := newTestBuilder(t, nil)
+	headers := chain.shardHeaders(2, 9, 100, 6) // A9 through A14; the parent confirms A10.
+	chain.confirmed["2"] = headers[1].Hash()
+	other := chain.shardHeaders(3, 21, 100, 1)
+	args := RootBlockArgs{Parent: chain.parent, Timestamp: 110, ShardHeaders: map[string][]*types.Header{"3": other}}
+
+	check := func(t *testing.T, candidates, want []*types.Header) {
+		t.Helper()
+		args.ShardHeaders["2"] = candidates
+		block, err := builder.BuildBlock(t.Context(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantHeaders := slices.Concat(want, other)
+		if !slices.EqualFunc(block.ShardBlockHeaders(), wantHeaders, func(got, want *types.Header) bool { return got.Hash() == want.Hash() }) {
+			t.Fatal("root did not include the expected headers from both shards")
+		}
+		if err := builder.engine.VerifyBlock(chain, block); err != nil {
+			t.Fatalf("constructed root failed consensus: %v", err)
+		}
+	}
+	t.Run("cap counts only new headers", func(t *testing.T) {
+		check(t, headers, headers[2:5]) // Include A11, A12, A13; defer A14.
+	})
+	t.Run("all already confirmed", func(t *testing.T) {
+		check(t, headers[:2], nil)
+	})
+	t.Run("same height on another fork", func(t *testing.T) {
+		fork := types.CopyHeader(headers[1])
+		fork.Coinbase = common.Address{99}
+		child := types.CopyHeader(headers[2])
+		child.ParentHash = fork.Hash()
+		chain.reported[fork.Hash()], chain.reported[child.Hash()] = uint256.NewInt(1), uint256.NewInt(1)
+		check(t, []*types.Header{headers[0], fork, child}, nil)
+	})
+	t.Run("unreported header still truncates selection", func(t *testing.T) {
+		delete(chain.reported, headers[3].Hash()) // A12 has not been reported.
+		check(t, []*types.Header{headers[0], headers[1], headers[2], headers[3], nil}, headers[2:3])
+	})
+	t.Run("missing confirmation is an error", func(t *testing.T) {
+		delete(chain.confirmed, "2")
+		args.ShardHeaders["2"] = headers
+		if block, err := builder.BuildBlock(t.Context(), args); block != nil || err == nil {
+			t.Fatalf("missing confirmation: got block %v, error %v", block, err)
+		}
+	})
+}
+
 func TestBuildRootBlockRejectsBrokenLists(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -175,7 +225,6 @@ func TestBuildRootBlockRejectsBrokenLists(t *testing.T) {
 		want   string
 	}{
 		{"height gap", func(headers []*types.Header) { headers[1].Number.Add(headers[1].Number, common.Big1) }, "nonconsecutive"},
-		{"stale checkpoint", func(headers []*types.Header) { headers[0].ParentHash = common.Hash{99} }, "does not extend"},
 		{"broken link", func(headers []*types.Header) { headers[1].ParentHash = common.Hash{99} }, "does not extend"},
 		{"wrong shard", func(headers []*types.Header) { headers[0].Extra = (&types.QKCExtra{ChainID: big.NewInt(3)}).Encode() }, "belongs to shard"},
 		{"nil header", func(headers []*types.Header) { headers[0] = nil }, "index 0"},
