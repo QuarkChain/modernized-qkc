@@ -14,7 +14,7 @@ CoinbaseAddress = "0x2222222222222222222222222222222222222222"
 IPCPath = "qkc-shard-100001.ipc"
 HTTPHost = "127.0.0.1"
 HTTPPort = 18545
-HTTPModules = ["eth", "net", "web3", "miner"]
+HTTPModules = ["eth", "net", "web3", "qkc"]
 
 # External P2P is disabled for the local demo.
 [Node.P2P]

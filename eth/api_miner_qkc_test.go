@@ -17,7 +17,6 @@
 package eth
 
 import (
-	"context"
 	"math/big"
 	"strings"
 	"testing"
@@ -57,7 +56,7 @@ func TestQKCMinerRPC(t *testing.T) {
 		// Keep the chain in memory: Pebble pools workers across databases,
 		// which cannot be shared between separate synctest bubbles.
 		stack, err := node.New(&node.Config{
-			Name: "qkc-miner-test", HTTPHost: "127.0.0.1", HTTPModules: []string{"eth", "miner"},
+			Name: "qkc-miner-test", HTTPHost: "127.0.0.1", HTTPModules: []string{"eth", "qkc"},
 			P2P: p2p.Config{NoDiscovery: true, NoDial: true},
 		})
 		if err != nil {
@@ -74,14 +73,21 @@ func TestQKCMinerRPC(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer client.Close()
+		modules, err := client.SupportedModules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := modules["miner"]; ok {
+			t.Fatal("mining HTTP endpoint exposes miner administration")
+		}
 		coinbase := common.Address{0xaa}
 		var work shard.MiningWork
-		if err := client.Call(&work, "miner_getWork", coinbase); err == nil || !strings.Contains(err.Error(), shard.ErrRootChainUninitialized.Error()) {
+		if err := client.Call(&work, "qkc_getWork", coinbase); err == nil || !strings.Contains(err.Error(), shard.ErrRootChainUninitialized.Error()) {
 			t.Fatalf("work before R0 initialization: %v", err)
 		}
 		initQKCBackend(t, backend)
 		t.Logf("GetWork rejected before initialization; initialized R0=%s", backend.Shard().RootTip().TerminalString())
-		if err := client.Call(&work, "miner_getWork", coinbase); err != nil {
+		if err := client.Call(&work, "qkc_getWork", coinbase); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("Received work: number=%d sealHash=%s difficulty=%s timestamp=%d", work.Number, work.SealHash.TerminalString(), work.Difficulty, work.Time)
@@ -104,7 +110,7 @@ func TestQKCMinerRPC(t *testing.T) {
 			{"insufficient work", types.EncodeNonce(2), common.HexToHash("0x46a5b4261e58fcdbe91389ab08a03b50e369f34c296ac73f1be5179b4159f672"), "invalid Ethash proof of work"},
 		} {
 			var accepted bool
-			err := client.Call(&accepted, "miner_submitWork", sealHash, test.nonce, test.mixHash)
+			err := client.Call(&accepted, "qkc_submitWork", sealHash, test.nonce, test.mixHash)
 			if err == nil || !strings.Contains(err.Error(), test.want) || accepted {
 				t.Fatalf("%s: accepted=%t err=%v", test.name, accepted, err)
 			}
@@ -114,12 +120,12 @@ func TestQKCMinerRPC(t *testing.T) {
 			t.Logf("Rejected %s: nonce=%d error=%v; head remains at genesis", test.name, test.nonce.Uint64(), err)
 		}
 		var retry shard.MiningWork
-		if err := client.Call(&retry, "miner_getWork", coinbase); err != nil || retry.SealHash != sealHash {
+		if err := client.Call(&retry, "qkc_getWork", coinbase); err != nil || retry.SealHash != sealHash {
 			t.Fatalf("invalid submission discarded work: %+v, %v", retry, err)
 		}
 		t.Logf("Resubmitting preserved work with valid seal: sealHash=%s nonce=%d mixHash=%s", retry.SealHash.TerminalString(), nonce.Uint64(), mixHash.TerminalString())
 		var accepted bool
-		if err := client.Call(&accepted, "miner_submitWork", sealHash, nonce, mixHash); err != nil || !accepted {
+		if err := client.Call(&accepted, "qkc_submitWork", sealHash, nonce, mixHash); err != nil || !accepted {
 			t.Fatalf("valid seal rejected: accepted=%t err=%v", accepted, err)
 		}
 		var head *types.Header
@@ -138,11 +144,11 @@ func TestQKCMinerRPC(t *testing.T) {
 			t.Fatal("sealed block and state were not imported")
 		}
 		t.Logf("Imported sealed block and state: number=%s hash=%s coinbase=%s", head.Number, head.Hash().TerminalString(), head.Coinbase)
-		if err := client.Call(&accepted, "miner_submitWork", sealHash, nonce, mixHash); err == nil || !strings.Contains(err.Error(), shard.ErrUnknownWork.Error()) {
+		if err := client.Call(&accepted, "qkc_submitWork", sealHash, nonce, mixHash); err == nil || !strings.Contains(err.Error(), shard.ErrUnknownWork.Error()) {
 			t.Fatalf("imported work accepted again: %v", err)
 		}
 		t.Logf("Rejected replay of imported work: sealHash=%s", sealHash.TerminalString())
-		if err := client.Call(&work, "miner_getWork", coinbase); err != nil || work.Number != 2 || work.SealHash == sealHash {
+		if err := client.Call(&work, "qkc_getWork", coinbase); err != nil || work.Number != 2 || work.SealHash == sealHash {
 			t.Fatalf("work did not advance: %+v, %v", work, err)
 		}
 		t.Logf("Received next work: number=%d sealHash=%s difficulty=%s", work.Number, work.SealHash.TerminalString(), work.Difficulty)
@@ -150,11 +156,17 @@ func TestQKCMinerRPC(t *testing.T) {
 }
 
 func TestMinerRPCRequiresQKC(t *testing.T) {
-	api := NewMinerAPI(&Ethereum{})
-	if _, err := api.GetWork(context.Background(), common.Address{}); err == nil {
-		t.Fatal("non-QKC node served mining work")
+	config := qkcBackendConfig()
+	config.Genesis = core.DeveloperGenesisBlock(config.Genesis.GasLimit, nil)
+	stack := qkcBackendNode(t, "")
+	startQKCBackend(t, stack, &config)
+	client := stack.Attach()
+	defer client.Close()
+	modules, err := client.SupportedModules()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ok, err := api.SubmitWork(common.Hash{}, types.BlockNonce{}, common.Hash{}); err == nil || ok {
-		t.Fatal("non-QKC node accepted mining work")
+	if _, ok := modules["qkc"]; ok {
+		t.Fatal("non-QKC node registered the mining RPC")
 	}
 }

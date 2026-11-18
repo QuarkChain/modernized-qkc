@@ -444,6 +444,9 @@ func makeExtraData(extra []byte) []byte {
 // NOTE, some of these services probably need to be moved to somewhere else.
 func (s *Ethereum) APIs() []rpc.API {
 	apis := ethapi.GetAPIs(s.APIBackend)
+	if s.isQKC() {
+		apis = append(apis, rpc.API{Namespace: "qkc", Service: &qkcMiningAPI{s}})
+	}
 
 	// Append all the local APIs and return
 	return append(apis, []rpc.API{
@@ -473,7 +476,7 @@ func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
 func (s *Ethereum) Miner() *miner.Miner { return s.miner }
 
 // Shard and PoWMiner are owned by Ethereum and called by the cluster service
-// and MinerAPI. Ethereum.Stop must reject new calls and wait for in-flight
+// and the mining RPC. Ethereum.Stop must reject new calls and wait for in-flight
 // ones before closing the chain and database.
 func (s *Ethereum) Shard() *shard.Shard       { return s.shard }
 func (s *Ethereum) PoWMiner() *shard.PoWMiner { return s.powMiner }

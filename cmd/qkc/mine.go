@@ -54,7 +54,7 @@ func runMine(ctx *cli.Context) error {
 	}
 	defer client.Close()
 	var work shard.MiningWork
-	if err := client.CallContext(signalCtx, &work, "miner_getWork", common.HexToAddress(ctx.String("coinbase"))); err != nil {
+	if err := client.CallContext(signalCtx, &work, "qkc_getWork", common.HexToAddress(ctx.String("coinbase"))); err != nil {
 		return fmt.Errorf("get work: %w", err)
 	}
 	if work.Difficulty == nil || work.Difficulty.Sign() <= 0 {
@@ -70,7 +70,7 @@ func runMine(ctx *cli.Context) error {
 	}
 	fmt.Fprintf(ctx.App.Writer, "seal: nonce=%d mixhash=%s\n", nonce.Uint64(), mixHash.TerminalString())
 	var accepted bool
-	if err := client.CallContext(signalCtx, &accepted, "miner_submitWork", work.SealHash, nonce, mixHash); err != nil {
+	if err := client.CallContext(signalCtx, &accepted, "qkc_submitWork", work.SealHash, nonce, mixHash); err != nil {
 		return fmt.Errorf("submit work: %w", err)
 	}
 	if !accepted {

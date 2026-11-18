@@ -56,12 +56,12 @@ Shard 100001 uses `POW_ETHASH`; the optional shard 100002 uses `POW_SIMULATE`.
 Local seal search is disabled. The nodes use the existing mock cluster client:
 R0 stays at height 0, with no R1 production or cross-shard delivery.
 
-The devnet HTTP configurations enable the existing `miner` namespace. An external
+The devnet HTTP configurations enable the `qkc` namespace. An external
 miner requests work for its coinbase address:
 
 ```sh
 curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","method":"miner_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
+  --data '{"jsonrpc":"2.0","method":"qkc_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
 ```
 
 The result contains `SealHash`, `Number`, `Difficulty`, and `Time`. Numeric fields
@@ -71,7 +71,7 @@ the **effective PoSW difficulty** supplied in `Difficulty`.
 Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
 
 ```text
-miner_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
+qkc_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
 ```
 
 ### Test accounts
