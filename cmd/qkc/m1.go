@@ -16,8 +16,9 @@
 
 package main
 
-// Temporary milestone 1 driver: start local shards and initialize an offline R0
-// so external miners can fetch work and submit seals over RPC.
+// MILESTONE 1 TEST ONLY.
+// This driver starts local shards and initializes an offline R0 so external
+// miners can fetch work and submit seals over RPC.
 // TODO(m1): Replace this driver when root-chain and mining control are available.
 
 import (

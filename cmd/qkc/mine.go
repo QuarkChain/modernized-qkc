@@ -16,6 +16,9 @@
 
 package main
 
+// MILESTONE 1 TEST ONLY.
+// This CPU miner fetches, seals, and submits one shard block over RPC.
+
 import (
 	"errors"
 	"fmt"
