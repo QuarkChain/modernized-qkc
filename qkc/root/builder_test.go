@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package master
+package root
 
 import (
 	"context"
@@ -35,7 +35,6 @@ import (
 )
 
 type builderCluster struct {
-	ClusterClient
 	headers map[string][]*types.Header
 	err     error
 }
@@ -70,7 +69,7 @@ func (chain *builderChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint2
 	return chain.reported[hash], chain.reportErr
 }
 
-func newTestBuilder(t *testing.T, cluster ClusterClient) (*RootBlockBuilder, *builderChain) {
+func newTestBuilder(t *testing.T, cluster ShardHeaderSource) (*RootBlockBuilder, *builderChain) {
 	t.Helper()
 	config := params.NewTestQuarkChainConfig(10, 10, 2, 3).QuarkChain
 	config.MaxBlocksPerRootBlock = 3

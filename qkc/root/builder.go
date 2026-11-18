@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package master
+// Package root builds candidates for the QuarkChain root chain.
+package root
 
 import (
 	"context"
@@ -44,18 +45,24 @@ type RootBlockArgs struct {
 	ShardHeaders map[string][]*types.Header
 }
 
+// ShardHeaderSource provides unconfirmed headers in ascending height order per shard.
+// A collection failure must be returned as an error, even if some shards responded.
+type ShardHeaderSource interface {
+	GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*types.Header, error)
+}
+
 // RootBlockBuilder builds candidates using the root chain's consensus engine and shard reports.
 type RootBlockBuilder struct {
 	chain         poswroot.RootChainReader
 	engine        poswroot.RootEngine
-	clusterClient ClusterClient
+	clusterClient ShardHeaderSource
 	chainIDs      []*big.Int
 	maxPerShard   uint64
 }
 
 // NewRootBlockBuilder binds the engine and its network configuration. The cluster
 // client is optional when the caller always supplies ShardHeaders.
-func NewRootBlockBuilder(config *params.QuarkChainConfig, chain poswroot.RootChainReader, engine poswroot.RootEngine, clusterClient ClusterClient) (*RootBlockBuilder, error) {
+func NewRootBlockBuilder(config *params.QuarkChainConfig, chain poswroot.RootChainReader, engine poswroot.RootEngine, clusterClient ShardHeaderSource) (*RootBlockBuilder, error) {
 	if err := config.Check(); err != nil {
 		return nil, err
 	}
