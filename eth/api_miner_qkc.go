@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
@@ -30,9 +31,25 @@ type qkcMiningAPI struct {
 	e *Ethereum
 }
 
+// Register the call under the same lock that closes admission before Stop waits.
+func (api *qkcMiningAPI) begin() error {
+	api.e.lock.RLock()
+	defer api.e.lock.RUnlock()
+	if api.e.miningRPCStopped {
+		return node.ErrNodeStopped
+	}
+	api.e.miningRPCs.Add(1)
+	return nil
+}
+
 // GetWork returns a QKC candidate for an external miner. Difficulty is the
 // effective PoSW difficulty; Number selects the Ethash epoch.
 func (api *qkcMiningAPI) GetWork(ctx context.Context, coinbase common.Address) (*shard.MiningWork, error) {
+	if err := api.begin(); err != nil {
+		return nil, err
+	}
+	defer api.e.miningRPCs.Done()
+
 	chainID := api.e.BlockChain().Config().ChainID
 	work, err := api.e.PoWMiner().GetWork(ctx, coinbase)
 	if err != nil {
@@ -45,6 +62,11 @@ func (api *qkcMiningAPI) GetWork(ctx context.Context, coinbase common.Address) (
 // SubmitWork verifies and imports a sealed QKC candidate. Invalid seals return
 // an error and leave the work available for another submission.
 func (api *qkcMiningAPI) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash) (bool, error) {
+	if err := api.begin(); err != nil {
+		return false, err
+	}
+	defer api.e.miningRPCs.Done()
+
 	chainID := api.e.BlockChain().Config().ChainID
 	if err := api.e.PoWMiner().SubmitWork(sealHash, nonce, mixHash); err != nil {
 		return false, err

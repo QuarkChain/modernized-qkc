@@ -17,8 +17,10 @@
 package eth
 
 import (
+	"errors"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -168,5 +170,72 @@ func TestMinerRPCRequiresQKC(t *testing.T) {
 	}
 	if _, ok := modules["qkc"]; ok {
 		t.Fatal("non-QKC node registered the mining RPC")
+	}
+}
+
+type blockedMiningImport struct {
+	shard.MinerBackend
+	entered, release chan struct{}
+}
+
+func (b *blockedMiningImport) InsertMinedBlock(block *types.Block) error {
+	close(b.entered)
+	<-b.release
+	return b.MinerBackend.InsertMinedBlock(block)
+}
+
+func TestMiningRPCShutdown(t *testing.T) {
+	config := qkcBackendConfig()
+	config.Genesis.Config.QuarkChain.ConsensusType = params.ConsensusSimulate
+	stack := qkcBackendNode(t, "")
+	backend := startQKCBackend(t, stack, &config)
+	initQKCBackend(t, backend)
+	imp := &blockedMiningImport{backend.Shard(), make(chan struct{}), make(chan struct{})}
+	release := sync.OnceFunc(func() { close(imp.release) })
+	defer release()
+	backend.powMiner = shard.NewPoWMiner(imp, shard.PoWMinerConfig{})
+	api := &qkcMiningAPI{backend}
+	work, err := api.GetWork(t.Context(), address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := api.SubmitWork(work.SealHash, types.BlockNonce{}, common.Hash{})
+		submitted <- err
+	}()
+	select {
+	case <-imp.entered:
+	case err := <-submitted:
+		t.Fatalf("submission returned before import: %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- stack.Close() }()
+
+	// Bypass the RPC transport to exercise admission while the first call drains.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		_, err := api.GetWork(t.Context(), address)
+		if errors.Is(err, node.ErrNodeStopped) {
+			break
+		}
+		if err != nil || time.Now().After(deadline) {
+			t.Fatalf("getWork during shutdown: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := api.SubmitWork(common.Hash{}, types.BlockNonce{}, common.Hash{}); !errors.Is(err, node.ErrNodeStopped) {
+		t.Fatalf("submitWork during shutdown: %v", err)
+	}
+	select {
+	case err := <-stopped:
+		t.Fatalf("shutdown returned during import: %v", err)
+	default:
+	}
+	release()
+	if err := <-submitted; err != nil {
+		t.Fatalf("in-flight submission: %v", err)
+	}
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
 	}
 }

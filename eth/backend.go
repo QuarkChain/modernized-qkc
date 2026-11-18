@@ -104,6 +104,9 @@ type Ethereum struct {
 	powMiner      *shard.PoWMiner
 	clusterClient shard.ClusterClient
 
+	miningRPCs       sync.WaitGroup
+	miningRPCStopped bool // protected by lock
+
 	handler *handler
 	discmix *enode.FairMix
 	dropper *dropper
@@ -654,6 +657,12 @@ func (s *Ethereum) setupDiscovery() error {
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
+	if s.isQKC() {
+		s.lock.Lock()
+		s.miningRPCStopped = true
+		s.lock.Unlock()
+		s.miningRPCs.Wait()
+	}
 	// TODO(SlaveService): When replacing the QKC mock, update this shutdown order
 	// with the service integration: reject new requests, cancel and wait for
 	// request handlers and mining, then close cluster connections before the
