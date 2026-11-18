@@ -80,6 +80,10 @@ func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Databas
 	if config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing root configuration, cluster client, database or engine")
 	}
+	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
+	// genesis. For an empty database, atomically store genesis, its cumulative shard
+	// confirmations, the canonical index and root head. For an initialized database,
+	// validate genesis without replacing the persisted head.
 	hash, err := rawdb.ReadRootHeadBlockHash(db)
 	if err != nil {
 		return nil, fmt.Errorf("read persisted root head: %w", err)
