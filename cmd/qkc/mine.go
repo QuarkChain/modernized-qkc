@@ -16,6 +16,9 @@
 
 package main
 
+// MILESTONE 1 TEST ONLY.
+// This CPU miner fetches, seals, and submits one shard block over RPC.
+
 import (
 	"errors"
 	"fmt"
@@ -24,7 +27,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswshard"
-	"github.com/ethereum/go-ethereum/qkc/shard"
+	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
 )
@@ -53,24 +56,25 @@ func runMine(ctx *cli.Context) error {
 		return err
 	}
 	defer client.Close()
-	var work shard.MiningWork
-	if err := client.CallContext(signalCtx, &work, "miner_getWork", common.HexToAddress(ctx.String("coinbase"))); err != nil {
+	var work eth.MiningWork
+	if err := client.CallContext(signalCtx, &work, "qkc_getWork", common.HexToAddress(ctx.String("coinbase"))); err != nil {
 		return fmt.Errorf("get work: %w", err)
 	}
-	if work.Difficulty == nil || work.Difficulty.Sign() <= 0 {
+	difficulty := work.Difficulty.ToInt()
+	if difficulty == nil || difficulty.Sign() <= 0 {
 		return errors.New("work has non-positive difficulty")
 	}
-	fmt.Fprintf(ctx.App.Writer, "work: number=%d sealhash=%s difficulty=%s\n", work.Number, work.SealHash.TerminalString(), work.Difficulty)
+	fmt.Fprintf(ctx.App.Writer, "work: number=%d sealhash=%s difficulty=%s\n", work.Number, work.SealHash.TerminalString(), difficulty)
 	// SearchNonce only needs the Ethash cache; mining parameters come from RPC.
 	pow := &posw.PoSW{EthashVerifier: posw.NewEthashVerifier()}
 	defer pow.Close()
-	nonce, mixHash, ok := pow.SearchNonce(signalCtx, work.Number, work.SealHash, work.Difficulty, 0)
+	nonce, mixHash, ok := pow.SearchNonce(signalCtx, uint64(work.Number), work.SealHash, difficulty, 0)
 	if !ok {
 		return signalCtx.Err()
 	}
 	fmt.Fprintf(ctx.App.Writer, "seal: nonce=%d mixhash=%s\n", nonce.Uint64(), mixHash.TerminalString())
 	var accepted bool
-	if err := client.CallContext(signalCtx, &accepted, "miner_submitWork", work.SealHash, nonce, mixHash); err != nil {
+	if err := client.CallContext(signalCtx, &accepted, "qkc_submitWork", work.SealHash, nonce, mixHash); err != nil {
 		return fmt.Errorf("submit work: %w", err)
 	}
 	if !accepted {

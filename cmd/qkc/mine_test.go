@@ -62,13 +62,6 @@ func TestMine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Exercise nonce search at a nontrivial difficulty without changing devnet genesis.
-	data = []byte(strings.Replace(string(data),
-		fmt.Sprintf("Mixhash = %q", common.BigToHash(common.Big1).Hex()),
-		fmt.Sprintf("Mixhash = %q", common.BigToHash(big.NewInt(1024)).Hex()), 1))
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
 	var config struct {
 		Node node.Config
 		Eth  ethconfig.Config

@@ -104,6 +104,9 @@ type Ethereum struct {
 	powMiner      *shard.PoWMiner
 	clusterClient shard.ClusterClient
 
+	miningRPCs       sync.WaitGroup
+	miningRPCStopped bool // protected by lock
+
 	handler *handler
 	discmix *enode.FairMix
 	dropper *dropper
@@ -444,6 +447,9 @@ func makeExtraData(extra []byte) []byte {
 // NOTE, some of these services probably need to be moved to somewhere else.
 func (s *Ethereum) APIs() []rpc.API {
 	apis := ethapi.GetAPIs(s.APIBackend)
+	if s.isQKC() {
+		apis = append(apis, rpc.API{Namespace: "qkc", Service: &qkcMiningAPI{s}})
+	}
 
 	// Append all the local APIs and return
 	return append(apis, []rpc.API{
@@ -473,7 +479,7 @@ func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
 func (s *Ethereum) Miner() *miner.Miner { return s.miner }
 
 // Shard and PoWMiner are owned by Ethereum and called by the cluster service
-// and MinerAPI. Ethereum.Stop must reject new calls and wait for in-flight
+// and the mining RPC. Ethereum.Stop must reject new calls and wait for in-flight
 // ones before closing the chain and database.
 func (s *Ethereum) Shard() *shard.Shard       { return s.shard }
 func (s *Ethereum) PoWMiner() *shard.PoWMiner { return s.powMiner }
@@ -651,6 +657,12 @@ func (s *Ethereum) setupDiscovery() error {
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
+	if s.isQKC() {
+		s.lock.Lock()
+		s.miningRPCStopped = true
+		s.lock.Unlock()
+		s.miningRPCs.Wait()
+	}
 	// TODO(SlaveService): When replacing the QKC mock, update this shutdown order
 	// with the service integration: reject new requests, cancel and wait for
 	// request handlers and mining, then close cluster connections before the

@@ -40,7 +40,8 @@ Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
 R0 restores shard heads to genesis.
 
 QKC stores the genesis PoW difficulty in `[Eth.Genesis].Mixhash` as a 32-byte
-hex value. It must be at least `PoSW.MinimumDifficulty`.
+hex value. Shard 100001 sets both the genesis and minimum difficulty to 1024,
+so the adjustment step (`parentDifficulty / 512`) stays at least one.
 
 In a second terminal, run the CPU test client to mine one real Ethash block:
 
@@ -64,22 +65,21 @@ with one offline root, and returns the current root tip. With no pending blocks,
 the tip stays unchanged. It accepts the HTTP endpoint of any shard started by the
 same `m1` process. The mock cluster client continues to log calls.
 
-The devnet HTTP configurations enable the existing `miner` namespace. An external
+The devnet HTTP configurations enable the `qkc` namespace. An external
 miner requests work for its coinbase address:
 
 ```sh
 curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","method":"miner_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
+  --data '{"jsonrpc":"2.0","method":"qkc_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
 ```
 
-The result contains `SealHash`, `Number`, `Difficulty`, and `Time`. Numeric fields
-are decimal JSON numbers; parse `Difficulty` as an arbitrary-precision integer.
-Compute an Ethash seal over `SealHash`, using the epoch selected by `Number` and
-the **effective PoSW difficulty** supplied in `Difficulty`.
+The result contains `sealHash`, `number`, `difficulty`, and `time`. The three numeric
+fields are 0x-prefixed hexadecimal strings. Use the epoch selected by `number`
+and the effective PoSW `difficulty` to compute an Ethash seal over `sealHash`.
 Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
 
 ```text
-miner_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
+qkc_submitWork(["<sealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
 ```
 
 ### Cross-shard transaction test
