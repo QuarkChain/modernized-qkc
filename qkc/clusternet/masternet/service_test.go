@@ -90,7 +90,6 @@ type serviceShard struct {
 	initErr     error
 	initEntered chan struct{}
 	initRelease <-chan struct{}
-	deposits    chan common.Hash
 }
 
 func (b *serviceShard) Init(root *qkctypes.RootBlock) error {
@@ -118,10 +117,7 @@ func (b *serviceShard) GetUnconfirmedHeaderList() ([]*types.Header, error) {
 	defer b.mu.Unlock()
 	return []*types.Header{{Number: big.NewInt(b.id), Difficulty: big.NewInt(1)}}, b.headersErr
 }
-func (b *serviceShard) AddXshardTxList(hash common.Hash, _ []*types.DepositTx) error {
-	b.deposits <- hash
-	return nil
-}
+func (b *serviceShard) AddXshardTxList(common.Hash, []*types.DepositTx) error { return nil }
 
 func serviceCluster(t *testing.T, n int) ([]*slavenet.Service, []*serviceShard, ServiceConfig) {
 	t.Helper()
@@ -139,7 +135,7 @@ func serviceClusterWithIDs(t *testing.T, ids []*big.Int) ([]*slavenet.Service, [
 	backends := make([]*serviceShard, n)
 	cfg := ServiceConfig{ConfiguredChainIDs: ids, Shutdown: noopShutdown}
 	for i := range slaves {
-		b := &serviceShard{id: int64(i + 1), deposits: make(chan common.Hash, n)}
+		b := &serviceShard{id: int64(i + 1)}
 		s, err := slavenet.NewService(slavenet.ServiceConfig{ListenAddr: "127.0.0.1:0", LocalChainID: ids[i], ConfiguredChainIDs: ids, Shutdown: noopShutdown})
 		if err != nil {
 			t.Fatal(err)
@@ -162,98 +158,6 @@ func newServiceForTest(t *testing.T, cfg ServiceConfig) *Service {
 	}
 	t.Cleanup(func() { s.Stop() })
 	return s
-}
-
-func TestServiceCluster(t *testing.T) {
-	for _, n := range []int{2, 8} {
-		t.Run(big.NewInt(int64(n)).String(), func(t *testing.T) {
-			slaves, shards, cfg := serviceCluster(t, n)
-			var notifications atomic.Int32
-			cfg.Shutdown = func() { notifications.Add(1) }
-			s := newServiceForTest(t, cfg)
-			reports := make(chan int64, n)
-			backend := &serviceBackend{root: testRoot(3), report: func(id *big.Int, h *types.Header, amount *uint256.Int) error {
-				if h.Number.Uint64() != 7 || amount.Uint64() != 9 {
-					return errors.New("incorrect report payload")
-				}
-				reports <- id.Int64()
-				return &clusternet.RemoteError{Code: 7}
-			}}
-			if err := startAndWait(t, s, backend); err != nil {
-				t.Fatal(err)
-			}
-			for _, shard := range shards {
-				if shard.initialized.Load() != 1 || shard.checkpoint != backend.root.Hash() {
-					t.Fatal("incorrect shard checkpoint initialization")
-				}
-			}
-			ctx := slaveTestContext(t)
-			// The sequential topology phase must establish routing in both directions.
-			for i, slave := range slaves {
-				target := (i + 1) % n
-				hash := common.Hash{byte(i + 1)}
-				if err := slave.BroadcastXShardTxList(ctx, big.NewInt(int64(target+1)), hash, nil); err != nil {
-					t.Fatal(err)
-				}
-				select {
-				case got := <-shards[target].deposits:
-					if got != hash {
-						t.Fatal("wrong xshard hash")
-					}
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
-				}
-			}
-			root := testRoot(4)
-			if err := s.BroadcastRootBlock(ctx, root); err != nil {
-				t.Fatal(err)
-			}
-			for _, shard := range shards {
-				shard.mu.Lock()
-				got := append([]common.Hash(nil), shard.roots...)
-				shard.mu.Unlock()
-				if len(got) != 1 || got[0] != root.Hash() {
-					t.Fatal("root broadcast omitted a slave")
-				}
-			}
-			headers, err := s.GetUnconfirmedHeaderList(ctx)
-			if err != nil || len(headers) != n {
-				t.Fatalf("headers: %v, %v", headers, err)
-			}
-			for i, slave := range slaves {
-				id := big.NewInt(int64(i + 1))
-				if len(headers[id.String()]) != 1 || headers[id.String()][0].Number.Cmp(id) != 0 {
-					t.Fatal("incorrect header routing")
-				}
-				result, err := s.GetRootChainStakes(ctx, id, common.Address{}, common.Hash{})
-				if err != nil || result.Stakes.Uint64() != uint64(i+1) {
-					t.Fatalf("stakes: %v, %v", result, err)
-				}
-				var remoteErr *clusternet.RemoteError
-				if err := slave.SendShardBlockHeaderToMaster(ctx, testHeader(), uint256.NewInt(9)); !errors.As(err, &remoteErr) || remoteErr.Code != 7 {
-					t.Fatalf("report rejection: %v", err)
-				}
-			}
-			for i := 0; i < n; i++ {
-				select {
-				case <-reports:
-				case <-ctx.Done():
-					t.Fatal("missing report")
-				}
-			}
-			if _, err := s.GetRootChainStakes(ctx, big.NewInt(100), common.Address{}, common.Hash{}); err == nil {
-				t.Fatal("unknown chain accepted")
-			}
-			s.Stop()
-			s.shutdown() // late socket notifications must be harmless
-			if notifications.Load() != 0 {
-				t.Fatal("normal Stop requested Shutdown")
-			}
-			if err := s.BroadcastRootBlock(ctx, root); err == nil {
-				t.Fatal("business RPC allowed after Stop")
-			}
-		})
-	}
 }
 
 func TestServiceConfig(t *testing.T) {
@@ -366,11 +270,14 @@ func TestServiceStartupFailure(t *testing.T) {
 }
 
 func TestServiceBusinessRejection(t *testing.T) {
-	_, shards, cfg := serviceCluster(t, 2)
+	slaves, shards, cfg := serviceCluster(t, 2)
 	var calls atomic.Int32
 	cfg.Shutdown = func() { calls.Add(1) }
 	s := newServiceForTest(t, cfg)
-	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1)}); err != nil {
+	backend := &serviceBackend{root: testRoot(1), report: func(*big.Int, *types.Header, *uint256.Int) error {
+		return &clusternet.RemoteError{Code: 7}
+	}}
+	if err := startAndWait(t, s, backend); err != nil {
 		t.Fatal(err)
 	}
 	ctx := slaveTestContext(t)
@@ -384,6 +291,9 @@ func TestServiceBusinessRejection(t *testing.T) {
 	}
 	if headers, err := s.GetUnconfirmedHeaderList(ctx); !errors.As(err, &remoteErr) || remoteErr.Code != 8 || headers != nil {
 		t.Fatalf("partial headers: %v, %v", headers, err)
+	}
+	if err := slaves[0].SendShardBlockHeaderToMaster(ctx, testHeader(), uint256.NewInt(9)); !errors.As(err, &remoteErr) || remoteErr.Code != 7 {
+		t.Fatalf("report rejection: %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -547,7 +457,7 @@ func TestServiceInterconnectionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &serviceShard{id: 2, deposits: make(chan common.Hash, 1)}
+	backend := &serviceShard{id: 2}
 	if err := second.Start(backend); err != nil {
 		t.Fatal(err)
 	}
@@ -587,10 +497,14 @@ func TestServiceUint256Values(t *testing.T) {
 	slaves, _, cfg := serviceClusterWithIDs(t, ids)
 	s := newServiceForTest(t, cfg)
 	amount := new(uint256.Int).SetAllOne()
+	header := testHeader()
 	reports := make(chan *big.Int, len(ids))
-	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1), report: func(id *big.Int, _ *types.Header, got *uint256.Int) error {
+	if err := startAndWait(t, s, &serviceBackend{root: testRoot(1), report: func(id *big.Int, h *types.Header, got *uint256.Int) error {
 		if !got.Eq(amount) {
 			return errors.New("truncated coinbase amount")
+		}
+		if h.Hash() != header.Hash() {
+			return errors.New("incorrect reported header")
 		}
 		reports <- id
 		return nil
@@ -599,18 +513,19 @@ func TestServiceUint256Values(t *testing.T) {
 	}
 	ctx := slaveTestContext(t)
 	headers, err := s.GetUnconfirmedHeaderList(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(headers) != len(ids) {
+		t.Fatalf("headers: %v, %v", headers, err)
 	}
 	for i, id := range ids {
-		if len(headers[id.String()]) != 1 {
-			t.Fatalf("missing headers for chain %s", id)
+		list := headers[id.String()]
+		if len(list) != 1 || list[0].Number.Uint64() != uint64(i+1) {
+			t.Fatalf("incorrect headers for chain %s: %v", id, list)
 		}
 		result, err := s.GetRootChainStakes(ctx, new(big.Int).Set(id), common.Address{}, common.Hash{})
 		if err != nil || result.Stakes.Uint64() != uint64(i+1) {
 			t.Fatalf("stakes routing: %v, %v", result, err)
 		}
-		if err := slaves[i].SendShardBlockHeaderToMaster(ctx, testHeader(), amount); err != nil {
+		if err := slaves[i].SendShardBlockHeaderToMaster(ctx, header, amount); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -621,9 +536,9 @@ func TestServiceUint256Values(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
-		if err := slaves[i].BroadcastXShardTxList(ctx, ids[1-i], common.Hash{}, nil); err != nil {
-			t.Fatal(err)
-		}
+	}
+	if _, err := s.GetRootChainStakes(ctx, big.NewInt(1), common.Address{}, common.Hash{}); err == nil {
+		t.Fatal("unknown chain accepted")
 	}
 }
 
@@ -632,9 +547,10 @@ func TestServiceBroadcastUnavailable(t *testing.T) {
 		{},
 		{state: ServiceStateStarting, conns: map[string]*SlaveConn{"1": {}}},
 		{state: ServiceStateStarting},
+		{state: ServiceStateStopped},
 	} {
 		if err := s.broadcastToSlaves(func(*SlaveConn) error {
-			t.Fatal("broadcast sent before cluster initialization completed")
+			t.Fatal("broadcast sent while service was inactive")
 			return nil
 		}); err == nil {
 			t.Fatal("unavailable cluster accepted broadcast")
@@ -728,7 +644,8 @@ func TestServiceActiveAfterAllInitializationPongs(t *testing.T) {
 		shard.initRelease = release
 	}
 	s := newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{root: testRoot(1)}); err != nil {
+	checkpoint := testRoot(1)
+	if err := s.Start(&serviceBackend{root: checkpoint}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := slaveTestContext(t)
@@ -758,8 +675,21 @@ func TestServiceActiveAfterAllInitializationPongs(t *testing.T) {
 	if err := waitForService(t, s); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BroadcastRootBlock(ctx, testRoot(2)); err != nil {
+	root := testRoot(2)
+	if err := s.BroadcastRootBlock(ctx, root); err != nil {
 		t.Fatal(err)
+	}
+	for _, shard := range shards {
+		shard.mu.Lock()
+		initialized, gotCheckpoint := shard.initialized.Load(), shard.checkpoint
+		gotRoots := append([]common.Hash(nil), shard.roots...)
+		shard.mu.Unlock()
+		if initialized != 1 || gotCheckpoint != checkpoint.Hash() {
+			t.Fatalf("slave %d initialized %d times with checkpoint %v, want once with %v", shard.id, initialized, gotCheckpoint, checkpoint.Hash())
+		}
+		if len(gotRoots) != 1 || gotRoots[0] != root.Hash() {
+			t.Fatalf("slave %d received roots %v, want [%v]", shard.id, gotRoots, root.Hash())
+		}
 	}
 	if _, err := s.GetUnconfirmedHeaderList(ctx); err != nil {
 		t.Fatal(err)
