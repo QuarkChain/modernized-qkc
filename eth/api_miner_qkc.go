@@ -20,10 +20,10 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
-	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
 // qkcMiningAPI serves external miners on QuarkChain shards.
@@ -42,9 +42,17 @@ func (api *qkcMiningAPI) begin() error {
 	return nil
 }
 
+// MiningWork is the JSON-RPC result of qkc_getWork.
+type MiningWork struct {
+	SealHash   common.Hash    `json:"sealHash"`
+	Number     hexutil.Uint64 `json:"number"`
+	Difficulty *hexutil.Big   `json:"difficulty"`
+	Time       hexutil.Uint64 `json:"time"`
+}
+
 // GetWork returns a QKC candidate for an external miner. Difficulty is the
 // effective PoSW difficulty; Number selects the Ethash epoch.
-func (api *qkcMiningAPI) GetWork(ctx context.Context, coinbase common.Address) (*shard.MiningWork, error) {
+func (api *qkcMiningAPI) GetWork(ctx context.Context, coinbase common.Address) (*MiningWork, error) {
 	if err := api.begin(); err != nil {
 		return nil, err
 	}
@@ -56,7 +64,12 @@ func (api *qkcMiningAPI) GetWork(ctx context.Context, coinbase common.Address) (
 		return nil, err
 	}
 	log.Info("Served shard mining work", "chain", chainID, "coinbase", coinbase, "number", work.Number, "sealhash", work.SealHash, "difficulty", work.Difficulty)
-	return work, nil
+	return &MiningWork{
+		SealHash:   work.SealHash,
+		Number:     hexutil.Uint64(work.Number),
+		Difficulty: (*hexutil.Big)(work.Difficulty),
+		Time:       hexutil.Uint64(work.Time),
+	}, nil
 }
 
 // SubmitWork verifies and imports a sealed QKC candidate. Invalid seals return

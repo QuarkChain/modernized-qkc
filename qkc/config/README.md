@@ -64,14 +64,13 @@ curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"qkc_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
 ```
 
-The result contains `SealHash`, `Number`, `Difficulty`, and `Time`. Numeric fields
-are decimal JSON numbers; parse `Difficulty` as an arbitrary-precision integer.
-Compute an Ethash seal over `SealHash`, using the epoch selected by `Number` and
-the **effective PoSW difficulty** supplied in `Difficulty`.
+The result contains `sealHash`, `number`, `difficulty`, and `time`. The three numeric
+fields are 0x-prefixed hexadecimal strings. Use the epoch selected by `number`
+and the effective PoSW `difficulty` to compute an Ethash seal over `sealHash`.
 Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
 
 ```text
-qkc_submitWork(["<SealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
+qkc_submitWork(["<sealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
 ```
 
 ### Test accounts

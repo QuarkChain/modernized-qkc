@@ -18,6 +18,7 @@ package eth
 
 import (
 	"errors"
+	"maps"
 	"math/big"
 	"strings"
 	"sync"
@@ -83,19 +84,19 @@ func TestQKCMinerRPC(t *testing.T) {
 			t.Fatal("mining HTTP endpoint exposes miner administration")
 		}
 		coinbase := common.Address{0xaa}
-		var work shard.MiningWork
-		if err := client.Call(&work, "qkc_getWork", coinbase); err == nil || !strings.Contains(err.Error(), shard.ErrRootChainUninitialized.Error()) {
+		if err := client.Call(nil, "qkc_getWork", coinbase); err == nil || !strings.Contains(err.Error(), shard.ErrRootChainUninitialized.Error()) {
 			t.Fatalf("work before R0 initialization: %v", err)
 		}
 		initQKCBackend(t, backend)
 		t.Logf("GetWork rejected before initialization; initialized R0=%s", backend.Shard().RootTip().TerminalString())
-		if err := client.Call(&work, "qkc_getWork", coinbase); err != nil {
+		var result map[string]string
+		if err := client.Call(&result, "qkc_getWork", coinbase); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("Received work: number=%d sealHash=%s difficulty=%s timestamp=%d", work.Number, work.SealHash.TerminalString(), work.Difficulty, work.Time)
 		sealHash := common.HexToHash("0x114b8254cd8786627fc377b4c561b99819c20f0346a6f0108f1eb290003430ba")
-		if work.SealHash != sealHash || work.Number != 1 || work.Time != 946684800 || work.Difficulty.Cmp(big.NewInt(2)) != 0 {
-			t.Fatalf("unexpected work vector: %+v", work)
+		want := map[string]string{"sealHash": sealHash.Hex(), "number": "0x1", "difficulty": "0x2", "time": "0x386d4380"}
+		if !maps.Equal(result, want) {
+			t.Fatalf("getWork result: got %v, want %v", result, want)
 		}
 		// Generated with full epoch-0 hashimotoLight from consensus/posw:
 		// nonce 1's result starts 0x7297 (< 2^255); nonce 2's starts
@@ -121,11 +122,11 @@ func TestQKCMinerRPC(t *testing.T) {
 			}
 			t.Logf("Rejected %s: nonce=%d error=%v; head remains at genesis", test.name, test.nonce.Uint64(), err)
 		}
-		var retry shard.MiningWork
-		if err := client.Call(&retry, "qkc_getWork", coinbase); err != nil || retry.SealHash != sealHash {
-			t.Fatalf("invalid submission discarded work: %+v, %v", retry, err)
+		var work MiningWork
+		if err := client.Call(&work, "qkc_getWork", coinbase); err != nil || work.SealHash != sealHash {
+			t.Fatalf("invalid submission discarded work: %+v, %v", work, err)
 		}
-		t.Logf("Resubmitting preserved work with valid seal: sealHash=%s nonce=%d mixHash=%s", retry.SealHash.TerminalString(), nonce.Uint64(), mixHash.TerminalString())
+		t.Logf("Resubmitting preserved work with valid seal: sealHash=%s nonce=%d mixHash=%s", work.SealHash.TerminalString(), nonce.Uint64(), mixHash.TerminalString())
 		var accepted bool
 		if err := client.Call(&accepted, "qkc_submitWork", sealHash, nonce, mixHash); err != nil || !accepted {
 			t.Fatalf("valid seal rejected: accepted=%t err=%v", accepted, err)
