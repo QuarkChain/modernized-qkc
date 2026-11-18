@@ -63,7 +63,7 @@ func (api *qkcMiningAPI) GetWork(ctx context.Context, coinbase common.Address) (
 	if err != nil {
 		return nil, err
 	}
-	log.Info("Served shard mining work", "chain", chainID, "coinbase", coinbase, "number", work.Number, "sealhash", work.SealHash, "difficulty", work.Difficulty)
+	log.Debug("Served shard mining work", "chain", chainID, "coinbase", coinbase, "number", work.Number, "sealhash", work.SealHash, "difficulty", work.Difficulty)
 	return &MiningWork{
 		SealHash:   work.SealHash,
 		Number:     hexutil.Uint64(work.Number),
