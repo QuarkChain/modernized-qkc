@@ -40,7 +40,8 @@ Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
 R0 restores shard heads to genesis.
 
 QKC stores the genesis PoW difficulty in `[Eth.Genesis].Mixhash` as a 32-byte
-hex value. It must be at least `PoSW.MinimumDifficulty`.
+hex value. Shard 100001 sets both the genesis and minimum difficulty to 1024,
+so the adjustment step (`parentDifficulty / 512`) stays at least one.
 
 In a second terminal, run the CPU test client to mine one real Ethash block:
 

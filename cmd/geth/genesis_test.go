@@ -131,7 +131,7 @@ func TestLoadShardGenesisConfig(t *testing.T) {
 		{name: "nonce", from: "Nonce = 0", to: "Nonce = 1", want: "difficulty and nonce must be zero"},
 		{name: "difficulty", from: `Difficulty = "0"`, to: `Difficulty = "1"`, want: "difficulty and nonce must be zero"},
 		{name: "missing difficulty", from: `Difficulty = "0"`, want: "difficulty and nonce must be zero"},
-		{name: "PoW difficulty", from: `MinimumDifficulty = "1"`, to: `MinimumDifficulty = "2"`, want: "below minimum difficulty"},
+		{name: "PoW difficulty", from: `MinimumDifficulty = "1024"`, to: `MinimumDifficulty = "1025"`, want: "below minimum difficulty"},
 		{name: "gas limit", from: "GasLimit = 12000000", to: "GasLimit = 17999", want: "invalid gas limit"},
 		{name: "cross-shard gas", from: "GasLimit = 12000000", to: "GasLimit = 13000000", want: "invalid cross-shard gas limits"},
 		{name: "extra-data", from: extra, to: "ExtraData = [0]", want: "invalid extra-data"},
@@ -311,7 +311,7 @@ func TestShardGenesis(t *testing.T) {
 		eth.getBalance("0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF").eq("1000000000000000000000000")].join(":")`,
 		params.RootStakingContractAddress.Hex(), params.ShardStakingContractAddress.Hex())
 	// Pin the devnet genesis, including its funded test accounts.
-	want := fmt.Sprintf("0x186a1:2:0:0x60735840571556edc1765b4d0e1b97d269557f0c716dbbf4755298daf24aac22:12000000:%d:%d:true:true:true",
+	want := fmt.Sprintf("0x186a1:2:0:0x68ba6477d27f4cd138ed35b9e9078dac8b2f23b36b210442bbb9d5b2ecf01639:12000000:%d:%d:true:true:true",
 		2+len(params.PoSWStakingRuntimeCode)*2, 2+len(params.PoSWStakingRuntimeCode)*2)
 	for _, tc := range []struct {
 		name   string
