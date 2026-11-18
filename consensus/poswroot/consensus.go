@@ -182,9 +182,7 @@ func (p *PoSW) verifyBody(chain RootChainReader, block *qkctypes.RootBlock, pare
 	if amount.Cmp(block.CoinbaseAmount()) != 0 {
 		return errors.New("invalid root coinbase amount")
 	}
-	// Cache only root references verified against this parent, not intermediate
-	// ancestors. The parent itself is already known to be on this branch.
-	verifiedRootHashes := map[common.Hash]bool{parent.Hash(): true}
+	isAncestor := NewRootAncestorCheck(chain, parent)
 	var previous *types.Header
 	var previousHash common.Hash
 	var chainID *big.Int
@@ -233,19 +231,33 @@ func (p *PoSW) verifyBody(chain RootChainReader, block *qkctypes.RootBlock, pare
 		}
 		// The shard block's previous root must be the parent root or one of its ancestors,
 		// never a root on another branch or above the candidate's parent.
-		if !verifiedRootHashes[extra.PrevRootBlock] {
-			sameChain, err := isRootDescendant(chain, parent, extra.PrevRootBlock)
-			if err != nil {
-				return err
-			}
-			if !sameChain {
-				return errors.New("shard previous root is not an ancestor of the parent root")
-			}
-			verifiedRootHashes[extra.PrevRootBlock] = true
+		sameChain, err := isAncestor(extra.PrevRootBlock)
+		if err != nil {
+			return err
+		}
+		if !sameChain {
+			return errors.New("shard previous root is not an ancestor of the parent root")
 		}
 		previousHash, previous = hash, header
 	}
 	return nil
+}
+
+// NewRootAncestorCheck returns a function that checks whether a root hash is the
+// parent or one of its ancestors. It caches checked references for one candidate.
+// Missing root headers and failed reads return an error.
+func NewRootAncestorCheck(chain RootChainReader, parent *qkctypes.RootBlockHeader) func(common.Hash) (bool, error) {
+	checked := map[common.Hash]bool{parent.Hash(): true}
+	return func(hash common.Hash) (bool, error) {
+		if sameChain, ok := checked[hash]; ok {
+			return sameChain, nil
+		}
+		sameChain, err := isRootDescendant(chain, parent, hash)
+		if err == nil {
+			checked[hash] = sameChain
+		}
+		return sameChain, err
+	}
 }
 
 // isRootDescendant checks whether descendant extends, or is, ancestorHash.

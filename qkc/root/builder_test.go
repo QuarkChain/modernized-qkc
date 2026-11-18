@@ -47,6 +47,7 @@ func (cluster *builderCluster) GetUnconfirmedHeaderList(context.Context) (map[st
 type builderChain struct {
 	poswroot.RootChainReader
 	parent    *qkctypes.RootBlockHeader
+	roots     map[common.Hash]*qkctypes.RootBlockHeader
 	confirmed map[string]common.Hash
 	reported  map[common.Hash]*uint256.Int
 	reportErr error
@@ -56,7 +57,7 @@ func (chain *builderChain) GetRootHeader(hash common.Hash) (*qkctypes.RootBlockH
 	if hash == chain.parent.Hash() {
 		return chain.parent, nil
 	}
-	return nil, nil
+	return chain.roots[hash], nil
 }
 
 func (chain *builderChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]common.Hash, error) {
@@ -98,14 +99,18 @@ func newTestBuilder(t *testing.T, cluster ShardHeaderSource) (*RootBlockBuilder,
 	return builder, chain
 }
 
-func (chain *builderChain) shardHeaders(chainID int64, firstHeight int64, firstTime uint64, count int) []*types.Header {
+func (chain *builderChain) shardHeaders(chainID int64, firstHeight int64, firstTime uint64, count int, prevRoots ...common.Hash) []*types.Header {
 	id := big.NewInt(chainID)
 	parentHash := chain.confirmed[id.String()]
 	headers := make([]*types.Header, count)
 	for index := range headers {
+		prevRoot := chain.parent.Hash()
+		if index < len(prevRoots) {
+			prevRoot = prevRoots[index]
+		}
 		header := &types.Header{
 			ParentHash: parentHash, Number: big.NewInt(firstHeight + int64(index)), Time: firstTime + uint64(index),
-			Difficulty: new(big.Int), Extra: (&types.QKCExtra{ChainID: id, PrevRootBlock: chain.parent.Hash()}).Encode(),
+			Difficulty: new(big.Int), Extra: (&types.QKCExtra{ChainID: id, PrevRootBlock: prevRoot}).Encode(),
 		}
 		parentHash = header.Hash()
 		chain.reported[parentHash] = uint256.NewInt(1)
@@ -216,6 +221,40 @@ func TestBuildRootBlockAlignsShardConfirmations(t *testing.T) {
 			t.Fatalf("missing confirmation: got block %v, error %v", block, err)
 		}
 	})
+}
+
+func TestBuildRootBlockFiltersSiblingRoot(t *testing.T) {
+	cluster := new(builderCluster)
+	builder, chain := newTestBuilder(t, cluster)
+	ancestor := &qkctypes.RootBlockHeader{Number: chain.parent.Number - 1, Time: chain.parent.Time - 1}
+	chain.parent.ParentHash = ancestor.Hash()
+	sibling := qkctypes.CopyRootBlockHeader(chain.parent)
+	sibling.Nonce++
+	chain.roots = map[common.Hash]*qkctypes.RootBlockHeader{ancestor.Hash(): ancestor, sibling.Hash(): sibling}
+
+	// Both roots confirm the same shard block. The first new header refers to
+	// their common ancestor, then the shard follows the sibling root. Its next
+	// root is unavailable locally: the builder must stop before looking it up.
+	siblingChild := sibling.CreateBlockToAppend(nil, nil, nil, nil, nil)
+	headers := chain.shardHeaders(2, 11, 100, 3, ancestor.Hash(), sibling.Hash(), siblingChild.Hash())
+	other := chain.shardHeaders(3, 21, 100, 1)
+	cluster.headers = map[string][]*types.Header{"2": headers, "3": other}
+	args := RootBlockArgs{Parent: chain.parent, Timestamp: 105}
+	block, err := builder.BuildBlock(t.Context(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := qkctypes.ShardBlockHeaders{headers[0], other[0]}
+	if block.ShardHeaderHash() != qkctypes.CalcShardHeaderHash(want) {
+		t.Fatal("expected the prefix before the sibling root and the other shard's header")
+	}
+	if err := builder.engine.VerifyBlock(chain, block); err != nil {
+		t.Fatalf("constructed root failed consensus: %v", err)
+	}
+	delete(chain.roots, sibling.Hash())
+	if block, err := builder.BuildBlock(t.Context(), args); block != nil || !errors.Is(err, consensus.ErrUnknownAncestor) {
+		t.Fatalf("missing referenced root: got block %v, error %v", block, err)
+	}
 }
 
 func TestBuildRootBlockRejectsBrokenLists(t *testing.T) {

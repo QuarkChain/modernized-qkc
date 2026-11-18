@@ -80,7 +80,7 @@ func NewRootBlockBuilder(config *params.QuarkChainConfig, chain poswroot.RootCha
 // BuildBlock returns a finalized, unsealed root candidate on the selected parent.
 // Since shards collect headers at their own root tips, the builder skips headers
 // already confirmed by the parent and omits linked lists that do not connect to it.
-// The caller must still ensure the selected headers reference the parent's root branch.
+// Each shard's new headers may reference only the parent root or its ancestors.
 // Signing, sealing and importing the result belong to the caller.
 func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockArgs) (*qkctypes.RootBlock, error) {
 	if err := ctx.Err(); err != nil {
@@ -121,9 +121,10 @@ func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockA
 		return nil, err
 	}
 	block := qkctypes.NewRootBlockWithHeader(header)
+	isAncestor := poswroot.NewRootAncestorCheck(builder.chain, args.Parent)
 	for _, chainID := range builder.chainIDs {
 		key := chainID.String()
-		if err := builder.appendShardHeaders(ctx, block, chainID, confirmed[key], candidates[key]); err != nil {
+		if err := builder.appendShardHeaders(ctx, block, chainID, confirmed[key], candidates[key], isAncestor); err != nil {
 			return nil, fmt.Errorf("shard %s: %w", key, err)
 		}
 	}
@@ -139,7 +140,7 @@ func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockA
 
 // appendShardHeaders counts only new headers against the per-shard limit.
 // An unreported header or one newer than the root defers its descendants too.
-func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *qkctypes.RootBlock, chainID *big.Int, confirmed common.Hash, headers []*types.Header) error {
+func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *qkctypes.RootBlock, chainID *big.Int, confirmed common.Hash, headers []*types.Header, isAncestor func(common.Hash) (bool, error)) error {
 	if len(headers) == 0 {
 		return nil
 	}
@@ -186,6 +187,13 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 		if !aligned {
 			aligned = hash == confirmed
 			continue
+		}
+		sameChain, err := isAncestor(extra.PrevRootBlock)
+		if err != nil {
+			return err
+		}
+		if !sameChain {
+			break
 		}
 		block.AddShardBlockHeader(header)
 		added++
