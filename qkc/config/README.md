@@ -110,7 +110,14 @@ XSHARD_TO=0x00000000000000000000000000000000000000be
 XSHARD_TEST_KEY=0xb71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291
 
 cast balance "$XSHARD_TO" --rpc-url "$XSHARD_B_RPC"
+```
 
+Choose one of the following transaction examples; each sends 1 QKC with the same
+effective gas price and gas costs.
+
+Legacy:
+
+```sh
 XSHARD_TX=$(cast send 0x000000000000000000000000000000514b430100 \
   'send(uint256,address,uint256,uint64,bool,bytes)' \
   100002 "$XSHARD_TO" 1000000000000000000 9000 true 0x \
@@ -127,6 +134,27 @@ The `send` value is 1 QKC (`10^18` base units). The call's `--value` also prepay
 destination gas: `10^18 + 9000 * 2000000000 = 1000018000000000000`. Source transaction
 gas is charged separately. `--legacy` fixes the effective gas price at 2 gwei;
 `--async` returns the transaction hash before it is mined.
+
+EIP-1559 (use instead of the legacy example, with the same variables):
+
+```sh
+XSHARD_TX=$(cast send 0x000000000000000000000000000000514b430100 \
+  'send(uint256,address,uint256,uint64,bool,bytes)' \
+  100002 "$XSHARD_TO" 1000000000000000000 9000 true 0x \
+  --rpc-url "$XSHARD_A_RPC" --chain 100001 \
+  --private-key "$XSHARD_TEST_KEY" \
+  --gas-price 2000000000 --priority-gas-price 2000000000 --gas-limit 120000 \
+  --value 1000018000000000000 --async)
+
+build/bin/qkc mine --rpc "$XSHARD_A_RPC"
+cast receipt "$XSHARD_TX" --rpc-url "$XSHARD_A_RPC"
+```
+
+Here `--gas-price` sets `maxFeePerGas` and `--priority-gas-price` sets
+`maxPriorityFeePerGas`. Both are 2 gwei, so the effective price is
+`min(2 gwei, baseFee + 2 gwei) = 2 gwei` whenever the transaction can be included,
+matching the legacy example. The transfer value, prepaid destination gas, and
+source gas charge are therefore unchanged.
 
 Explicitly confirm A1 in R1 (on a fresh run), then mine on B and check the recipient:
 
