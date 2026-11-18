@@ -16,7 +16,7 @@ HTTPHost = "127.0.0.1"
 HTTPPort = 18546
 HTTPModules = ["eth", "net", "web3", "qkc"]
 
-# External P2P is disabled for the local demo.
+# Disable peer listening, dialing, and discovery. NAT may still query the local gateway.
 [Node.P2P]
 ListenAddr = ""
 DiscAddr = ""
