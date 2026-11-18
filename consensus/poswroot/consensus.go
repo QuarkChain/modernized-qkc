@@ -25,7 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/consensus/posw"
+	posw "github.com/ethereum/go-ethereum/consensus/poswshard"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
