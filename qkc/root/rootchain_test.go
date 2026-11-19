@@ -583,7 +583,7 @@ func TestRootCloseWaitsForWrites(t *testing.T) {
 						t.Fatal(err)
 					}
 					f.client.onBroadcast = holdRPC
-					write = func() error { return f.chain.InsertBlock(context.Background(), block) }
+					write = func() error { return f.chain.InsertBlock(block) }
 				}
 				written := make(chan error, 1)
 				go func() { written <- write() }()
@@ -625,7 +625,7 @@ func TestRootCloseWaitsForWrites(t *testing.T) {
 				if err := f.chain.Init(); !errors.Is(err, errChainStopped) {
 					t.Fatal("closed chain accepted initialization", err)
 				}
-				if err := f.chain.InsertBlock(context.Background(), block); !errors.Is(err, errChainStopped) {
+				if err := f.chain.InsertBlock(block); !errors.Is(err, errChainStopped) {
 					t.Fatal("closed chain accepted insertion", err)
 				}
 			})

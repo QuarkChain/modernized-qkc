@@ -37,6 +37,9 @@ import (
 
 const blockCacheLimit = 4096 // Match pyquarkchain's RootDb block cache.
 
+// Match pyquarkchain's MAX_STALE_ROOT_BLOCK_HEIGHT_DIFF admission limit.
+const maxStaleRootBlockHeightDiff uint32 = 22500
+
 var (
 	ErrRootDataMissing = errors.New("missing root chain data")
 	ErrNotImplemented  = errors.New("root chain: function not implemented")
@@ -221,10 +224,11 @@ func (c *RootChain) Init() error {
 }
 
 // InsertBlock verifies and stores a root block, then delivers it to all shards.
-// Init must complete first. Delivery failures leave the local commit intact,
+// Init must complete first. Insertion and delivery use backendCtx, so cancellation
+// is controlled by the backend. Delivery failures leave the local commit intact,
 // disable Init and insertion, and return an error. The client handles connection
 // failures and requests master shutdown for cluster recovery.
-func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) error {
+func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	if block == nil || block.Number() == 0 {
 		return errors.New("missing or genesis root block")
 	}
@@ -232,14 +236,19 @@ func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) err
 		return errChainStopped
 	}
 	defer c.chainmu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	if c.stopping.Load() {
 		return errChainStopped
 	}
+	if err := c.backendCtx.Err(); err != nil {
+		return err
+	}
 	if !c.initialized.Load() {
 		return errChainNotReady
+	}
+	// Reject stale blocks before loading, verifying or broadcasting them, even
+	// if already stored. Compare heights first to avoid unsigned underflow.
+	if tip := c.tip.Load().Number; tip > block.Number() && tip-block.Number() > maxStaleRootBlockHeightDiff {
+		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip, maxStaleRootBlockHeightDiff)
 	}
 	hash := block.Hash()
 	stored, err := c.GetRootBlock(hash)
@@ -292,10 +301,10 @@ func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) err
 			return fmt.Errorf("store root head: %w", err)
 		}
 	}
-	// Validation and batch preparation may outlive ctx. Check again before
+	// Validation and batch preparation may outlive backendCtx. Check again before
 	// committing so an already canceled import leaves DB and runtime tip unchanged.
 	// Once the batch succeeds, publish the tip without another cancellation check.
-	if err := ctx.Err(); err != nil {
+	if err := c.backendCtx.Err(); err != nil {
 		return err
 	}
 	if err := batch.Write(); err != nil {
@@ -307,7 +316,7 @@ func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) err
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
-	if err := c.client.BroadcastRootBlock(ctx, block); err != nil {
+	if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
 		// The communication layer requests master shutdown on connection failure.
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.

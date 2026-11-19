@@ -89,7 +89,7 @@ func TestRootInsertForkChoiceAndConfirmations(t *testing.T) {
 			}
 			return nil
 		}
-		if err := f.chain.InsertBlock(context.Background(), test.block); err != nil {
+		if err := f.chain.InsertBlock(test.block); err != nil {
 			t.Fatal(err)
 		}
 		if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != test.tip.Hash() {
@@ -121,7 +121,7 @@ func TestRootInsertShorterHeavierBranchAfterRestart(t *testing.T) {
 	parent := f.genesis
 	for seed := byte(1); seed <= 3; seed++ {
 		parent = f.block(parent, seed)
-		if err := f.chain.InsertBlock(context.Background(), parent); err != nil {
+		if err := f.chain.InsertBlock(parent); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -138,14 +138,14 @@ func TestRootInsertShorterHeavierBranchAfterRestart(t *testing.T) {
 	// Failure while staging deletions must leave even the higher persisted index.
 	failure := errors.New("delete index failed")
 	f.db.batchDeleteErr = failure
-	if err := f.chain.InsertBlock(context.Background(), heavy); !errors.Is(err, failure) {
+	if err := f.chain.InsertBlock(heavy); !errors.Is(err, failure) {
 		t.Fatal("index deletion error lost", err)
 	}
 	if hash := qkcrawdb.ReadRootCanonicalHash(f.db, 3); hash != parent.Hash() || qkcrawdb.HasRootBlock(f.db, heavy.Hash()) {
 		t.Fatal("failed reorg partially committed", hash)
 	}
 	f.db.batchDeleteErr = nil
-	if err := f.chain.InsertBlock(context.Background(), heavy); err != nil {
+	if err := f.chain.InsertBlock(heavy); err != nil {
 		t.Fatal(err)
 	}
 	if hash := qkcrawdb.ReadRootCanonicalHash(f.db, 1); hash != heavy.Hash() || f.chain.RootTip().Hash() != heavy.Hash() {
@@ -165,7 +165,7 @@ func TestRootInsertKnownBlockAfterRestartUsesStoredBody(t *testing.T) {
 	f, engine := newInsertEnv(t)
 	block := f.block(f.genesis, 1).WithBody(nil, []byte("stored body"))
 	f.client.broadcastErr = errors.New("delivery interrupted")
-	if err := f.chain.InsertBlock(context.Background(), block); err == nil {
+	if err := f.chain.InsertBlock(block); err == nil {
 		t.Fatal("delivery failure accepted")
 	}
 	f.client.broadcastErr = nil
@@ -185,7 +185,7 @@ func TestRootInsertKnownBlockAfterRestartUsesStoredBody(t *testing.T) {
 	}
 	// Same header hash, unrelated body: the caller's body must be ignored.
 	input := block.WithBody(f.genesis.ShardBlockHeaders(), []byte("untrusted body"))
-	if err := f.chain.InsertBlock(context.Background(), input); err != nil {
+	if err := f.chain.InsertBlock(input); err != nil {
 		t.Fatal(err)
 	}
 	if engine.calls != 1 || f.chain.RootTip().Hash() != block.Hash() {
@@ -198,8 +198,56 @@ func TestRootInsertKnownBlockAfterRestartUsesStoredBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := len(f.client.broadcasts)
-	if err := f.chain.InsertBlock(context.Background(), input); err == nil || len(f.client.broadcasts) != before {
+	if err := f.chain.InsertBlock(input); err == nil || len(f.client.broadcasts) != before {
 		t.Fatal("known block with incomplete confirmations was delivered", err)
+	}
+}
+
+func TestRootInsertStaleHeightLimit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		tip    uint32
+		stored bool
+		reject bool
+	}{
+		{"too old", 22502, false, true},
+		{"known but too old", 22502, true, true},
+		{"at limit", 22501, false, false},
+		{"ahead of tip", 0, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, engine := newInsertEnv(t)
+			block := f.block(f.genesis, 1)
+			if test.stored {
+				f.store(block, false)
+			}
+			if test.tip != 0 {
+				// Only the runtime tip's height affects admission. Keep its TD equal
+				// to the candidate's so accepted side blocks do not change canonicality.
+				tip := f.block(f.genesis, 2).Header()
+				tip.Number = test.tip
+				f.chain.tip.Store(tip)
+			}
+			before := f.chain.RootTip().Hash()
+			err := f.chain.InsertBlock(block)
+			if !test.reject {
+				if err != nil || engine.calls != 1 || len(f.client.broadcasts) != 1 {
+					t.Fatal("admissible block was not verified and delivered", err)
+				}
+				return
+			}
+			if err == nil || engine.calls != 0 || len(f.client.broadcasts) != 0 || !f.chain.Ready() {
+				t.Fatal("stale block was processed or disabled the chain", err)
+			}
+			if f.chain.RootTip().Hash() != before || qkcrawdb.HasRootBlock(f.db, block.Hash()) != test.stored {
+				t.Fatal("rejected stale block changed chain state")
+			}
+			if !test.stored {
+				if _, err := f.chain.GetLastConfirmedShardBlocks(block.Hash()); err == nil {
+					t.Fatal("rejected stale block left confirmations")
+				}
+			}
+		})
 	}
 }
 
@@ -219,7 +267,7 @@ func TestRootInsertLocalFailureAndRetry(t *testing.T) {
 			case "commit":
 				f.db.batchErr = failure
 			}
-			if err := f.chain.InsertBlock(context.Background(), block); !errors.Is(err, failure) {
+			if err := f.chain.InsertBlock(block); !errors.Is(err, failure) {
 				t.Fatal("import error lost", err)
 			}
 			if !f.chain.Ready() {
@@ -238,7 +286,7 @@ func TestRootInsertLocalFailureAndRetry(t *testing.T) {
 			if hash := qkcrawdb.ReadRootCanonicalHash(f.db, 1); hash != (common.Hash{}) {
 				t.Fatal("failed import left a canonical index", hash)
 			}
-			if err := f.chain.InsertBlock(context.Background(), block); err != nil {
+			if err := f.chain.InsertBlock(block); err != nil {
 				t.Fatal("import retry failed", err)
 			}
 		})
@@ -273,7 +321,7 @@ func TestRootInsertRepairsUnavailableBlock(t *testing.T) {
 			case "commit failure":
 				f.db.batchErr = failure
 			}
-			err := f.chain.InsertBlock(context.Background(), block)
+			err := f.chain.InsertBlock(block)
 			if engine.calls != 1 {
 				t.Fatal("unavailable block was not fully reverified")
 			}
@@ -308,7 +356,7 @@ func TestRootInsertRejectsIncompleteParentConfirmations(t *testing.T) {
 	block := f.block(parent, 2)
 	// The candidate omits the missing shard, so body validation alone cannot
 	// establish that its inherited cumulative snapshot is complete.
-	if err := f.chain.InsertBlock(context.Background(), block); err == nil {
+	if err := f.chain.InsertBlock(block); err == nil {
 		t.Fatal("incomplete parent confirmations accepted")
 	}
 	if f.chain.RootTip().Hash() != f.genesis.Hash() || qkcrawdb.HasRootBlock(f.db, block.Hash()) || len(f.client.broadcasts) != 0 {
@@ -322,25 +370,29 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 			f, engine := newInsertEnv(t)
 			block := f.block(f.genesis, 1)
 			failure := errors.New("delivery failed")
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			switch stage {
 			case "broadcast":
 				f.client.broadcastErr = failure
 			case "cancel rpc":
 				failure = context.Canceled
-				f.client.onBroadcast = func(ctx context.Context, _ *types.RootBlock) error { cancel(); return ctx.Err() }
+				f.client.onBroadcast = func(ctx context.Context, _ *types.RootBlock) error { f.cancel(); return ctx.Err() }
 			case "cancel after success":
 				failure = nil
-				f.client.onBroadcast = func(context.Context, *types.RootBlock) error { cancel(); return nil }
+				f.client.onBroadcast = func(context.Context, *types.RootBlock) error { f.cancel(); return nil }
 			}
-			if err := f.chain.InsertBlock(ctx, block); !errors.Is(err, failure) {
+			if err := f.chain.InsertBlock(block); !errors.Is(err, failure) {
 				t.Fatal("wrong delivery result", err)
 			}
 			if f.chain.RootTip().Hash() != block.Hash() || qkcrawdb.ReadRootBlock(f.db, block.Hash()) == nil {
 				t.Fatal("delivery failure lost the local commit")
 			}
 			f.client.broadcastErr, f.client.onBroadcast = nil, nil
+			if stage == "cancel after success" {
+				if !f.chain.initialized.Load() || f.chain.stopping.Load() || f.chain.Ready() {
+					t.Fatal("successful delivery must remain recorded without readiness after backend cancellation")
+				}
+				return
+			}
 			if failure != nil {
 				if !f.chain.initialized.Load() || !f.chain.stopping.Load() || f.chain.Ready() {
 					t.Fatal("delivery failure did not preserve initialization and stop the chain")
@@ -350,7 +402,7 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 					t.Fatal("Init revived a failed chain", err)
 				}
 				for _, input := range []*types.RootBlock{block, f.block(block, 2)} {
-					if err := f.chain.InsertBlock(context.Background(), input); !errors.Is(err, errChainStopped) {
+					if err := f.chain.InsertBlock(input); !errors.Is(err, errChainStopped) {
 						t.Fatal("failed chain accepted an import", err)
 					}
 				}
@@ -358,6 +410,10 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 					t.Fatal("failed chain resumed work")
 				}
 				f.chain.Close()
+				// A backend restart creates a new lifetime context.
+				f.cancel()
+				f.backendCtx, f.cancel = context.WithCancel(context.Background())
+				t.Cleanup(f.cancel)
 				f.chain = f.open()
 				if err := f.chain.Init(); err != nil {
 					t.Fatal("restart failed", err)
@@ -368,7 +424,7 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 			} else if !f.chain.Ready() {
 				t.Fatal("successful delivery disabled the chain")
 			}
-			if err := f.chain.InsertBlock(context.Background(), block); err != nil || engine.calls != 1 {
+			if err := f.chain.InsertBlock(block); err != nil || engine.calls != 1 {
 				t.Fatal("known-block retry failed or reverified", err)
 			}
 		})
@@ -378,24 +434,23 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 func TestRootInsertRequiresReadyAndOpenChain(t *testing.T) {
 	f := newRootEnv(t)
 	block := f.block(f.genesis, 1)
-	if err := f.chain.InsertBlock(context.Background(), block); !errors.Is(err, errChainNotReady) {
+	if err := f.chain.InsertBlock(block); !errors.Is(err, errChainNotReady) {
 		t.Fatal("uninitialized chain accepted an import", err)
 	}
 	if err := f.chain.Init(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := f.chain.InsertBlock(ctx, block); !errors.Is(err, context.Canceled) {
+	f.cancel()
+	if err := f.chain.InsertBlock(block); !errors.Is(err, context.Canceled) {
 		t.Fatal("canceled import accepted", err)
 	}
 	for _, invalid := range []*types.RootBlock{nil, f.genesis} {
-		if err := f.chain.InsertBlock(context.Background(), invalid); err == nil {
+		if err := f.chain.InsertBlock(invalid); err == nil {
 			t.Fatal("nil or genesis import accepted")
 		}
 	}
 	f.chain.Close()
-	if err := f.chain.InsertBlock(context.Background(), block); !errors.Is(err, errChainStopped) {
+	if err := f.chain.InsertBlock(block); !errors.Is(err, errChainStopped) {
 		t.Fatal("closed chain accepted an import", err)
 	}
 	if len(f.client.broadcasts) != 0 {
@@ -434,10 +489,10 @@ func TestRootInsertSerializesWithInit(t *testing.T) {
 						}
 						return failure
 					}
-					go func() { results <- f.chain.InsertBlock(context.Background(), a) }()
+					go func() { results <- f.chain.InsertBlock(a) }()
 				}
 				<-started
-				go func() { results <- f.chain.InsertBlock(context.Background(), b) }()
+				go func() { results <- f.chain.InsertBlock(b) }()
 				go func() { results <- f.chain.Init() }()
 				synctest.Wait()
 				if engine.calls != wantCalls || qkcrawdb.HasRootBlock(f.db, b.Hash()) {
