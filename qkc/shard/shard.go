@@ -220,6 +220,15 @@ func (s *Shard) AddShardBlock(ctx context.Context, block *types.Block) error {
 	if err != nil {
 		return err
 	}
+	// Genesis follows a separate bootstrap path:
+	//   - It emits no cross-shard messages, and its initial cursor starts at root
+	//     height 1, so recipients do not need even empty genesis deposit lists.
+	//   - The root genesis supplied by master already contains the shard genesis
+	//     header. Init verifies it and records genesis as confirmed, so no report
+	//     to master is needed.
+	//   - The commit marker records completed delivery for retries, not block or
+	//     state persistence. Genesis has no delivery to retry; core.Genesis.Commit
+	//     persists it separately, and InsertShardBlock rejects height zero.
 	if err := s.BroadcastXShardTxList(ctx, block.Hash()); err != nil {
 		return err
 	}
