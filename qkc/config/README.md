@@ -36,8 +36,8 @@ build/bin/qkc m1
 By default, the driver starts Ethash shard 100001, constructs R0 from its genesis
 header, and initializes the shard with that root. Use repeated `--config` flags
 to explicitly select multiple shard configurations.
-Ctrl-C closes the nodes. Use fresh data directories for each run: initializing
-R0 restores shard heads to genesis.
+Ctrl-C closes the nodes. If any selected shard is past genesis, `qkc m1` exits
+before initializing R0 on any shard. Use a fresh data directory for that shard.
 
 QKC stores the genesis PoW difficulty in `[Eth.Genesis].Mixhash` as a 32-byte
 hex value. Shard 100001 sets both the genesis and minimum difficulty to 1024,

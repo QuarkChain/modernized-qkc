@@ -138,3 +138,47 @@ func TestMineInvalidCoinbase(t *testing.T) {
 		t.Fatalf("invalid coinbase accepted: %v", err)
 	}
 }
+
+func TestM1RejectsNonGenesisShard(t *testing.T) {
+	start := func(t *testing.T, path string) *eth.Ethereum {
+		t.Helper()
+		stack, backend, err := startM1Shard(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { stack.Close() })
+		return backend
+	}
+	minedPath := m1TestConfig(t, 100002) // Simulated PoW.
+	var minedHead common.Hash
+	if !t.Run("mine one block", func(t *testing.T) {
+		backend := start(t, minedPath)
+		if _, err := initM1Shards([]*eth.Ethereum{backend}); err != nil {
+			t.Fatal(err)
+		}
+		miner := backend.PoWMiner()
+		work, err := miner.GetWork(t.Context(), common.Address{0xaa})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := miner.SubmitWork(work.SealHash, types.BlockNonce{}, common.Hash{}); err != nil {
+			t.Fatal(err)
+		}
+		minedHead = backend.BlockChain().CurrentBlock().Hash()
+	}) {
+		return
+	}
+
+	fresh := start(t, m1TestConfig(t, 100001))
+	mined := start(t, minedPath)
+	_, err := initM1Shards([]*eth.Ethereum{fresh, mined})
+	if err == nil || !strings.Contains(err.Error(), "shard 100002 is at block 1") {
+		t.Fatalf("expected startup to reject the mined shard, got %v", err)
+	}
+	if tip := fresh.Shard().RootTip(); tip != (common.Hash{}) {
+		t.Fatalf("first shard initialized with root %s", tip)
+	}
+	if head := mined.BlockChain().CurrentBlock().Hash(); head != minedHead {
+		t.Fatalf("mined shard head changed from %s to %s", minedHead, head)
+	}
+}
