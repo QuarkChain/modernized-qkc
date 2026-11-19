@@ -225,9 +225,14 @@ func TestServiceStartupFailure(t *testing.T) {
 	_, _, cfg := serviceCluster(t, 2)
 	var calls atomic.Int32
 	requested := make(chan struct{})
-	cfg.Shutdown = func() { calls.Add(1); close(requested) }
+	var s *Service
+	cfg.Shutdown = func() {
+		calls.Add(1)
+		s.Stop()
+		close(requested)
+	}
 	cfg.SlaveInfos[0].ChainID, cfg.SlaveInfos[1].ChainID = cfg.SlaveInfos[1].ChainID, cfg.SlaveInfos[0].ChainID
-	s := newServiceForTest(t, cfg)
+	s = newServiceForTest(t, cfg)
 	if err := startAndWait(t, s, &serviceBackend{}); err == nil {
 		t.Fatal("startup unexpectedly succeeded")
 	}
@@ -539,9 +544,9 @@ func TestServiceUint256Values(t *testing.T) {
 func TestServiceBroadcastUnavailable(t *testing.T) {
 	for _, s := range []*Service{
 		{},
-		{state: ServiceStateStarting, conns: map[string]*SlaveConn{"1": {}}},
-		{state: ServiceStateStarting},
-		{state: ServiceStateStopped},
+		{state: serviceStateStarting, conns: map[string]*SlaveConn{"1": {}}},
+		{state: serviceStateStarting},
+		{state: serviceStateStopped},
 	} {
 		if err := s.Ping(slaveTestContext(t), testRoot(1)); err == nil {
 			t.Fatal("unavailable cluster accepted Ping")
@@ -551,6 +556,9 @@ func TestServiceBroadcastUnavailable(t *testing.T) {
 		}
 		if _, err := s.GetUnconfirmedHeaderList(slaveTestContext(t)); err == nil {
 			t.Fatal("unavailable cluster accepted header query")
+		}
+		if result, err := s.GetRootChainStakes(slaveTestContext(t), big.NewInt(1), common.Address{}, common.Hash{}); result != nil || err == nil || err.Error() != "master service is not ready" {
+			t.Fatalf("unavailable cluster stakes query: result=%v, err=%v", result, err)
 		}
 	}
 }
@@ -608,7 +616,7 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	s.mu.Lock()
 	state := s.state
 	s.mu.Unlock()
-	if state != ServiceStateStarting {
+	if state != serviceStateStarting {
 		t.Fatalf("readiness wait changed lifecycle: %v", state)
 	}
 	stopped := make(chan struct{})
@@ -625,7 +633,7 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("active stop requested Shutdown")
 	}
-	if s.state != ServiceStateStopped {
+	if s.state != serviceStateStopped {
 		t.Fatalf("state after Stop: %v", s.state)
 	}
 }

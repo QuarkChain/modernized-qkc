@@ -39,15 +39,15 @@ type MasterBackend interface {
 	AddShardBlockHeader(sourceChainID *big.Int, header *types.Header, coinbaseAmount *uint256.Int) error
 }
 
-// ServiceState is the master communication service lifecycle.
-type ServiceState uint8
+// serviceState is the master communication service lifecycle.
+type serviceState uint8
 
 const (
-	ServiceStateCreated ServiceState = iota
-	ServiceStateStarting
-	ServiceStateActive
-	// ServiceStateStopped is set when Stop begins; cleanup may still be running.
-	ServiceStateStopped
+	serviceStateCreated serviceState = iota
+	serviceStateStarting
+	serviceStateActive
+	// serviceStateStopped is set when Stop begins; cleanup may still be running.
+	serviceStateStopped
 )
 
 // Service owns master-to-slave connections, not root-chain or mining resources.
@@ -65,7 +65,7 @@ type Service struct {
 
 	mu           sync.Mutex            // protects lifecycle and connection ownership
 	conns        map[string]*SlaveConn // includes connections still verifying identity
-	state        ServiceState
+	state        serviceState
 	initDone     chan struct{}
 	shutdownOnce sync.Once
 	stopOnce     sync.Once
@@ -90,20 +90,20 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 // starts, so startup needs no lock. Initialization failure requests node shutdown;
 // restarting the cluster requires new service instances.
 func (s *Service) Start(backend MasterBackend) error {
-	if s.state != ServiceStateCreated {
+	if s.state != serviceStateCreated {
 		return errors.New("master service already started or stopped")
 	}
 	if backend == nil {
 		return errors.New("missing master backend")
 	}
-	s.backend, s.state = backend, ServiceStateStarting
+	s.backend, s.state = backend, serviceStateStarting
 	go func() {
 		err := s.initCluster()
+		close(s.initDone)
 		if err != nil {
 			s.cfg.Logger.Error("Cluster initialization failed", "err", err)
 			s.shutdown()
 		}
-		close(s.initDone)
 	}()
 	return nil
 }
@@ -118,10 +118,10 @@ func (s *Service) Stop() error {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
 		state := s.state
-		s.state = ServiceStateStopped
+		s.state = serviceStateStopped
 		s.mu.Unlock()
 
-		if state != ServiceStateCreated {
+		if state != serviceStateCreated {
 			<-s.initDone
 		}
 		conns := s.connections()
@@ -157,13 +157,13 @@ func (s *Service) WaitForInitialization() <-chan struct{} { return s.initDone }
 func (s *Service) IsActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.state == ServiceStateActive
+	return s.state == serviceStateActive
 }
 
 func (s *Service) isStopped() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.state == ServiceStateStopped
+	return s.state == serviceStateStopped
 }
 
 // -- Private initialization and connection helpers ----------------------------
@@ -190,8 +190,8 @@ func (s *Service) initCluster() error {
 	// 4. Publish communication readiness after slave interconnection succeeds.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state == ServiceStateStarting {
-		s.state = ServiceStateActive
+	if s.state == serviceStateStarting {
+		s.state = serviceStateActive
 	}
 	return nil
 }
@@ -280,7 +280,7 @@ func (s *Service) connection(chainID *big.Int) *SlaveConn {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != ServiceStateActive {
+	if s.state != serviceStateActive {
 		return nil
 	}
 	return s.conns[chainID.String()]
@@ -356,6 +356,9 @@ func (s *Service) GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*t
 
 // GetRootChainStakes routes a query to the configured chain.
 func (s *Service) GetRootChainStakes(ctx context.Context, chainID *big.Int, address common.Address, hash common.Hash) (*clusternet.RootChainStakesResult, error) {
+	if !s.IsActive() {
+		return nil, errors.New("master service is not ready")
+	}
 	sc := s.connection(chainID)
 	if sc == nil {
 		return nil, fmt.Errorf("no slave connection for chain %v", chainID)
