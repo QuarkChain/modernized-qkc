@@ -89,7 +89,12 @@ func startM1Shard(path string) (*node.Node, *eth.Ethereum, error) {
 func initM1Shards(backends []*eth.Ethereum) (*qkctypes.RootBlock, error) {
 	var headers qkctypes.ShardBlockHeaders
 	for _, backend := range backends {
-		headers = append(headers, backend.BlockChain().Genesis().Header())
+		chain := backend.BlockChain()
+		head := chain.CurrentBlock()
+		if head.Number.Sign() != 0 {
+			return nil, fmt.Errorf("shard %s is at block %s; use a fresh data directory for qkc m1", chain.Config().ChainID, head.Number)
+		}
+		headers = append(headers, head)
 	}
 	root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
 		Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
