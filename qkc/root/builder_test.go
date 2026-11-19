@@ -51,9 +51,13 @@ type builderChain struct {
 	confirmed map[string]common.Hash
 	reported  map[common.Hash]*uint256.Int
 	reportErr error
+	onGetRoot func(common.Hash)
 }
 
 func (chain *builderChain) GetRootHeader(hash common.Hash) (*qkctypes.RootBlockHeader, error) {
+	if chain.onGetRoot != nil {
+		chain.onGetRoot(hash)
+	}
 	if hash == chain.parent.Hash() {
 		return chain.parent, nil
 	}
@@ -161,14 +165,22 @@ func TestBuildEmptyRootBlock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		builder, chain := newTestBuilder(t, nil)
 		now := uint64(time.Now().Unix())
-		for _, parentTime := range []uint64{now - 10, now + 1} {
+		args := RootBlockArgs{Parent: chain.parent, ShardHeaders: map[string][]*types.Header{}}
+		for _, parentTime := range []uint64{now - 10, now + 14} {
 			chain.parent.Time = parentTime
-			block, err := builder.BuildBlock(t.Context(), RootBlockArgs{Parent: chain.parent, ShardHeaders: map[string][]*types.Header{}})
+			block, err := builder.BuildBlock(t.Context(), args)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if block.Time() != max(parentTime+1, now) || len(block.ShardBlockHeaders()) != 0 || block.CoinbaseAmount().Uint64() != 11 {
 				t.Fatalf("unexpected empty root: time %d, headers %d, reward %v", block.Time(), len(block.ShardBlockHeaders()), block.CoinbaseAmount())
+			}
+		}
+		chain.parent.Time = now + 15
+		for _, timestamp := range []uint64{0, now + 60} {
+			args.Timestamp = timestamp
+			if block, err := builder.BuildBlock(t.Context(), args); block != nil || !errors.Is(err, consensus.ErrFutureBlock) {
+				t.Fatalf("timestamp %d: got block %v, error %v; want ErrFutureBlock", timestamp, block, err)
 			}
 		}
 	})
@@ -221,6 +233,31 @@ func TestBuildRootBlockAlignsShardConfirmations(t *testing.T) {
 			t.Fatalf("missing confirmation: got block %v, error %v", block, err)
 		}
 	})
+}
+
+func TestBuildRootBlockRequiresIdleStakingShardConfirmation(t *testing.T) {
+	config := params.NewTestQuarkChainConfig(10, 10, 2).QuarkChain
+	config.PoSW.StakingEnabled = true
+	config.PoSW.WindowSize = 1
+	config.PoSW.DiffDivider = 2
+	config.PoSW.StakePerBlock = big.NewInt(1)
+	engine, err := poswroot.NewSimulate(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	chain := &builderChain{
+		parent:    &qkctypes.RootBlockHeader{Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1)},
+		confirmed: map[string]common.Hash{"2": {2}},
+	}
+	builder, err := NewRootBlockBuilder(config, chain, engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := RootBlockArgs{Parent: chain.parent, Timestamp: 1, ShardHeaders: map[string][]*types.Header{}}
+	if block, err := builder.BuildBlock(t.Context(), args); block != nil || err == nil || !strings.Contains(err.Error(), "shard 10: missing shard confirmation") {
+		t.Fatalf("missing staking shard confirmation: got block %v, error %v", block, err)
+	}
 }
 
 func TestBuildRootBlockFiltersSiblingRoot(t *testing.T) {
@@ -312,5 +349,31 @@ func TestBuildRootBlockErrors(t *testing.T) {
 	args.Parent = &qkctypes.RootBlockHeader{Time: 1}
 	if block, err := builder.BuildBlock(t.Context(), args); block != nil || !errors.Is(err, consensus.ErrUnknownAncestor) {
 		t.Fatalf("parent unknown to Prepare: got %v, %v", block, err)
+	}
+}
+
+func TestBuildRootBlockCancelsDuringAncestorWalk(t *testing.T) {
+	builder, chain := newTestBuilder(t, nil)
+	ancestor := &qkctypes.RootBlockHeader{Number: chain.parent.Number - 2}
+	middle := &qkctypes.RootBlockHeader{Number: chain.parent.Number - 1, ParentHash: ancestor.Hash()}
+	chain.parent.ParentHash = middle.Hash()
+	chain.roots = map[common.Hash]*qkctypes.RootBlockHeader{ancestor.Hash(): ancestor, middle.Hash(): middle}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	chain.onGetRoot = func(hash common.Hash) {
+		if ctx.Err() != nil {
+			t.Fatalf("read root %s after cancellation", hash)
+		}
+		if hash == middle.Hash() {
+			cancel()
+		}
+	}
+	args := RootBlockArgs{
+		Parent: chain.parent, Timestamp: 105,
+		ShardHeaders: map[string][]*types.Header{"2": chain.shardHeaders(2, 11, 100, 1, ancestor.Hash())},
+	}
+	if block, err := builder.BuildBlock(ctx, args); block != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("got block %v, error %v; want context.Canceled", block, err)
 	}
 }

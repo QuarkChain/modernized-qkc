@@ -121,7 +121,7 @@ func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockA
 		return nil, err
 	}
 	block := qkctypes.NewRootBlockWithHeader(header)
-	isAncestor := poswroot.NewRootAncestorCheck(builder.chain, args.Parent)
+	isAncestor := poswroot.NewRootAncestorCheck(ctx, builder.chain, args.Parent)
 	for _, chainID := range builder.chainIDs {
 		key := chainID.String()
 		if err := builder.appendShardHeaders(ctx, block, chainID, confirmed[key], candidates[key], isAncestor); err != nil {
@@ -141,11 +141,11 @@ func (builder *RootBlockBuilder) BuildBlock(ctx context.Context, args RootBlockA
 // appendShardHeaders counts only new headers against the per-shard limit.
 // An unreported header or one newer than the root defers its descendants too.
 func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *qkctypes.RootBlock, chainID *big.Int, confirmed common.Hash, headers []*types.Header, isAncestor func(common.Hash) (bool, error)) error {
-	if len(headers) == 0 {
-		return nil
-	}
 	if confirmed == (common.Hash{}) {
 		return errors.New("missing shard confirmation at the parent root")
+	}
+	if len(headers) == 0 {
+		return nil
 	}
 	aligned := headers[0] != nil && headers[0].ParentHash == confirmed
 	var previousHash common.Hash
