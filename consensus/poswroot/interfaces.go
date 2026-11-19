@@ -25,10 +25,14 @@ import (
 )
 
 // RootChainReader supplies read-only data for root consensus. Hash queries must
-// also work on side branches. Errors indicate failed reads; nil values without an
-// error mean a record is absent. The engine does not write confirmation records.
+// also work on side branches. The engine propagates errors returned by the reader;
+// each query documents its unavailable-data behavior. The engine does not write
+// confirmation records.
 type RootChainReader interface {
 	// GetRootHeader retrieves a root header by hash.
+	// Like geth's header lookups, nil without an error means unavailable, which
+	// may include missing data, storage failures or invalid encoding. Consensus
+	// cannot validate ancestry without a header and returns ErrUnknownAncestor.
 	// RootChain implementations should reuse their block/header cache here,
 	// as pyquarkchain's RootDb does.
 	GetRootHeader(hash common.Hash) (*qkctypes.RootBlockHeader, error)

@@ -24,6 +24,56 @@ Each shard also has its own IPC filename. Runtime data under `qkc-data/` is igno
 by Git. With this binary on `PATH`, a configuration copied to `shard.toml` starts with
 `geth --config shard.toml`. Relative data paths resolve from the working directory.
 
+### Milestone 1: external mining
+
+Build and start the local demo from the repository root:
+
+```sh
+make qkc
+build/bin/qkc m1
+```
+
+By default, the driver starts Ethash shard 100001, constructs R0 from its genesis
+header, and initializes the shard with that root. Use repeated `--config` flags
+to explicitly select multiple shard configurations.
+Ctrl-C closes the nodes. If any selected shard is past genesis, `qkc m1` exits
+before initializing R0 on any shard. Use a fresh data directory for that shard.
+
+QKC stores the genesis PoW difficulty in `[Eth.Genesis].Mixhash` as a 32-byte
+hex value. Shard 100001 sets both the genesis and minimum difficulty to 1024,
+so the adjustment step (`parentDifficulty / 512`) stays at least one.
+
+In a second terminal, run the CPU test client to mine one real Ethash block:
+
+```sh
+# Optional endpoint and mining recipient overrides:
+build/bin/qkc mine --rpc http://127.0.0.1:18545 --coinbase 0x222222222222222222222222222222222222222A
+```
+
+This is a single-block client for a low-difficulty devnet. The client fetches work, searches nonces with the existing light Ethash algorithm,
+and submits a valid seal. It prints the work, seal and acceptance, then exits.
+
+Shard 100001 uses `POW_ETHASH`; the optional shard 100002 uses `POW_SIMULATE`.
+Local seal search is disabled. The nodes use the existing mock cluster client:
+R0 stays at height 0, with no R1 production or cross-shard delivery.
+
+The devnet HTTP configurations enable the `qkc` namespace. An external
+miner requests work for its coinbase address:
+
+```sh
+curl -s http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"qkc_getWork","params":["0x222222222222222222222222222222222222222A"],"id":1}'
+```
+
+The result contains `sealHash`, `number`, `difficulty`, and `time`. The three numeric
+fields are 0x-prefixed hexadecimal strings. Use the epoch selected by `number`
+and the effective PoSW `difficulty` to compute an Ethash seal over `sealHash`.
+Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
+
+```text
+qkc_submitWork(["<sealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
+```
+
 ### Test accounts
 
 Both shards preallocate 1,000,000 QKC (`1000000000000000000000000` base units) to
@@ -70,10 +120,8 @@ For an existing database initialized without this field, keep omitting it or use
 a new data directory with the updated examples. A database-only restart uses the
 stored consensus type.
 
-TODO: initialize `ShardChain` from a Master root checkpoint, connect cluster
-transport, implement mining, and add shard-specific RPC. The `PrivateHost`,
-`PrivatePort`, and `CoinbaseAddress` fields under `[Node]` store the internal
-cluster endpoint and mining recipient.
+TODO: initialize `ShardChain` from a Master root checkpoint and connect
+cluster transport. 
 
 TOML uses case-sensitive Go field names, quoted big integers and rationals. `geth dumpconfig`
 omits Genesis, so keep the original configuration for initializing other nodes.

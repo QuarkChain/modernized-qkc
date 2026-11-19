@@ -14,7 +14,17 @@ CoinbaseAddress = "0x3333333333333333333333333333333333333333"
 IPCPath = "qkc-shard-100002.ipc"
 HTTPHost = "127.0.0.1"
 HTTPPort = 18546
-HTTPModules = ["eth", "net", "web3"]
+HTTPModules = ["eth", "net", "web3", "qkc"]
+
+# Disable peer listening, dialing, and discovery. NAT may still query the local gateway.
+[Node.P2P]
+ListenAddr = ""
+DiscAddr = ""
+MaxPeers = 0
+NoDial = true
+NoDiscovery = true
+DiscoveryV4 = false
+DiscoveryV5 = false
 
 # Native TOML uses Go field names and big integer/rational strings; byte fields use single-line arrays.
 [Eth.Genesis]
