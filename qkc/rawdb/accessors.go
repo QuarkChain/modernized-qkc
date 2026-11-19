@@ -17,6 +17,10 @@
 package rawdb
 
 import (
+	"fmt"
+	"math/big"
+	"slices"
+
 	"github.com/ethereum/go-ethereum/common"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -32,12 +36,16 @@ func HasRootBlock(db ethdb.KeyValueReader, hash common.Hash) bool {
 }
 
 // ReadRootBlockSSZ retrieves a root block in its raw SSZ database encoding.
+// Like core/rawdb.ReadHeaderRLP, this low-level accessor does not expose Get
+// errors. Empty data alone therefore does not prove that the record is absent.
 func ReadRootBlockSSZ(db ethdb.KeyValueReader, hash common.Hash) []byte {
 	data, _ := db.Get(rootBlockKey(hash))
 	return data
 }
 
 // ReadRootBlock retrieves the root block corresponding to the hash.
+// It follows core/rawdb.ReadHeader's convention: invalid encodings are logged
+// and return nil. Nil means no usable block, not necessarily an absent record.
 func ReadRootBlock(db ethdb.KeyValueReader, hash common.Hash) *types.RootBlock {
 	data := ReadRootBlockSSZ(db, hash)
 	if len(data) == 0 {
@@ -53,6 +61,8 @@ func ReadRootBlock(db ethdb.KeyValueReader, hash common.Hash) *types.RootBlock {
 
 // ReadRootBlockHeader retrieves the header of the root block corresponding to
 // the hash, without decoding the shard block headers it confirms.
+// Like ReadRootBlock, it returns nil for missing data or invalid encoding and
+// does not expose storage errors; nil is not proof that the record is absent.
 func ReadRootBlockHeader(db ethdb.KeyValueReader, hash common.Hash) *types.RootBlockHeader {
 	data := ReadRootBlockSSZ(db, hash)
 	if len(data) == 0 {
@@ -75,6 +85,75 @@ func WriteRootBlock(db ethdb.KeyValueWriter, block *types.RootBlock) {
 	if err := db.Put(rootBlockKey(block.Hash()), data); err != nil {
 		log.Crit("Failed to store root block", "err", err)
 	}
+}
+
+// ReadRootHeadBlockHash retrieves the persisted canonical root head.
+func ReadRootHeadBlockHash(db ethdb.KeyValueReader) (common.Hash, error) {
+	data, err := db.Get(rootHeadBlockKey)
+	return common.BytesToHash(data), err
+}
+
+// WriteRootHeadBlockHash stores the persisted canonical root head.
+func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
+	return db.Put(rootHeadBlockKey, hash.Bytes())
+}
+
+// ReadRootCanonicalHash retrieves the hash assigned to a canonical root height.
+// Like core/rawdb.ReadCanonicalHash, it does not expose Get errors. A zero hash
+// therefore does not distinguish an absent index from a failed read.
+func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint32) common.Hash {
+	data, _ := db.Get(rootCanonicalKey(number))
+	return common.BytesToHash(data)
+}
+
+// WriteRootCanonicalHash stores the hash assigned to a canonical root height.
+func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint32) error {
+	return db.Put(rootCanonicalKey(number), hash.Bytes())
+}
+
+type rootShardConfirmation struct {
+	ChainID *big.Int
+	Hash    common.Hash
+}
+
+// ReadRootConfirmedShardBlocks retrieves the cumulative shard confirmations for
+// a root, including confirmations inherited from its ancestors.
+// Missing snapshots, read failures and decoding failures return an error.
+func ReadRootConfirmedShardBlocks(db ethdb.KeyValueReader, hash common.Hash) (map[string]common.Hash, error) {
+	data, err := db.Get(rootConfirmedKey(hash))
+	if err != nil {
+		return nil, err
+	}
+	var entries []rootShardConfirmation
+	if err := rlp.DecodeBytes(data, &entries); err != nil {
+		return nil, fmt.Errorf("decode root shard confirmations: %w", err)
+	}
+	confirmed := make(map[string]common.Hash, len(entries))
+	for _, entry := range entries {
+		confirmed[entry.ChainID.String()] = entry.Hash
+	}
+	return confirmed, nil
+}
+
+// WriteRootConfirmedShardBlocks stores a cumulative snapshot for a root.
+func WriteRootConfirmedShardBlocks(db ethdb.KeyValueWriter, hash common.Hash, confirmed map[string]common.Hash) error {
+	entries := make([]rootShardConfirmation, 0, len(confirmed))
+	for id, blockHash := range confirmed {
+		chainID, ok := new(big.Int).SetString(id, 10)
+		if !ok || chainID.String() != id {
+			return fmt.Errorf("invalid root shard confirmation chain ID %q", id)
+		}
+		entries = append(entries, rootShardConfirmation{ChainID: chainID, Hash: blockHash})
+	}
+	// Map iteration is unordered; persist entries in numeric chain ID order.
+	slices.SortFunc(entries, func(a, b rootShardConfirmation) int {
+		return a.ChainID.Cmp(b.ChainID)
+	})
+	data, err := rlp.EncodeToBytes(entries)
+	if err != nil {
+		return fmt.Errorf("encode root shard confirmations: %w", err)
+	}
+	return db.Put(rootConfirmedKey(hash), data)
 }
 
 // ReadLastConfirmedBlockHash retrieves the hash of the latest shard block

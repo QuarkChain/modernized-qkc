@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package master defines the cluster client used by master business logic.
-package master
+// Package root manages the root chain and defines its cluster client.
+package root
 
 import (
 	"context"
@@ -31,12 +31,20 @@ import (
 // chains. Master business logic holds this interface instead of those
 // connections and does not construct wire messages.
 type ClusterClient interface {
+	// Ping sends the master's persisted root tip to every configured shard host
+	// and waits for initialization at that root block to finish. Missing connections
+	// and RPC failures return errors. Receivers may already be initialized after
+	// partial success, so the caller must abort startup instead of repeating PING.
+	// TODO(shard): If the supplied root block is absent locally, restore its local
+	// direct parent, then import the supplied root block, rejecting missing data.
+	Ping(ctx context.Context, checkpoint *qkctypes.RootBlock) error
+
 	// BroadcastRootBlock sends block to every ShardNode in the cluster and waits
 	// for all acknowledgements. A send failure, a nonzero remote ErrorCode
 	// (returned as *clusternet.RemoteError), or a ShardNode without a connection is
 	// returned as an error, so a disconnected chain never silently misses the
-	// root block. If only some hosts acknowledge the block, the caller must
-	// retain it as uncommitted and retry the complete broadcast.
+	// root block. Startup recovery uses Ping at the persisted root tip rather
+	// than a separate broadcast driven by a committing marker.
 	BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock) error
 
 	// GetUnconfirmedHeaderList collects unconfirmed shard headers from the cluster,
