@@ -67,6 +67,7 @@ type Service struct {
 	conns        map[string]*SlaveConn // includes connections still verifying identity
 	state        serviceState
 	initDone     chan struct{}
+	initCancel   context.CancelFunc
 	shutdownOnce sync.Once
 	stopOnce     sync.Once
 }
@@ -96,11 +97,14 @@ func (s *Service) Start(backend MasterBackend) error {
 	if backend == nil {
 		return errors.New("missing master backend")
 	}
-	s.backend, s.state = backend, serviceStateStarting
+	ctx, cancel := context.WithCancel(context.Background())
+	s.backend, s.state, s.initCancel = backend, serviceStateStarting, cancel
 	go func() {
-		err := s.initCluster()
+		defer cancel()
+		err := s.initCluster(ctx)
+		failed := err != nil && !s.isStopped()
 		close(s.initDone)
-		if err != nil {
+		if failed {
 			s.cfg.Logger.Error("Cluster initialization failed", "err", err)
 			s.shutdown()
 		}
@@ -108,8 +112,8 @@ func (s *Service) Start(backend MasterBackend) error {
 	return nil
 }
 
-// Stop marks the service stopped, waits for initialization to finish, then closes
-// connections and drains admitted handlers. In-flight operations finish or time out.
+// Stop marks the service stopped, cancels initialization and closes connections,
+// then waits for initialization to finish and drains admitted handlers.
 // It does not cancel backend calls or stop backend resources.
 // The owner may release master resources after Stop returns. Normal Stop does
 // not request Shutdown. Never call Stop from a request handler; Shutdown must
@@ -121,12 +125,16 @@ func (s *Service) Stop() error {
 		s.state = serviceStateStopped
 		s.mu.Unlock()
 
-		if state != serviceStateCreated {
-			<-s.initDone
+		if s.initCancel != nil {
+			s.initCancel()
 		}
 		conns := s.connections()
 		for _, sc := range conns {
 			sc.Close()
+		}
+
+		if state != serviceStateCreated {
+			<-s.initDone
 		}
 		for _, sc := range conns {
 			sc.WaitHandlers()
@@ -168,8 +176,8 @@ func (s *Service) isStopped() bool {
 
 // -- Private initialization and connection helpers ----------------------------
 
-func (s *Service) initCluster() error {
-	steps := []func() error{
+func (s *Service) initCluster(ctx context.Context) error {
+	steps := []func(context.Context) error{
 		// 1. Establish every slave connection sequentially, retrying until connected.
 		s.connectSlaves,
 		// 2. Send identity-only PINGs concurrently after all connections exist.
@@ -178,11 +186,10 @@ func (s *Service) initCluster() error {
 		s.interconnectSlaves,
 	}
 	for _, step := range steps {
-		err := step()
-		if s.isStopped() {
-			return nil
+		if err := step(ctx); err != nil {
+			return err
 		}
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
@@ -196,39 +203,49 @@ func (s *Service) initCluster() error {
 	return nil
 }
 
-func (s *Service) connectSlaves() error {
+func (s *Service) connectSlaves(ctx context.Context) error {
 	for _, info := range s.cfg.SlaveInfos {
-		if err := s.connectSlave(info); err != nil {
+		if err := s.connectSlave(ctx, info); err != nil {
 			return err
-		}
-		if s.isStopped() {
-			return nil
 		}
 	}
 	return nil
 }
 
-func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
+func (s *Service) connectSlave(ctx context.Context, info clusternet.SlaveInfo) error {
 	addr := net.JoinHostPort(info.Host, strconv.Itoa(int(info.Port)))
+	dialer := net.Dialer{Timeout: startupNetworkTimeout}
 	var nc net.Conn
 	for {
-		if s.isStopped() {
-			return nil
-		}
 		var err error
-		nc, err = net.DialTimeout("tcp", addr, startupNetworkTimeout)
+		nc, err = dialer.DialContext(ctx, "tcp", addr)
 		if err == nil {
 			break
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		s.cfg.Logger.Debug("Failed to connect to slave, retrying", "chain", info.ChainID, "addr", addr, "err", err)
-		time.Sleep(slaveConnectRetryDelay)
+		timer := time.NewTimer(slaveConnectRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	sc, err := NewSlaveConn(SlaveConnConfig{Conn: nc, RemoteChainID: info.ChainID, MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s, Logger: s.cfg.Logger})
 	if err != nil {
 		nc.Close()
 		return err
 	}
+
 	s.mu.Lock()
+	if s.state == serviceStateStopped {
+		s.mu.Unlock()
+		sc.Close()
+		return context.Canceled
+	}
 	s.conns[info.ChainID.String()] = sc
 	s.mu.Unlock()
 	go func() {
@@ -239,25 +256,22 @@ func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 	return nil
 }
 
-func (s *Service) identifySlaves() error {
+func (s *Service) identifySlaves(ctx context.Context) error {
 	return s.broadcastToSlaves(func(sc *SlaveConn) error {
-		ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
+		callCtx, cancel := context.WithTimeout(ctx, startupNetworkTimeout)
 		defer cancel()
-		return sc.SendPing(ctx, nil)
+		return sc.SendPing(callCtx, nil)
 	})
 }
 
-func (s *Service) interconnectSlaves() error {
+func (s *Service) interconnectSlaves(ctx context.Context) error {
 	for _, info := range s.cfg.SlaveInfos {
 		sc := s.conns[info.ChainID.String()]
-		callCtx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
+		callCtx, cancel := context.WithTimeout(ctx, startupNetworkTimeout)
 		err := sc.SendConnectToSlaves(callCtx, s.cfg.SlaveInfos)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("interconnect slave %s: %w", sc.RemoteChainID(), err)
-		}
-		if s.isStopped() {
-			return nil
 		}
 	}
 	return nil

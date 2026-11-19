@@ -20,19 +20,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
 	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 	"github.com/ethereum/go-ethereum/qkc/master"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -405,43 +409,74 @@ func TestServiceStopDrainsReports(t *testing.T) {
 	}
 }
 
-func TestServiceStartupTimeout(t *testing.T) {
+func TestServiceStartupRPCContext(t *testing.T) {
 	t.Parallel()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		nc, err := listener.Accept()
-		if err == nil {
-			accepted <- nc
-		}
-	}()
-	cfg := ServiceConfig{SlaveInfos: []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1)}}, ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown}
-	s := newServiceForTest(t, cfg)
-	if err := s.Start(&serviceBackend{}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-s.WaitForInitialization():
-		if s.IsActive() {
-			t.Fatal("unresponsive slave became active")
-		}
-	case <-time.After(startupNetworkTimeout + 5*time.Second):
-		t.Fatal("identity PING did not time out")
-	}
-	select {
-	case nc := <-accepted:
-		defer nc.Close()
-	case <-time.After(time.Second):
-		t.Fatal("slave not dialed")
-	}
-	s.Stop()
-	for _, sc := range s.connections() {
-		if !sc.IsClosed() {
-			t.Fatal("timed-out connection left open")
+	const parentTimeout = 200 * time.Millisecond
+	for _, operation := range []struct {
+		name     string
+		opcode   wire.ClusterOp
+		send     func(*Service, context.Context) error
+		response wire.SSZMessage
+	}{
+		{"identity", wire.ClusterOpPing, (*Service).identifySlaves, &wire.PongResponse{ChainID: *uint256.NewInt(1)}},
+		{"interconnect", wire.ClusterOpConnectToSlavesRequest, (*Service).interconnectSlaves, &wire.ConnectToSlavesResponse{ResultList: [][]byte{nil}}},
+	} {
+		for _, test := range []struct {
+			name          string
+			parentTimeout time.Duration
+			wantElapsed   time.Duration
+			wantErr       error
+		}{
+			{"parent-deadline", parentTimeout, parentTimeout, context.DeadlineExceeded},
+			{"parent-cancellation", 0, 0, context.Canceled},
+			{"startup-deadline", 0, startupNetworkTimeout, context.DeadlineExceeded},
+		} {
+			t.Run(operation.name+"/"+test.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					entered, release := make(chan struct{}), make(chan struct{})
+					defer close(release)
+					sc, _ := newSlaveTestPair(t, big.NewInt(1), nil, map[byte]conn.TypedHandler{
+						byte(operation.opcode): func(wire.SSZMessage) (wire.SSZMessage, error) {
+							close(entered)
+							<-release
+							return operation.response, nil
+						},
+					})
+					service := newServiceForTest(t, ServiceConfig{
+						SlaveInfos:         []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: 1, ChainID: big.NewInt(1)}},
+						ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown,
+					})
+					service.conns["1"] = sc
+					start := time.Now()
+					var ctx context.Context
+					var cancel context.CancelFunc
+					if test.parentTimeout > 0 {
+						ctx, cancel = context.WithTimeout(t.Context(), test.parentTimeout)
+					} else {
+						ctx, cancel = context.WithCancel(t.Context())
+					}
+					defer cancel()
+					timeout := time.After(startupNetworkTimeout + time.Second)
+					result := make(chan error, 1)
+					go func() { result <- operation.send(service, ctx) }()
+					select {
+					case <-entered:
+					case <-timeout:
+						t.Fatal("startup RPC did not reach the slave")
+					}
+					if test.wantErr == context.Canceled {
+						cancel()
+					}
+					select {
+					case err := <-result:
+						if elapsed := time.Since(start); !errors.Is(err, test.wantErr) || elapsed != test.wantElapsed {
+							t.Fatalf("startup RPC returned %v after %s, want %v after %s", err, elapsed, test.wantErr, test.wantElapsed)
+						}
+					case <-timeout:
+						t.Fatal("startup RPC did not return after cancellation or deadline")
+					}
+				})
+			})
 		}
 	}
 }
@@ -563,7 +598,7 @@ func TestServiceBroadcastUnavailable(t *testing.T) {
 	}
 }
 
-func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
+func TestServiceAsyncStartAndStopCancelsInitialization(t *testing.T) {
 	t.Parallel()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -591,8 +626,7 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	// The peer never answers identity PING; Start must return anyway.
 	returned := make(chan error, 1)
 	go func() { returned <- s.Start(&serviceBackend{}) }()
-	ctx, cancel := context.WithTimeout(t.Context(), startupNetworkTimeout+5*time.Second)
-	defer cancel()
+	ctx := slaveTestContext(t)
 	select {
 	case err := <-returned:
 		if err != nil {
@@ -604,6 +638,13 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	select {
 	case nc := <-accepted:
 		defer nc.Close()
+		if err := nc.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var buffer [1]byte
+		if _, err := nc.Read(buffer[:]); err != nil {
+			t.Fatalf("initialization did not send PING: %v", err)
+		}
 	case <-ctx.Done():
 		t.Fatal("initialization did not connect")
 	}
@@ -623,8 +664,8 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	go func() { s.Stop(); close(stopped) }()
 	select {
 	case <-stopped:
-	case <-ctx.Done():
-		t.Fatal("Stop did not wait for initialization timeout")
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not cancel initialization")
 	}
 	if err := waitForService(t, s); err == nil {
 		t.Fatalf("stopped initialization should not become active: %v", err)
@@ -636,6 +677,74 @@ func TestServiceAsyncStartAndStopWaitsForTimeout(t *testing.T) {
 	if s.state != serviceStateStopped {
 		t.Fatalf("state after Stop: %v", s.state)
 	}
+}
+
+type startupWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (connection *startupWriteConn) Write(buffer []byte) (int, error) {
+	connection.once.Do(func() { close(connection.entered) })
+	return connection.Conn.Write(buffer)
+}
+
+func TestServiceStopInterruptsStartupWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		local, remote := net.Pipe()
+		defer local.Close()
+		defer remote.Close()
+		observed := &startupWriteConn{Conn: local, entered: make(chan struct{})}
+		connection, err := NewSlaveConn(SlaveConnConfig{
+			Conn: observed, RemoteChainID: big.NewInt(1), Handler: slaveHandlerFunc{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		var startupFailed, shutdownRequested atomic.Bool
+		// Use a preconnected pipe so the real startup path blocks on its first PING write.
+		service := &Service{
+			cfg: ServiceConfig{
+				Logger: log.NewLogger(log.JSONHandler(serviceLogWriter(func(p []byte) (int, error) {
+					if strings.Contains(string(p), "Cluster initialization failed") {
+						startupFailed.Store(true)
+					}
+					return len(p), nil
+				}))),
+				Shutdown: func() { shutdownRequested.Store(true) },
+			},
+			conns:    map[string]*SlaveConn{"1": connection},
+			initDone: make(chan struct{}),
+		}
+		connection.Start()
+		if err := service.Start(&serviceBackend{}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-observed.entered:
+		case <-time.After(time.Second):
+			t.Fatal("startup did not begin writing")
+		}
+		stopped := make(chan struct{})
+		go func() { service.Stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatal("Stop did not interrupt the startup write")
+		}
+		synctest.Wait()
+		if startupFailed.Load() {
+			t.Fatal("Stop logged a startup failure")
+		}
+		if shutdownRequested.Load() {
+			t.Fatal("Stop requested Shutdown")
+		}
+		if !connection.IsClosed() || service.IsActive() {
+			t.Fatal("Stop left the service or its connection active")
+		}
+	})
 }
 
 func TestServicePingWaitsForAllInitializationPongs(t *testing.T) {
@@ -758,8 +867,8 @@ func TestServiceDialRetry(t *testing.T) {
 				go func() { s.Stop(); close(stopped) }()
 				select {
 				case <-stopped:
-				case <-ctx.Done():
-					t.Fatal("Stop did not end dial retries")
+				case <-time.After(500 * time.Millisecond):
+					t.Fatal("Stop did not interrupt the dial retry delay")
 				}
 				if err := waitForService(t, s); err == nil {
 					t.Fatalf("stopped dial retry: %v", err)
@@ -792,6 +901,60 @@ func TestServiceDialRetry(t *testing.T) {
 				t.Fatal("initial dial failure requested shutdown")
 			}
 		})
+	}
+}
+
+func TestServiceCanceledDial(t *testing.T) {
+	cfg := ServiceConfig{
+		SlaveInfos:         []clusternet.SlaveInfo{{Host: "127.0.0.1", Port: 1, ChainID: big.NewInt(1)}},
+		ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown,
+	}
+	service := newServiceForTest(t, cfg)
+	ctx, cancel := context.WithCancel(slaveTestContext(t))
+	cancel()
+	if err := service.connectSlave(ctx, cfg.SlaveInfos[0]); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled dial: %v", err)
+	}
+	if len(service.connections()) != 0 {
+		t.Fatal("canceled dial registered a connection")
+	}
+}
+
+func TestServiceRejectsConnectionAfterStop(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	cfg := ServiceConfig{
+		SlaveInfos: []clusternet.SlaveInfo{{
+			Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port), ChainID: big.NewInt(1),
+		}},
+		ConfiguredChainIDs: []*big.Int{big.NewInt(1)}, Shutdown: noopShutdown,
+	}
+	service := newServiceForTest(t, cfg)
+	service.Stop()
+	connectErr := service.connectSlave(slaveTestContext(t), cfg.SlaveInfos[0])
+	if err := listener.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	if !errors.Is(connectErr, context.Canceled) {
+		t.Fatalf("connection completed after Stop: %v", connectErr)
+	}
+	if len(service.connections()) != 0 {
+		t.Fatal("registered a connection after Stop")
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var buffer [1]byte
+	if _, err := peer.Read(buffer[:]); !errors.Is(err, io.EOF) {
+		t.Fatalf("late connection was not closed: %v", err)
 	}
 }
 
@@ -921,7 +1084,7 @@ func TestServiceDisconnectDuringInitializationRequestsOwnerStop(t *testing.T) {
 		t.Fatal("Stop did not interrupt Ping")
 	}
 	unblock()
-	if !s.isStopped() {
+	if s.state != serviceStateStopped {
 		t.Fatal("service was not stopped by owner")
 	}
 	for _, sc := range s.connections() {

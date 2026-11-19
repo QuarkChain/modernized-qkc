@@ -32,7 +32,8 @@ const slaveConnectRetryDelay = time.Second
 
 // startupNetworkTimeout sets each dial timeout and startup RPC context deadline.
 // RPC contexts do not interrupt write-lock waits or network writes; the transport
-// enforces a separate write timeout. Dial retries have no overall deadline.
+// enforces a separate write timeout. Stop cancels startup contexts and closes
+// connections to interrupt writes. Dial retries have no overall deadline.
 const startupNetworkTimeout = 20 * time.Second
 
 // ServiceConfig supplies deployment settings for one slave per configured chain.
