@@ -133,7 +133,6 @@ type rootEnv struct {
 	chain      *RootChain
 	genesis    *types.RootBlock
 	confirmed  map[string]common.Hash
-	shutdowns  int
 }
 
 // Seed genesis directly so startup tests do not depend on block insertion.
@@ -173,14 +172,12 @@ func newRootEnv(t *testing.T) *rootEnv {
 
 func (f *rootEnv) open() *RootChain {
 	f.t.Helper()
-	c, err := New(f.backendCtx, f.config, f.client, f.db, f.engine, f.shutdown)
+	c, err := New(f.backendCtx, f.config, f.client, f.db, f.engine)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	return c
 }
-
-func (f *rootEnv) shutdown() { f.shutdowns++ }
 
 // Build root fixtures; consensus validation is exercised separately in poswroot.
 func (f *rootEnv) block(parent *types.RootBlock, seed byte) *types.RootBlock {
@@ -279,15 +276,8 @@ func TestRootNewRejectsMissingHead(t *testing.T) {
 	if err := qkcrawdb.WriteRootHeadBlockHash(f.db, common.Hash{1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(f.backendCtx, f.config, f.client, f.db, f.engine, f.shutdown); !errors.Is(err, ErrRootDataMissing) {
+	if _, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); !errors.Is(err, ErrRootDataMissing) {
 		t.Fatal("missing head block accepted", err)
-	}
-}
-
-func TestRootNewRequiresShutdown(t *testing.T) {
-	f := newRootEnv(t)
-	if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine, nil); err == nil || chain != nil {
-		t.Fatal("missing shutdown callback accepted", err)
 	}
 }
 
@@ -341,7 +331,7 @@ func TestRootNewRejectsMissingRecoveryData(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine, f.shutdown); err == nil || chain != nil {
+			if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); err == nil || chain != nil {
 				t.Fatal("invalid persisted tip recovery data accepted", err)
 			}
 			qkcrawdb.WriteRootBlock(f.db, tip)
@@ -380,7 +370,7 @@ func TestRootNewRejectsUnexpectedConfirmationChains(t *testing.T) {
 			if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, f.genesis.Hash(), confirmed); err != nil {
 				t.Fatal(err)
 			}
-			if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine, f.shutdown); err == nil || chain != nil {
+			if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); err == nil || chain != nil {
 				t.Fatal("unexpected confirmation chain accepted", err)
 			}
 		})
@@ -394,7 +384,7 @@ func TestRootReadErrors(t *testing.T) {
 	}
 	failure := errors.New("database failed")
 	f.db.readErr = failure
-	if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine, f.shutdown); !errors.Is(err, failure) || chain != nil {
+	if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); !errors.Is(err, failure) || chain != nil {
 		t.Fatal("head read failure accepted", err)
 	}
 	if confirmed, err := f.chain.GetLastConfirmedShardBlocks(f.genesis.Hash()); confirmed != nil || !errors.Is(err, failure) || errors.Is(err, ErrRootDataMissing) {

@@ -222,8 +222,8 @@ func TestRootInsertLocalFailureAndRetry(t *testing.T) {
 			if err := f.chain.InsertBlock(context.Background(), block); !errors.Is(err, failure) {
 				t.Fatal("import error lost", err)
 			}
-			if !f.chain.Ready() || f.shutdowns != 0 {
-				t.Fatal("local failure requested shutdown or disabled the chain")
+			if !f.chain.Ready() {
+				t.Fatal("local failure disabled the chain")
 			}
 			engine.err, f.db.readErr, f.db.putErr, f.db.batchErr = nil, nil, nil, nil
 			if f.chain.RootTip().Hash() != f.genesis.Hash() || len(f.client.broadcasts) != 0 || qkcrawdb.HasRootBlock(f.db, block.Hash()) {
@@ -316,7 +316,7 @@ func TestRootInsertRejectsIncompleteParentConfirmations(t *testing.T) {
 	}
 }
 
-func TestRootInsertDeliveryAndShutdown(t *testing.T) {
+func TestRootInsertDeliveryResults(t *testing.T) {
 	for _, stage := range []string{"broadcast", "cancel rpc", "cancel after success"} {
 		t.Run(stage, func(t *testing.T) {
 			f, engine := newInsertEnv(t)
@@ -342,8 +342,8 @@ func TestRootInsertDeliveryAndShutdown(t *testing.T) {
 			}
 			f.client.broadcastErr, f.client.onBroadcast = nil, nil
 			if failure != nil {
-				if !f.chain.initialized.Load() || !f.chain.stopping.Load() || f.chain.Ready() || f.shutdowns != 1 {
-					t.Fatal("delivery failure did not preserve initialization, stop the chain and request shutdown once")
+				if !f.chain.initialized.Load() || !f.chain.stopping.Load() || f.chain.Ready() {
+					t.Fatal("delivery failure did not preserve initialization and stop the chain")
 				}
 				before := len(f.client.calls)
 				if err := f.chain.Init(); !errors.Is(err, errChainStopped) {
@@ -354,8 +354,8 @@ func TestRootInsertDeliveryAndShutdown(t *testing.T) {
 						t.Fatal("failed chain accepted an import", err)
 					}
 				}
-				if f.chain.Ready() || f.shutdowns != 1 || engine.calls != 1 || len(f.client.calls) != before {
-					t.Fatal("failed chain resumed work or requested shutdown again")
+				if f.chain.Ready() || engine.calls != 1 || len(f.client.calls) != before {
+					t.Fatal("failed chain resumed work")
 				}
 				f.chain.Close()
 				f.chain = f.open()
@@ -365,8 +365,8 @@ func TestRootInsertDeliveryAndShutdown(t *testing.T) {
 				if f.client.checkpoints[len(f.client.checkpoints)-1] != block.Hash() {
 					t.Fatal("restart did not initialize shards at the committed tip")
 				}
-			} else if !f.chain.Ready() || f.shutdowns != 0 {
-				t.Fatal("successful delivery requested shutdown or disabled the chain")
+			} else if !f.chain.Ready() {
+				t.Fatal("successful delivery disabled the chain")
 			}
 			if err := f.chain.InsertBlock(context.Background(), block); err != nil || engine.calls != 1 {
 				t.Fatal("known-block retry failed or reverified", err)
@@ -401,9 +401,6 @@ func TestRootInsertRequiresReadyAndOpenChain(t *testing.T) {
 	if len(f.client.broadcasts) != 0 {
 		t.Fatal("rejected import was broadcast")
 	}
-	if f.shutdowns != 0 {
-		t.Fatal("normal Close or rejected import requested shutdown")
-	}
 }
 
 func TestRootInsertSerializesWithInit(t *testing.T) {
@@ -416,15 +413,8 @@ func TestRootInsertSerializesWithInit(t *testing.T) {
 				started, release := make(chan struct{}), make(chan struct{})
 				results := make(chan error, 3)
 				var failure error
-				closed := make(chan struct{})
-				shutdownReady := false
 				if first == "delivery failure" {
 					failure = errors.New("broadcast failed")
-					f.chain.shutdown = func() {
-						f.shutdown()
-						shutdownReady = f.chain.Ready()
-						go func() { f.chain.Close(); close(closed) }()
-					}
 				}
 				wantCalls := 1
 				if first == "init" {
@@ -466,9 +456,8 @@ func TestRootInsertSerializesWithInit(t *testing.T) {
 							t.Fatal("unexpected concurrent result", err)
 						}
 					}
-					<-closed
-					if failures != 1 || stopped != 2 || shutdownReady || f.chain.Ready() || f.shutdowns != 1 {
-						t.Fatal("failed delivery did not disable queued operations and shut down")
+					if failures != 1 || stopped != 2 || f.chain.Ready() {
+						t.Fatal("failed delivery did not disable queued operations")
 					}
 					if engine.calls != 1 || len(f.client.calls) != 2 || qkcrawdb.HasRootBlock(f.db, b.Hash()) || f.chain.RootTip().Hash() != a.Hash() {
 						t.Fatal("queued operations changed the committed chain after delivery failed")

@@ -64,7 +64,6 @@ type RootChain struct {
 	// Serialize chain writes, including Init. Readers use atomic state or the DB.
 	chainmu   *syncx.ClosableMutex
 	closeOnce sync.Once
-	shutdown  func()
 
 	// Published headers are immutable; updates replace the tip pointer.
 	tip atomic.Pointer[types.RootBlockHeader]
@@ -83,15 +82,12 @@ var _ posw.RootChainReader = (*RootChain)(nil)
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // backendCtx controls RootChain's lifetime and is canceled only by the backend.
 // Genesis, canonical indices and cumulative confirmations must already be stored.
-func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine, shutdown func()) (*RootChain, error) {
+func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
 	if backendCtx == nil || config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing backend context, root configuration, cluster client, database or engine")
 	}
 	if err := backendCtx.Err(); err != nil {
 		return nil, err
-	}
-	if shutdown == nil {
-		return nil, errors.New("missing master shutdown callback")
 	}
 	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
 	// genesis. For an empty database, atomically store genesis, its cumulative shard
@@ -117,7 +113,7 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	}
 	c := &RootChain{
 		backendCtx: backendCtx,
-		config:     config, client: client, db: db, engine: engine, shutdown: shutdown,
+		config:     config, client: client, db: db, engine: engine,
 		chainmu:    syncx.NewClosableMutex(),
 		blockCache: lru.NewCache[common.Hash, *types.RootBlock](blockCacheLimit),
 	}
@@ -189,10 +185,10 @@ func (c *RootChain) readConfirmations(hash common.Hash) (map[string]common.Hash,
 // to already be stored locally.
 // Connections must be ready before this call. Init records initialization after
 // all shards succeed, using backendCtx for PING cancellation. Ready becomes true
-// only while backendCtx is active and shutdown has not begun.
+// only while backendCtx is active and the chain is not stopping.
 // On failure, the backend must abort startup and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
-// a cluster restart. Repeating a successful Init is a no-op until shutdown begins;
+// a cluster restart. Repeating a successful Init is a no-op until the chain stops;
 // calls after that return errChainStopped.
 // Init does not change the local tip.
 func (c *RootChain) Init() error {
@@ -226,7 +222,8 @@ func (c *RootChain) Init() error {
 
 // InsertBlock verifies and stores a root block, then delivers it to all shards.
 // Init must complete first. Delivery failures leave the local commit intact,
-// disable Init and insertion, and request master shutdown for cluster recovery.
+// disable Init and insertion, and return an error. The client handles connection
+// failures and requests master shutdown for cluster recovery.
 func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) error {
 	if block == nil || block.Number() == 0 {
 		return errors.New("missing or genesis root block")
@@ -314,7 +311,6 @@ func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) err
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.
 		c.stopping.Store(true)
-		c.shutdown()
 		return fmt.Errorf("broadcast root block: %w", err)
 	}
 	return nil
