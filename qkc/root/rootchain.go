@@ -308,12 +308,23 @@ func (c *RootChain) InsertBlock(ctx context.Context, block *types.RootBlock) err
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
 	if err := c.client.BroadcastRootBlock(ctx, block); err != nil {
+		// The communication layer requests master shutdown on connection failure.
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.
 		c.stopping.Store(true)
 		return fmt.Errorf("broadcast root block: %w", err)
 	}
 	return nil
+}
+
+// SetHead is reserved for rewinding the canonical root head to the given height.
+// TODO: Implement when a caller needs it and the use case is confirmed.
+// Serialize with chainmu and use rewriteCanonical to atomically update
+// canonical indices and the persisted head, retaining blocks and confirmations.
+// Coordinate forced shard switching and wait for all acknowledgements before
+// resuming cluster work; return an error and stop further writes on failure.
+func (c *RootChain) SetHead(number uint32) error {
+	return ErrNotImplemented
 }
 
 // rewriteCanonical stages only changed indices, walking back to the shared
