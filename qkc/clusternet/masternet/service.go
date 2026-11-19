@@ -36,9 +36,6 @@ import (
 // MasterBackend supplies concurrent-safe business operations borrowed by Service.
 // Business rejections use *clusternet.RemoteError; other handler errors close the connection.
 type MasterBackend interface {
-	// RootTip returns the recovered checkpoint used to initialize all shards.
-	// It must return promptly; communication timeouts do not interrupt backend calls.
-	RootTip() (*qkctypes.RootBlock, error)
 	AddShardBlockHeader(sourceChainID *big.Int, header *types.Header, coinbaseAmount *uint256.Int) error
 }
 
@@ -56,9 +53,10 @@ const (
 // Service owns master-to-slave connections, not root-chain or mining resources.
 // Assembly is NewService -> master.New(client=Service) -> Start(master).
 // Start launches cluster initialization; WaitForInitialization waits for identity
-// checks, slave interconnection, and shard initialization. The owner then recovers
-// unfinished root broadcasts before starting normal business activity. Startup is attempted once;
-// failures request node shutdown; the owner calls Stop to drain connections.
+// checks and slave interconnection. The owner then calls RootChain.Init, which
+// initializes shards through Ping, before starting normal business activity.
+// Startup is attempted once; failures request node shutdown; the owner calls Stop
+// to drain connections.
 // Initial TCP dials retry until connected or stopped. Established connections
 // are never reconnected.
 type Service struct {
@@ -153,7 +151,8 @@ func (s *Service) shutdown() {
 // Call it only after Start succeeds, then use IsActive to check readiness.
 func (s *Service) WaitForInitialization() <-chan struct{} { return s.initDone }
 
-// IsActive reports whether initialization succeeded and Stop has not begun.
+// IsActive reports whether communication initialization succeeded and Stop has not begun.
+// It does not report shard or root-chain readiness.
 // It does not check connection health; Shutdown asks the owner to call Stop.
 func (s *Service) IsActive() bool {
 	s.mu.Lock()
@@ -174,11 +173,9 @@ func (s *Service) initCluster() error {
 		// 1. Establish every slave connection sequentially, retrying until connected.
 		s.connectSlaves,
 		// 2. Send identity-only PINGs concurrently after all connections exist.
-		func() error { return s.pingSlaves(nil) },
+		s.identifySlaves,
 		// 3. Ask slaves to interconnect, waiting for each response before the next command.
 		s.interconnectSlaves,
-		// 4. Send PINGs with the root tip concurrently to initialize all shard chains.
-		s.initShards,
 	}
 	for _, step := range steps {
 		err := step()
@@ -190,7 +187,7 @@ func (s *Service) initCluster() error {
 		}
 	}
 
-	// 5. Publish readiness only after every initialization PONG succeeds.
+	// 4. Publish communication readiness after slave interconnection succeeds.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == ServiceStateStarting {
@@ -242,27 +239,12 @@ func (s *Service) connectSlave(info clusternet.SlaveInfo) error {
 	return nil
 }
 
-func (s *Service) pingSlaves(root *qkctypes.RootBlock) error {
-	action := "identify"
-	if root != nil {
-		action = "initialize"
-	}
-	errs := make([]error, len(s.cfg.SlaveInfos))
-	var wg sync.WaitGroup
-	for i, info := range s.cfg.SlaveInfos {
-		sc := s.conns[info.ChainID.String()]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
-			defer cancel()
-			if err := sc.SendPing(ctx, root); err != nil {
-				errs[i] = fmt.Errorf("%s slave %s: %w", action, sc.RemoteChainID(), err)
-			}
-		}()
-	}
-	wg.Wait()
-	return errors.Join(errs...)
+func (s *Service) identifySlaves() error {
+	return s.broadcastToSlaves(func(sc *SlaveConn) error {
+		ctx, cancel := context.WithTimeout(context.Background(), startupNetworkTimeout)
+		defer cancel()
+		return sc.SendPing(ctx, nil)
+	})
 }
 
 func (s *Service) interconnectSlaves() error {
@@ -279,20 +261,6 @@ func (s *Service) interconnectSlaves() error {
 		}
 	}
 	return nil
-}
-
-func (s *Service) initShards() error {
-	root, err := s.backend.RootTip()
-	if err != nil {
-		return fmt.Errorf("get root checkpoint: %w", err)
-	}
-	if root == nil {
-		return errors.New("missing root checkpoint")
-	}
-	if s.isStopped() {
-		return nil
-	}
-	return s.pingSlaves(root)
 }
 
 func (s *Service) connections() []*SlaveConn {
@@ -322,9 +290,6 @@ func (s *Service) connection(chainID *big.Int) *SlaveConn {
 
 // broadcastToSlaves sends to every slave concurrently and joins all failures.
 func (s *Service) broadcastToSlaves(send func(*SlaveConn) error) error {
-	if !s.IsActive() {
-		return errors.New("master service is not ready")
-	}
 	conns := s.connections()
 	errs := make([]error, len(conns))
 	var wg sync.WaitGroup
@@ -341,9 +306,24 @@ func (s *Service) broadcastToSlaves(send func(*SlaveConn) error) error {
 	return errors.Join(errs...)
 }
 
+// Ping sends the caller's checkpoint to every configured slave and waits for PONGs.
+// The caller must abort startup on failure because some shards may have initialized.
+func (s *Service) Ping(ctx context.Context, checkpoint *qkctypes.RootBlock) error {
+	if !s.IsActive() {
+		return errors.New("master service is not ready")
+	}
+	if checkpoint == nil {
+		return errors.New("missing root checkpoint")
+	}
+	return s.broadcastToSlaves(func(sc *SlaveConn) error { return sc.SendPing(ctx, checkpoint) })
+}
+
 // BroadcastRootBlock implements master.ClusterClient. Every configured slave
 // must acknowledge the root; partial delivery is returned as an error for retry.
 func (s *Service) BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock) error {
+	if !s.IsActive() {
+		return errors.New("master service is not ready")
+	}
 	if block == nil {
 		return errors.New("missing root block")
 	}
@@ -353,6 +333,9 @@ func (s *Service) BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBl
 // GetUnconfirmedHeaderList collects all chains, failing rather than omitting a
 // missing slave. Filtering headers not yet reported to master is backend work.
 func (s *Service) GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*types.Header, error) {
+	if !s.IsActive() {
+		return nil, errors.New("master service is not ready")
+	}
 	headers := make(map[string][]*types.Header)
 	var mu sync.Mutex
 	err := s.broadcastToSlaves(func(sc *SlaveConn) error {
