@@ -146,8 +146,8 @@ func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain, builder *mine
 // of G0 in one batch; no stored root is required.
 //
 // For a non-genesis root, restore its stored shard confirmation if it is local.
-// Otherwise, restore the confirmation of its locally stored direct parent,
-// then import the supplied root through the normal root-block path. Required roots,
+// Otherwise, import it using its locally stored direct parent and restore the
+// supplied root's confirmation directly. Required roots,
 // confirmations, shard blocks, state and cross-shard data must be available;
 // Init does not synchronize data or search for an earlier checkpoint.
 //
@@ -196,20 +196,14 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 			if parent == nil {
 				return fmt.Errorf("%w: %w: parent %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, root.ParentHash())
 			}
-			confirmed, err := c.lastConfirmed(parent)
-			if err != nil {
-				return err
-			}
 			if root.TotalDifficulty().Cmp(&parent.TotalDifficulty) <= 0 {
 				return fmt.Errorf("%w: recovery root must outweigh its parent", ErrInvalidRootBlock)
 			}
-			if err := c.setHeadForRootTip(parent, confirmed); err != nil {
-				return err
-			}
 			// Keep rootTip nil until the supplied root is fully imported, so head
 			// selection restores its exact confirmation and failures remain retryable.
-			// Pass its parent explicitly without publishing an initialized tip.
-			_, err = c.insertRootBlock(root, parent)
+			// The import validates the parent's confirmation without first switching
+			// the shard head to it. Pass the parent without publishing an initialized tip.
+			_, err := c.insertRootBlock(root, parent)
 			return err
 		}
 		var err error
@@ -786,8 +780,9 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 // Headers not yet reported to master must also be filtered out by master.
 //
 // Master must wait for all shards to acknowledge root delivery before collecting
-// headers. On delivery failure, RootChain requests master shutdown. After the
-// cluster restarts, master reloads its persisted root tip and initializes every
+// headers. On delivery failure, RootChain stops accepting further imports.
+// The communication layer requests master shutdown on connection failure.
+// After a cluster restart, master reloads its persisted root tip and initializes every
 // shard at it. Each shard restores that root locally or imports it from its
 // stored direct parent. Root construction resumes only after all shards initialize
 // successfully, so they agree with master on the root tip.

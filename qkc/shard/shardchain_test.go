@@ -529,9 +529,9 @@ func TestShardChainInitMissingParent(t *testing.T) {
 	}
 }
 
-// Recovery first restores the direct parent's confirmed head, then imports the
-// supplied root. Failures in either phase must leave Init retryable, even if the
-// canonical shard head has moved.
+// Recovery validates the supplied root against its stored direct parent and
+// switches directly to the supplied root's confirmation. Failures must leave
+// Init retryable, even if the canonical shard head has moved.
 func TestShardChainInitMissingRootRetry(t *testing.T) {
 	for _, stage := range []string{"parent confirmation", "parent shard block", "confirmed block", "deposits", "root batch", "head switch", "root weight"} {
 		t.Run(stage, func(t *testing.T) {
