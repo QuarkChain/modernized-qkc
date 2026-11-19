@@ -179,9 +179,10 @@ func initM1Shards(backends []*eth.Ethereum) (*qkctypes.RootBlock, error) {
 	return root, nil
 }
 
-// advanceM1Root delivers all pending blocks' deposits before confirming their
-// headers in a new offline root. Empty lists are delivered too. Roots have unit
-// difficulty and no rewards or seals; this driver only coordinates local shards.
+// advanceM1Root delivers deposits for the next batch of unconfirmed blocks from
+// each shard before confirming their headers in a new offline root. Empty lists
+// are delivered too. Roots have unit difficulty and no rewards or seals, and the
+// driver only coordinates local shards.
 func advanceM1Root(ctx context.Context, backends []*eth.Ethereum, root *qkctypes.RootBlock) (*qkctypes.RootBlock, error) {
 	backends = slices.Clone(backends)
 	slices.SortFunc(backends, func(a, b *eth.Ethereum) int {
