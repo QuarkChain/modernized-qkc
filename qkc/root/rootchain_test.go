@@ -79,14 +79,16 @@ func (db *rootDB) Get(key []byte) ([]byte, error) {
 }
 
 type rootEnv struct {
-	t         *testing.T
-	config    *params.QuarkChainConfig
-	db        *rootDB
-	client    *rootClient
-	engine    posw.RootEngine
-	chain     *RootChain
-	genesis   *types.RootBlock
-	confirmed map[string]common.Hash
+	backendCtx context.Context
+	cancel     context.CancelFunc
+	t          *testing.T
+	config     *params.QuarkChainConfig
+	db         *rootDB
+	client     *rootClient
+	engine     posw.RootEngine
+	chain      *RootChain
+	genesis    *types.RootBlock
+	confirmed  map[string]common.Hash
 }
 
 // Seed the DB directly: genesis creation and root insertion are outside this PR.
@@ -105,6 +107,8 @@ func newRootEnv(t *testing.T) *rootEnv {
 	}
 	f.engine = engine
 	t.Cleanup(func() { engine.Close() })
+	f.backendCtx, f.cancel = context.WithCancel(context.Background())
+	t.Cleanup(f.cancel)
 	var headers types.ShardBlockHeaders
 	for _, id := range f.config.ChainIDs {
 		header := &coretypes.Header{
@@ -124,7 +128,7 @@ func newRootEnv(t *testing.T) *rootEnv {
 
 func (f *rootEnv) open() *RootChain {
 	f.t.Helper()
-	c, err := New(f.config, f.client, f.db, f.engine)
+	c, err := New(f.backendCtx, f.config, f.client, f.db, f.engine)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -228,7 +232,7 @@ func TestRootNewRejectsMissingHead(t *testing.T) {
 	if err := qkcrawdb.WriteRootHeadBlockHash(f.db, common.Hash{1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(f.config, f.client, f.db, f.engine); !errors.Is(err, ErrRootDataMissing) {
+	if _, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); !errors.Is(err, ErrRootDataMissing) {
 		t.Fatal("missing head block accepted", err)
 	}
 }
@@ -236,15 +240,44 @@ func TestRootNewRejectsMissingHead(t *testing.T) {
 // Local recovery failures are constructor errors. Repairing the database permits
 // another construction attempt without advancing or rewinding the stored head.
 func TestRootNewRejectsMissingRecoveryData(t *testing.T) {
-	for _, missing := range []string{"snapshot", "empty snapshot", "shard confirmation"} {
+	for _, missing := range []string{"canonical index", "stale canonical index", "snapshot", "empty snapshot", "shard confirmation", "body commitment", "stale confirmation"} {
 		t.Run(missing, func(t *testing.T) {
 			f := newRootEnv(t)
-			tip := f.block(f.genesis, 1)
+			// Two headers from one shard exercise its last-header confirmation;
+			// the other shard keeps its inherited genesis confirmation.
+			first := coretypes.CopyHeader(f.genesis.ShardBlockHeaders()[0])
+			first.Number, first.ParentHash = big.NewInt(1), f.confirmed["10001"]
+			last := coretypes.CopyHeader(first)
+			last.Number, last.ParentHash = big.NewInt(2), first.Hash()
+			headers := types.ShardBlockHeaders{first, last}
+			tip := types.NewRootBlock(f.block(f.genesis, 1).Header(), headers, nil)
+			f.confirmed["10001"] = last.Hash()
 			qkcrawdb.WriteRootBlock(f.db, tip)
 			if err := qkcrawdb.WriteRootHeadBlockHash(f.db, tip.Hash()); err != nil {
 				t.Fatal(err)
 			}
+			if missing != "canonical index" {
+				hash := tip.Hash()
+				if missing == "stale canonical index" {
+					hash = f.genesis.Hash()
+				}
+				if err := qkcrawdb.WriteRootCanonicalHash(f.db, hash, tip.Number()); err != nil {
+					t.Fatal(err)
+				}
+			}
 			switch missing {
+			case "canonical index", "stale canonical index", "body commitment":
+				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), f.confirmed); err != nil {
+					t.Fatal(err)
+				}
+				if missing == "body commitment" {
+					qkcrawdb.WriteRootBlock(f.db, tip.WithBody(headers[:1], nil))
+				}
+			case "stale confirmation":
+				confirmed := map[string]common.Hash{"10001": first.Hash(), "10002": f.confirmed["10002"]}
+				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), confirmed); err != nil {
+					t.Fatal(err)
+				}
 			case "empty snapshot":
 				if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), nil); err != nil {
 					t.Fatal(err)
@@ -254,8 +287,12 @@ func TestRootNewRejectsMissingRecoveryData(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if chain, err := New(f.config, f.client, f.db, f.engine); err == nil || chain != nil {
-				t.Fatal("missing persisted tip confirmations accepted", err)
+			if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); err == nil || chain != nil {
+				t.Fatal("invalid persisted tip recovery data accepted", err)
+			}
+			qkcrawdb.WriteRootBlock(f.db, tip)
+			if err := qkcrawdb.WriteRootCanonicalHash(f.db, tip.Hash(), tip.Number()); err != nil {
+				t.Fatal(err)
 			}
 			if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, tip.Hash(), f.confirmed); err != nil {
 				t.Fatal(err)
@@ -289,7 +326,7 @@ func TestRootNewRejectsUnexpectedConfirmationChains(t *testing.T) {
 			if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, f.genesis.Hash(), confirmed); err != nil {
 				t.Fatal(err)
 			}
-			if chain, err := New(f.config, f.client, f.db, f.engine); err == nil || chain != nil {
+			if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); err == nil || chain != nil {
 				t.Fatal("unexpected confirmation chain accepted", err)
 			}
 		})
@@ -303,7 +340,7 @@ func TestRootReadErrors(t *testing.T) {
 	}
 	failure := errors.New("database failed")
 	f.db.readErr = failure
-	if chain, err := New(f.config, f.client, f.db, f.engine); !errors.Is(err, failure) || chain != nil {
+	if chain, err := New(f.backendCtx, f.config, f.client, f.db, f.engine); !errors.Is(err, failure) || chain != nil {
 		t.Fatal("head read failure accepted", err)
 	}
 	if confirmed, err := f.chain.GetLastConfirmedShardBlocks(f.genesis.Hash()); confirmed != nil || !errors.Is(err, failure) || errors.Is(err, ErrRootDataMissing) {
@@ -316,15 +353,22 @@ func TestRootInitGenesis(t *testing.T) {
 	if f.chain.Ready() {
 		t.Fatal("New initialized the cluster")
 	}
-	if err := f.chain.Init(context.Background()); err != nil || !f.chain.Ready() {
+	if err := f.chain.Init(); err != nil || !f.chain.Ready() {
 		t.Fatal("cluster initialization failed", err)
 	}
 	if len(f.client.checkpoints) != 1 || f.client.checkpoints[0] != f.genesis.Hash() || len(f.client.broadcasts) != 0 {
 		t.Fatal("genesis startup did not only initialize shards")
 	}
 	f.db.readErr = errors.New("successful Init should not read again")
-	if err := f.chain.Init(context.Background()); err != nil || len(f.client.calls) != 1 {
+	if err := f.chain.Init(); err != nil || len(f.client.calls) != 1 {
 		t.Fatal("successful Init was not idempotent", err)
+	}
+	f.cancel()
+	if f.chain.Ready() {
+		t.Fatal("backend cancellation left the chain ready")
+	}
+	if err := f.chain.Init(); !errors.Is(err, context.Canceled) {
+		t.Fatal("Init ignored backend cancellation", err)
 	}
 }
 
@@ -350,7 +394,7 @@ func TestRootInitUsesPersistedTip(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Init(context.Background()); err != nil || !c.Ready() || c.RootTip().Hash() != b.Hash() {
+	if err := c.Init(); err != nil || !c.Ready() || c.RootTip().Hash() != b.Hash() {
 		t.Fatal("initialization at persisted tip failed", err)
 	}
 	if len(f.client.calls) != 1 || f.client.calls[0] != "ping" || len(f.client.broadcasts) != 0 {
@@ -370,19 +414,17 @@ func TestRootInitFailure(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			f := newRootEnv(t)
 			failure := errors.New("startup failed")
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			switch stage {
 			case "ping":
 				f.client.pingErr = failure
 			case "cancel before init":
 				failure = context.Canceled
-				cancel()
+				f.cancel()
 			case "cancel ping":
 				failure = context.Canceled
-				f.client.onPing = func(ctx context.Context, _ *types.RootBlock) error { cancel(); return ctx.Err() }
+				f.client.onPing = func(ctx context.Context, _ *types.RootBlock) error { f.cancel(); return ctx.Err() }
 			}
-			if err := f.chain.Init(ctx); !errors.Is(err, failure) || f.chain.Ready() {
+			if err := f.chain.Init(); !errors.Is(err, failure) || f.chain.Ready() {
 				t.Fatal("failed startup lost the error or published readiness", err)
 			}
 			if f.chain.RootTip().Hash() != f.genesis.Hash() || len(f.client.broadcasts) != 0 {
@@ -395,7 +437,7 @@ func TestRootInitFailure(t *testing.T) {
 	}
 }
 
-// Waiting callers check cancellation or reuse the result after acquiring the lock.
+// Concurrent callers reuse successful initialization after acquiring the lock.
 func TestRootInitConcurrentCallers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newRootEnv(t)
@@ -405,28 +447,24 @@ func TestRootInitConcurrentCallers(t *testing.T) {
 			<-release
 			return nil
 		}
-		first := make(chan error, 1)
-		go func() { first <- f.chain.Init(context.Background()) }()
+		results := make(chan error, 3)
+		go func() { results <- f.chain.Init() }()
 		<-started
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cancelled, successful := make(chan error, 1), make(chan error, 1)
-		go func() { cancelled <- f.chain.Init(ctx) }()
-		go func() { successful <- f.chain.Init(context.Background()) }()
+		for range 2 {
+			go func() { results <- f.chain.Init() }()
+		}
 		synctest.Wait()
-		cancel()
 		if f.chain.Ready() || f.chain.RootTip() == nil {
 			t.Fatal("cluster readiness was not separate from local recovery")
 		}
 		close(release)
-		if err := <-first; err != nil {
-			t.Fatal("initial startup failed", err)
+		for range 3 {
+			if err := <-results; err != nil {
+				t.Fatal("concurrent initialization failed", err)
+			}
 		}
-		if err := <-cancelled; !errors.Is(err, context.Canceled) {
-			t.Fatal("Init ignored cancellation after acquiring the lock", err)
-		}
-		if err := <-successful; err != nil || !f.chain.Ready() || len(f.client.calls) != 1 {
-			t.Fatal("waiting caller failed or repeated initialization", err)
+		if !f.chain.Ready() || len(f.client.calls) != 1 {
+			t.Fatal("concurrent callers repeated initialization or lost readiness")
 		}
 	})
 }
@@ -435,14 +473,16 @@ func TestRootCloseWaitsForInit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newRootEnv(t)
 		started, release := make(chan struct{}), make(chan struct{})
-		f.client.onPing = func(context.Context, *types.RootBlock) error {
+		f.client.onPing = func(ctx context.Context, _ *types.RootBlock) error {
 			close(started)
-			<-release
-			return nil
+			<-ctx.Done()
+			<-release // RPC cleanup must finish before Close returns.
+			return ctx.Err()
 		}
 		initialized := make(chan error, 1)
-		go func() { initialized <- f.chain.Init(context.Background()) }()
+		go func() { initialized <- f.chain.Init() }()
 		<-started
+		f.cancel() // The backend owns cancellation, before calling Close.
 		closed := make(chan struct{}, 2)
 		go func() {
 			f.chain.Close()
@@ -461,8 +501,8 @@ func TestRootCloseWaitsForInit(t *testing.T) {
 			closed <- struct{}{}
 		}()
 		close(release)
-		if err := <-initialized; err != nil {
-			t.Fatal(err)
+		if err := <-initialized; !errors.Is(err, context.Canceled) {
+			t.Fatal("backend cancellation did not reach the initialization RPC", err)
 		}
 		for range 2 {
 			<-closed
@@ -471,18 +511,19 @@ func TestRootCloseWaitsForInit(t *testing.T) {
 		if f.chain.Ready() {
 			t.Fatal("closed chain remained ready")
 		}
-		if err := f.chain.Init(context.Background()); !errors.Is(err, errChainStopped) {
+		if err := f.chain.Init(); !errors.Is(err, errChainStopped) {
 			t.Fatal("closed chain accepted initialization", err)
 		}
 	})
 }
 
-func TestRootInitFinalizesSuccessfulRPCDespiteCancellation(t *testing.T) {
+func TestRootInitRecordsSuccessfulPingAfterBackendCancellation(t *testing.T) {
 	f := newRootEnv(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	f.client.onPing = func(context.Context, *types.RootBlock) error { cancel(); return nil }
-	if err := f.chain.Init(ctx); err != nil || !f.chain.Ready() {
-		t.Fatal("successful startup did not publish readiness", err)
+	f.client.onPing = func(context.Context, *types.RootBlock) error { f.cancel(); return nil }
+	if err := f.chain.Init(); err != nil {
+		t.Fatal("successful PING did not complete initialization", err)
+	}
+	if !f.chain.ready.Load() || f.chain.Ready() {
+		t.Fatal("initialization must be recorded without reporting readiness after cancellation")
 	}
 }

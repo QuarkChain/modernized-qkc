@@ -44,16 +44,18 @@ var (
 )
 
 // RootChain manages root-chain data and recovery using a caller-provided database,
-// client and consensus engine. The caller owns their lifetimes. Configuration must
-// match the engine and stay unchanged after New. The caller must drain in-flight
-// operations before closing resources.
+// client and consensus engine. The backend owns their lifetimes and cancels
+// backendCtx before calling Close. Configuration must match the engine and stay
+// unchanged after New. The caller must drain in-flight operations before closing
+// shared resources.
 // TODO(backend): Call Init after cluster connections are ready and before
 // starting sync, mining or imports.
 type RootChain struct {
-	config *params.QuarkChainConfig
-	client ClusterClient
-	db     ethdb.Database
-	engine posw.RootEngine
+	backendCtx context.Context
+	config     *params.QuarkChainConfig
+	client     ClusterClient
+	db         ethdb.Database
+	engine     posw.RootEngine
 
 	// Blocks are immutable and keyed by hash, so side branches share this cache.
 	blockCache *lru.Cache[common.Hash, *types.RootBlock]
@@ -73,12 +75,16 @@ var _ posw.RootChainReader = (*RootChain)(nil)
 // without rewinding or changing the stored head.
 // It binds the supplied client and engine without taking ownership of them or
 // making cluster RPCs. The caller must validate configuration when creating the engine.
+// backendCtx controls RootChain's lifetime and is canceled only by the backend.
 // Genesis, canonical indices and cumulative confirmations must already be stored.
 // TODO: Root insertion must persist the block, its confirmations and canonical
 // head updates atomically so recovery never observes a partially stored tip.
-func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
-	if config == nil || client == nil || db == nil || engine == nil {
-		return nil, errors.New("missing root configuration, cluster client, database or engine")
+func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
+	if backendCtx == nil || config == nil || client == nil || db == nil || engine == nil {
+		return nil, errors.New("missing backend context, root configuration, cluster client, database or engine")
+	}
+	if err := backendCtx.Err(); err != nil {
+		return nil, err
 	}
 	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
 	// genesis. For an empty database, atomically store genesis, its cumulative shard
@@ -98,12 +104,17 @@ func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Databas
 	if tip.Hash() != hash {
 		return nil, fmt.Errorf("root block does not match stored hash %x", hash)
 	}
+	// Hash and height lookups must agree before publishing the persisted tip.
+	if canonical := rawdb.ReadRootCanonicalHash(db, tip.Number()); canonical != hash {
+		return nil, fmt.Errorf("canonical root hash at height %d does not match persisted head: have %x, want %x", tip.Number(), canonical, hash)
+	}
 	c := &RootChain{
-		config: config, client: client, db: db, engine: engine,
+		backendCtx: backendCtx,
+		config:     config, client: client, db: db, engine: engine,
 		chainmu:    syncx.NewClosableMutex(),
 		blockCache: lru.NewCache[common.Hash, *types.RootBlock](blockCacheLimit),
 	}
-	if err := c.checkConfirmations(hash); err != nil {
+	if err := c.checkConfirmations(tip); err != nil {
 		return nil, err
 	}
 	c.blockCache.Add(hash, tip)
@@ -112,7 +123,10 @@ func New(config *params.QuarkChainConfig, client ClusterClient, db ethdb.Databas
 }
 
 // Recovery requires exactly one nonzero confirmation for every configured shard.
-func (c *RootChain) checkConfirmations(hash common.Hash) error {
+// Non-genesis tips must also match their body commitment and the last carried
+// header for each shard; shards absent from the body retain inherited confirmations.
+func (c *RootChain) checkConfirmations(tip *types.RootBlock) error {
+	hash := tip.Hash()
 	confirmed, err := c.GetLastConfirmedShardBlocks(hash)
 	if err != nil {
 		return err
@@ -123,6 +137,26 @@ func (c *RootChain) checkConfirmations(hash common.Hash) error {
 	for _, id := range c.config.ChainIDs {
 		if confirmed[id.String()] == (common.Hash{}) {
 			return fmt.Errorf("%w: root %x chain %s confirmation", ErrRootDataMissing, hash, id)
+		}
+	}
+	if tip.Number() == 0 {
+		return nil
+	}
+	headers := tip.ShardBlockHeaders()
+	if types.CalcShardHeaderHash(headers) != tip.ShardHeaderHash() {
+		return fmt.Errorf("root %x shard header commitment mismatch", hash)
+	}
+	last := make(map[string]common.Hash)
+	for _, header := range headers {
+		extra, err := header.QKCExtra()
+		if err != nil {
+			return fmt.Errorf("decode shard header %x in root %x: %w", header.Hash(), hash, err)
+		}
+		last[extra.ChainID.String()] = header.Hash()
+	}
+	for id, want := range last {
+		if got := confirmed[id]; got != want {
+			return fmt.Errorf("root %x chain %s confirmation mismatch: have %x, want %x", hash, id, got, want)
 		}
 	}
 	return nil
@@ -137,17 +171,17 @@ func (c *RootChain) checkConfirmations(hash common.Hash) error {
 // ShardChain.Init currently requires non-genesis roots and their confirmations
 // to already be stored locally.
 // Connections must be ready before this call. Init waits for all shards to
-// succeed before publishing Ready. On failure, the backend must abort startup
-// and stop the node.
+// succeed before publishing Ready and uses backendCtx for PING cancellation.
+// On failure, the backend must abort startup and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
 // a cluster restart. Repeating a successful Init is a no-op.
 // Init does not change the local tip.
-func (c *RootChain) Init(ctx context.Context) error {
+func (c *RootChain) Init() error {
 	if !c.chainmu.TryLock() {
 		return errChainStopped
 	}
 	defer c.chainmu.Unlock()
-	if err := ctx.Err(); err != nil {
+	if err := c.backendCtx.Err(); err != nil {
 		return err
 	}
 	if c.ready.Load() {
@@ -161,7 +195,7 @@ func (c *RootChain) Init(ctx context.Context) error {
 		return fmt.Errorf("%w: recovery checkpoint", ErrRootDataMissing)
 	}
 	// Every shard must acknowledge initialization at the master's persisted tip.
-	if err := c.client.Ping(ctx, block); err != nil {
+	if err := c.client.Ping(c.backendCtx, block); err != nil {
 		return fmt.Errorf("initialize shards: %w", err)
 	}
 	c.ready.Store(true)
@@ -169,8 +203,10 @@ func (c *RootChain) Init(ctx context.Context) error {
 }
 
 // Close waits for chain writes to finish and prevents further writes. It is safe
-// to call repeatedly or concurrently. The caller must cancel in-flight RPCs
-// before calling Close, and drain readers before closing the shared resources.
+// to call repeatedly or concurrently. Before calling Close, the backend must
+// cancel backendCtx and unblock pending RPCs, closing connections if needed.
+// Readers must be drained before shared resources are closed. Context cancellation
+// belongs to the backend.
 func (c *RootChain) Close() {
 	c.closeOnce.Do(func() {
 		c.chainmu.Close()
@@ -178,9 +214,10 @@ func (c *RootChain) Close() {
 	})
 }
 
-// Ready reports whether Init completed and the chain has not been closed.
+// Ready reports whether Init completed, the backend context is active and the
+// chain has not been closed.
 // Sync, mining and imports must wait for it.
-func (c *RootChain) Ready() bool { return c.ready.Load() }
+func (c *RootChain) Ready() bool { return c.ready.Load() && c.backendCtx.Err() == nil }
 
 // RootTip returns the recovered local tip, including before Init.
 // The returned header is read-only; callers must copy it before modification.
