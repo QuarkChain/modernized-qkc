@@ -325,6 +325,10 @@ func TestRootChainWriteErrors(t *testing.T) {
 	}{
 		{"root head", func() error { return WriteRootHeadBlockHash(db, hash) }},
 		{"canonical root", func() error { return WriteRootCanonicalHash(db, hash, 1) }},
+		{"delete canonical root", func() error { return DeleteRootCanonicalHash(db, 1) }},
+		{"root block", func() error {
+			return WriteRootBlockWithError(db, types.NewRootBlock(&types.RootBlockHeader{}, nil, nil))
+		}},
 		{"root confirmations", func() error { return WriteRootConfirmedShardBlocks(db, hash, map[string]common.Hash{"10001": hash}) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {

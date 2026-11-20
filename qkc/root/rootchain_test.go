@@ -34,14 +34,16 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// Record cluster startup RPCs and inject failures without real connections.
+// Record cluster RPCs and inject failures without real connections.
 type rootClient struct {
 	ClusterClient
-	calls       []string
-	checkpoints []common.Hash
-	broadcasts  []common.Hash
-	pingErr     error
-	onPing      func(context.Context, *types.RootBlock) error
+	calls        []string
+	checkpoints  []common.Hash
+	broadcasts   []common.Hash
+	pingErr      error
+	onPing       func(context.Context, *types.RootBlock) error
+	broadcastErr error
+	onBroadcast  func(context.Context, *types.RootBlock) error
 }
 
 func (c *rootClient) Ping(ctx context.Context, block *types.RootBlock) error {
@@ -62,16 +64,58 @@ func (c *rootClient) BroadcastRootBlock(ctx context.Context, block *types.RootBl
 	}
 	c.calls = append(c.calls, "broadcast")
 	c.broadcasts = append(c.broadcasts, block.Hash())
-	return nil
+	if c.onBroadcast != nil {
+		return c.onBroadcast(ctx, block)
+	}
+	return c.broadcastErr
 }
 
-// Inject storage failures during recovery and initialization.
+// Inject storage failures during recovery, initialization and insertion.
 type rootDB struct {
 	ethdb.Database
-	readErr error
+	readErr        error
+	nextRead       func() ([]byte, error)
+	putErr         error
+	batchErr       error
+	batchDeleteErr error
+}
+
+func (db *rootDB) NewBatch() ethdb.Batch {
+	return &rootBatch{Batch: db.Database.NewBatch(), db: db}
+}
+
+type rootBatch struct {
+	ethdb.Batch
+	db *rootDB
+}
+
+func (b *rootBatch) Put(key, value []byte) error {
+	if b.db.putErr != nil {
+		return b.db.putErr
+	}
+	return b.Batch.Put(key, value)
+}
+
+func (b *rootBatch) Delete(key []byte) error {
+	if b.db.batchDeleteErr != nil {
+		return b.db.batchDeleteErr
+	}
+	return b.Batch.Delete(key)
+}
+
+func (b *rootBatch) Write() error {
+	if b.db.batchErr != nil {
+		return b.db.batchErr
+	}
+	return b.Batch.Write()
 }
 
 func (db *rootDB) Get(key []byte) ([]byte, error) {
+	if db.nextRead != nil {
+		read := db.nextRead
+		db.nextRead = nil
+		return read()
+	}
 	if db.readErr != nil {
 		return nil, db.readErr
 	}
@@ -91,7 +135,7 @@ type rootEnv struct {
 	confirmed  map[string]common.Hash
 }
 
-// Seed the DB directly: genesis creation and root insertion are outside this PR.
+// Seed genesis directly so startup tests do not depend on block insertion.
 // Unlike Python's empty-DB startup, root genesis already confirms every member.
 func newRootEnv(t *testing.T) *rootEnv {
 	t.Helper()
@@ -135,7 +179,7 @@ func (f *rootEnv) open() *RootChain {
 	return c
 }
 
-// These are stored recovery fixtures; building or mining roots is not exercised.
+// Build root fixtures; consensus validation is exercised separately in poswroot.
 func (f *rootEnv) block(parent *types.RootBlock, seed byte) *types.RootBlock {
 	f.t.Helper()
 	header := &types.RootBlockHeader{
@@ -226,7 +270,7 @@ func TestRootRecoveryKeepsPersistedTip(t *testing.T) {
 }
 
 // A persisted head must reference a stored block; New does not recreate it.
-// goquarkchain loadLastState can Reset here; this PR requires external DB setup.
+// goquarkchain loadLastState can Reset here; RootChain requires external DB setup.
 func TestRootNewRejectsMissingHead(t *testing.T) {
 	f := newRootEnv(t)
 	if err := qkcrawdb.WriteRootHeadBlockHash(f.db, common.Hash{1}); err != nil {
@@ -517,13 +561,85 @@ func TestRootCloseWaitsForInit(t *testing.T) {
 	})
 }
 
+func TestRootCloseWaitsForWrites(t *testing.T) {
+	for _, operation := range []string{"init", "insert"} {
+		t.Run(operation, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newRootEnv(t)
+				block := f.block(f.genesis, 1)
+				started, release := make(chan struct{}), make(chan struct{})
+				holdRPC := func(context.Context, *types.RootBlock) error {
+					close(started)
+					<-release
+					return nil
+				}
+				write := func() error { return f.chain.Init() }
+				if operation == "init" {
+					f.client.onPing = holdRPC
+				} else {
+					f.engine = &insertEngine{RootEngine: f.engine}
+					f.chain.engine = f.engine
+					if err := f.chain.Init(); err != nil {
+						t.Fatal(err)
+					}
+					f.client.onBroadcast = holdRPC
+					write = func() error { return f.chain.InsertBlock(block) }
+				}
+				written := make(chan error, 1)
+				go func() { written <- write() }()
+				<-started
+				if f.chain.Ready() != (operation == "insert") {
+					t.Fatal("unexpected readiness before Close")
+				}
+				closed := make(chan struct{}, 2)
+				go func() {
+					f.chain.Close()
+					closed <- struct{}{}
+				}()
+				synctest.Wait()
+				if !f.chain.stopping.Load() || f.chain.Ready() {
+					t.Fatal("Close did not disable readiness before waiting for the write")
+				}
+				select {
+				case <-closed:
+					t.Fatal("Close returned before the write finished")
+				default:
+				}
+				// Start the second closer after Wait: sync.Once's mutex wait is not
+				// considered durably blocked by synctest.
+				go func() {
+					f.chain.Close()
+					closed <- struct{}{}
+				}()
+				close(release)
+				if err := <-written; err != nil {
+					t.Fatal(err)
+				}
+				for range 2 {
+					<-closed
+				}
+				f.chain.Close()
+				if !f.chain.initialized.Load() || f.chain.Ready() {
+					t.Fatal("closed chain lost initialization or remained ready")
+				}
+				if err := f.chain.Init(); !errors.Is(err, errChainStopped) {
+					t.Fatal("closed chain accepted initialization", err)
+				}
+				if err := f.chain.InsertBlock(block); !errors.Is(err, errChainStopped) {
+					t.Fatal("closed chain accepted insertion", err)
+				}
+			})
+		})
+	}
+}
+
 func TestRootInitRecordsSuccessfulPingAfterBackendCancellation(t *testing.T) {
 	f := newRootEnv(t)
 	f.client.onPing = func(context.Context, *types.RootBlock) error { f.cancel(); return nil }
 	if err := f.chain.Init(); err != nil {
 		t.Fatal("successful PING did not complete initialization", err)
 	}
-	if !f.chain.ready.Load() || f.chain.Ready() {
+	if !f.chain.initialized.Load() || f.chain.Ready() {
 		t.Fatal("initialization must be recorded without reporting readiness after cancellation")
 	}
 }

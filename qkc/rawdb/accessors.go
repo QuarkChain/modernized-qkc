@@ -78,13 +78,19 @@ func ReadRootBlockHeader(db ethdb.KeyValueReader, hash common.Hash) *types.RootB
 
 // WriteRootBlock stores a root block into the database.
 func WriteRootBlock(db ethdb.KeyValueWriter, block *types.RootBlock) {
-	data, err := block.MarshalSSZ()
-	if err != nil {
-		log.Crit("Failed to SSZ encode root block", "err", err)
-	}
-	if err := db.Put(rootBlockKey(block.Hash()), data); err != nil {
+	if err := WriteRootBlockWithError(db, block); err != nil {
 		log.Crit("Failed to store root block", "err", err)
 	}
+}
+
+// WriteRootBlockWithError stores a root block, returning encoding and write
+// errors to callers that can retry an import.
+func WriteRootBlockWithError(db ethdb.KeyValueWriter, block *types.RootBlock) error {
+	data, err := block.MarshalSSZ()
+	if err != nil {
+		return fmt.Errorf("failed to SSZ encode root block: %w", err)
+	}
+	return db.Put(rootBlockKey(block.Hash()), data)
 }
 
 // ReadRootHeadBlockHash retrieves the persisted canonical root head.
@@ -109,6 +115,11 @@ func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint32) common.Hash {
 // WriteRootCanonicalHash stores the hash assigned to a canonical root height.
 func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint32) error {
 	return db.Put(rootCanonicalKey(number), hash.Bytes())
+}
+
+// DeleteRootCanonicalHash removes a canonical index, retaining the block itself.
+func DeleteRootCanonicalHash(db ethdb.KeyValueWriter, number uint32) error {
+	return db.Delete(rootCanonicalKey(number))
 }
 
 type rootShardConfirmation struct {
