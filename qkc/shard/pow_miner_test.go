@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/holiman/uint256"
 )
 
@@ -38,10 +39,10 @@ func testPoWMiner(t *testing.T, test func(*testing.T)) {
 	synctest.Test(t, test)
 }
 
-func newPoWMinerEnv(t *testing.T, config PoWMinerConfig) (*testEnv, *PoWMiner) {
+func newPoWMinerEnv(t *testing.T, config mining.PoWMinerConfig) (*testEnv, *mining.PoWMiner[*types.Block, core.ChainHeadEvent]) {
 	t.Helper()
 	env, _, _ := newMiningEnv(t, 10002)
-	m := NewPoWMiner(newMiningShard(env.sc), config)
+	m := mining.NewPoWMiner(newMiningShard(env.sc), config)
 	t.Cleanup(m.StopLocalMining)
 	return env, m
 }
@@ -54,15 +55,7 @@ func newMiningShard(chain *ShardChain) *Shard {
 	}}
 }
 
-// servedBlock returns the served candidate with the given seal hash.
-func (m *PoWMiner) servedBlock(sealHash common.Hash) *types.Block {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	block, _ := m.works.Get(sealHash)
-	return block
-}
-
-func getWork(t *testing.T, m *PoWMiner, coinbase common.Address) *MiningWork {
+func getWork(t *testing.T, m *mining.PoWMiner[*types.Block, core.ChainHeadEvent], coinbase common.Address) *mining.MiningWork {
 	t.Helper()
 	work, err := m.GetWork(context.Background(), coinbase)
 	if err != nil {
@@ -83,12 +76,12 @@ func waitForHead(t *testing.T, env *testEnv, number uint64) {
 
 func TestPoWMinerGetWork(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
-		env, m := newPoWMinerEnv(t, PoWMinerConfig{})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
 		a, b := common.Address{0xaa}, common.Address{0xbb}
 		first := getWork(t, m, a)
-		block := m.servedBlock(first.SealHash)
-		if block == nil || block.Coinbase() != a || block.ParentHash() != env.genesis.Hash() {
-			t.Fatal("work was not built on the head for the requested coinbase")
+		block, _, err := newMiningShard(env.sc).CreateBlockToMine(t.Context(), a)
+		if err != nil {
+			t.Fatal(err)
 		}
 		if sealHash, _ := block.Header().QKCSealHash(); sealHash != first.SealHash || first.Number != 1 || first.Time != block.Time() {
 			t.Fatalf("work does not describe its candidate: %+v", first)
@@ -97,12 +90,12 @@ func TestPoWMinerGetWork(t *testing.T) {
 		if first.Difficulty.Sign() <= 0 || first.Difficulty.Cmp(block.Header().QKCDifficulty()) != 0 {
 			t.Fatalf("work difficulty %v, want base difficulty %v", first.Difficulty, block.Header().QKCDifficulty())
 		}
-		time.Sleep(DefaultWorkRefresh - time.Second)
+		time.Sleep(mining.DefaultWorkRefresh - time.Second)
 		if work := getWork(t, m, a); work.SealHash != first.SealHash {
 			t.Fatal("current work was rebuilt")
 		}
 		other := getWork(t, m, b)
-		if other.SealHash == first.SealHash || m.servedBlock(other.SealHash).Coinbase() != b {
+		if other.SealHash == first.SealHash {
 			t.Fatal("coinbases share work")
 		}
 		time.Sleep(time.Second)
@@ -113,8 +106,11 @@ func TestPoWMinerGetWork(t *testing.T) {
 		if err := m.SubmitWork(other.SealHash, types.EncodeNonce(1), common.Hash{}); err != nil {
 			t.Fatal(err)
 		}
-		next := getWork(t, m, a)
-		if next.Number != 2 || m.servedBlock(next.SealHash).ParentHash() != env.chain.CurrentBlock().Hash() {
+		head := env.chain.CurrentBlock()
+		if head.Coinbase != b || head.ParentHash != env.genesis.Hash() {
+			t.Fatal("submitted work was not built on the head for the requested coinbase")
+		}
+		if next := getWork(t, m, a); next.Number != 2 {
 			t.Fatal("work was not rebuilt on the new head")
 		}
 	})
@@ -122,7 +118,7 @@ func TestPoWMinerGetWork(t *testing.T) {
 
 func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
-		env, m := newPoWMinerEnv(t, PoWMinerConfig{})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
 		coinbase := common.Address{0xaa}
 		first := getWork(t, m, coinbase)
 		// Replace the root tip the work references, keeping the shard head.
@@ -131,7 +127,10 @@ func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 		env.insertRoot(fork, true)
 		env.checkHead(env.genesis)
 		work := getWork(t, m, coinbase)
-		extra, _ := m.servedBlock(work.SealHash).Header().QKCExtra()
+		if err := m.SubmitWork(work.SealHash, types.EncodeNonce(1), common.Hash{}); err != nil {
+			t.Fatal(err)
+		}
+		extra, _ := env.chain.CurrentBlock().QKCExtra()
 		if work.SealHash == first.SealHash || extra.PrevRootBlock != fork.Hash() {
 			t.Fatal("work was not rebuilt on the new root tip")
 		}
@@ -140,13 +139,13 @@ func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 
 func TestPoWMinerSubmitWork(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
-		env, m := newPoWMinerEnv(t, PoWMinerConfig{})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
 		a, b := common.Address{0xaa}, common.Address{0xbb}
-		if err := m.SubmitWork(common.Hash{1}, types.BlockNonce{}, common.Hash{}); !errors.Is(err, ErrUnknownWork) {
+		if err := m.SubmitWork(common.Hash{1}, types.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrUnknownWork) {
 			t.Fatalf("unknown work: %v", err)
 		}
 		first := getWork(t, m, a)
-		time.Sleep(DefaultWorkRefresh)
+		time.Sleep(mining.DefaultWorkRefresh)
 		second := getWork(t, m, a)
 		other := getWork(t, m, b)
 		// Superseded work is accepted while its parent is the head.
@@ -160,14 +159,14 @@ func TestPoWMinerSubmitWork(t *testing.T) {
 		if head.Number.Uint64() != 1 || head.Coinbase != a || sealHash != first.SealHash || extra.Nonce != nonce || extra.MixHash != mixHash {
 			t.Fatal("head is not the sealed candidate")
 		}
-		if err := m.SubmitWork(first.SealHash, nonce, mixHash); !errors.Is(err, ErrUnknownWork) {
+		if err := m.SubmitWork(first.SealHash, nonce, mixHash); !errors.Is(err, mining.ErrUnknownWork) {
 			t.Fatalf("imported work: %v", err)
 		}
-		for _, work := range []*MiningWork{second, other} {
-			if err := m.SubmitWork(work.SealHash, nonce, mixHash); !errors.Is(err, ErrStaleWork) {
+		for _, work := range []*mining.MiningWork{second, other} {
+			if err := m.SubmitWork(work.SealHash, nonce, mixHash); !errors.Is(err, mining.ErrStaleWork) {
 				t.Fatalf("work on the old head: %v", err)
 			}
-			if err := m.SubmitWork(work.SealHash, nonce, mixHash); !errors.Is(err, ErrUnknownWork) {
+			if err := m.SubmitWork(work.SealHash, nonce, mixHash); !errors.Is(err, mining.ErrUnknownWork) {
 				t.Fatalf("dropped stale work: %v", err)
 			}
 		}
@@ -193,7 +192,7 @@ func TestPoWMinerSubmitWorkInsertFailure(t *testing.T) {
 		env, _, _ := newMiningEnv(t, 10002)
 		insertErr := errors.New("insert failed")
 		backend := &failingShard{Shard: newMiningShard(env.sc), err: insertErr}
-		m := NewPoWMiner(backend, PoWMinerConfig{})
+		m := mining.NewPoWMiner(backend, mining.PoWMinerConfig{})
 		work := getWork(t, m, common.Address{0xaa})
 		if err := m.SubmitWork(work.SealHash, types.EncodeNonce(1), common.Hash{}); !errors.Is(err, insertErr) {
 			t.Fatalf("insert failure: %v", err)
@@ -212,15 +211,15 @@ func TestPoWMinerSubmitWorkInsertFailure(t *testing.T) {
 
 // sealing is a local search whose seals the test supplies.
 type sealing struct {
-	works chan *MiningWork
+	works chan *mining.MiningWork
 	seals chan types.BlockNonce
 }
 
 func newSealing() *sealing {
-	return &sealing{works: make(chan *MiningWork), seals: make(chan types.BlockNonce)}
+	return &sealing{works: make(chan *mining.MiningWork), seals: make(chan types.BlockNonce)}
 }
 
-func (s *sealing) Search(ctx context.Context, work *MiningWork) (types.BlockNonce, common.Hash, bool) {
+func (s *sealing) Search(ctx context.Context, work *mining.MiningWork) (types.BlockNonce, common.Hash, bool) {
 	select {
 	case s.works <- work:
 	case <-ctx.Done():
@@ -238,7 +237,7 @@ func TestPoWMinerLocal(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		coinbase := common.Address{0x42}
 		search := newSealing()
-		env, m := newPoWMinerEnv(t, PoWMinerConfig{Coinbase: coinbase, Search: search})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{Coinbase: coinbase, Search: search})
 		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +261,7 @@ func TestPoWMinerLocal(t *testing.T) {
 			t.Fatal(err)
 		}
 		third := <-search.works
-		if third.Number != 3 || m.servedBlock(third.SealHash).ParentHash() != env.chain.CurrentBlock().Hash() {
+		if third.Number != 3 || env.chain.CurrentBlock().Number.Uint64() != 2 {
 			t.Fatal("local search did not follow the remote head")
 		}
 		// Expired work is replaced.
@@ -288,7 +287,7 @@ func TestPoWMinerLocal(t *testing.T) {
 func TestPoWMinerSimulated(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		coinbase := common.Address{0x42}
-		env, m := newPoWMinerEnv(t, PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{Coinbase: coinbase, Search: NewSimulatedSearch(5 * time.Second)})
 		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
@@ -304,7 +303,7 @@ func TestPoWMinerSimulated(t *testing.T) {
 }
 
 func TestPoWMinerStartWithoutSearch(t *testing.T) {
-	_, m := newPoWMinerEnv(t, PoWMinerConfig{})
+	_, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
 	if err := m.StartLocalMining(); err == nil {
 		t.Fatal("started local mining without a search")
 	}
@@ -315,13 +314,13 @@ func TestSimulatedSearch(t *testing.T) {
 		const blockTime = 10 * time.Second
 		search := NewSimulatedSearch(blockTime)
 		// Seals are never earlier than the candidate's timestamp.
-		work := &MiningWork{Time: uint64(time.Now().Unix()) + 5}
+		work := &mining.MiningWork{Time: uint64(time.Now().Unix()) + 5}
 		if _, _, ok := search.Search(context.Background(), work); !ok || time.Now().Before(time.Unix(int64(work.Time), 0)) {
 			t.Fatal("sealed before the candidate's timestamp")
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, _, ok := search.Search(ctx, &MiningWork{Time: work.Time + 3600}); ok {
+		if _, _, ok := search.Search(ctx, &mining.MiningWork{Time: work.Time + 3600}); ok {
 			t.Fatal("cancelled search sealed")
 		}
 		// Delays average the block time.
@@ -329,7 +328,7 @@ func TestSimulatedSearch(t *testing.T) {
 		var total time.Duration
 		for range samples {
 			start := time.Now()
-			search.Search(context.Background(), &MiningWork{Time: uint64(start.Unix())})
+			search.Search(context.Background(), &mining.MiningWork{Time: uint64(start.Unix())})
 			total += time.Since(time.Unix(start.Unix(), 0))
 		}
 		if mean := total / samples; mean < blockTime*8/10 || mean > blockTime*12/10 {

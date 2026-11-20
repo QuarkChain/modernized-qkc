@@ -38,9 +38,10 @@ import (
 const blockCacheLimit = 4096 // Match pyquarkchain's RootDb block cache.
 
 var (
-	ErrRootDataMissing = errors.New("missing root chain data")
-	ErrNotImplemented  = errors.New("root chain: function not implemented")
-	errChainStopped    = errors.New("root chain is stopped")
+	ErrRootDataMissing   = errors.New("missing root chain data")
+	ErrNotImplemented    = errors.New("root chain: function not implemented")
+	ErrRootChainNotReady = errors.New("root chain is not ready for mining")
+	errChainStopped      = errors.New("root chain is stopped")
 )
 
 // RootChain manages root-chain data and recovery using a caller-provided database,
@@ -56,6 +57,7 @@ type RootChain struct {
 	client     ClusterClient
 	db         ethdb.Database
 	engine     posw.RootEngine
+	builder    *RootBlockBuilder
 
 	// Blocks are immutable and keyed by hash, so side branches share this cache.
 	blockCache *lru.Cache[common.Hash, *types.RootBlock]
@@ -115,6 +117,10 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 		blockCache: lru.NewCache[common.Hash, *types.RootBlock](blockCacheLimit),
 	}
 	if err := c.checkConfirmations(tip); err != nil {
+		return nil, err
+	}
+	c.builder, err = NewRootBlockBuilder(config, c, engine, client)
+	if err != nil {
 		return nil, err
 	}
 	c.blockCache.Add(hash, tip)
@@ -223,6 +229,27 @@ func (c *RootChain) Ready() bool { return c.ready.Load() && c.backendCtx.Err() =
 // The returned header is read-only; callers must copy it before modification.
 func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
+}
+
+// CreateBlockToMine builds an unsigned, unsealed candidate on the initialized
+// root tip. Without an authorized signature its seal must meet the base difficulty.
+func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.RootBlock, *big.Int, error) {
+	if err := c.backendCtx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if !c.ready.Load() {
+		return nil, nil, ErrRootChainNotReady
+	}
+	// A pending shard RPC must stop on either request cancellation or shutdown.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(c.backendCtx, cancel)
+	defer stop()
+	block, err := c.builder.BuildBlock(ctx, RootBlockArgs{Parent: c.RootTip(), Coinbase: coinbase})
+	if err != nil {
+		return nil, nil, err
+	}
+	return block, block.Difficulty().ToBig(), nil
 }
 
 // GetRootHeader reads a header by hash from any stored branch.

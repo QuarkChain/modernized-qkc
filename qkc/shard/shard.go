@@ -29,13 +29,14 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/miner"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
 )
 
-var _ MinerBackend = (*Shard)(nil)
+var _ mining.MinerBackend[*types.Block, core.ChainHeadEvent] = (*Shard)(nil)
 
 // Shard imports blocks, sends cross-shard lists and reports headers to master.
 // ShardChain handles chain rules, root confirmations, and head selection.
@@ -93,6 +94,35 @@ func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) 
 		return nil, nil, err
 	}
 	return block, diff, nil
+}
+
+// MiningHead returns the parent hash for a fresh candidate.
+func (s *Shard) MiningHead() common.Hash { return s.CurrentBlock().Hash() }
+
+// MiningRootTip returns the root checkpoint a fresh candidate must reference.
+func (s *Shard) MiningRootTip() common.Hash { return s.RootTip() }
+
+// MiningHashes extracts the PoW input and the root reference of the candidate.
+func (s *Shard) MiningHashes(block *types.Block) (common.Hash, common.Hash, error) {
+	header := block.Header()
+	extra, err := header.QKCExtra()
+	if err != nil {
+		return common.Hash{}, common.Hash{}, err
+	}
+	sealHash, err := header.QKCSealHash()
+	return sealHash, extra.PrevRootBlock, err
+}
+
+// WithMiningResult attaches the submitted seal to a copy of the shard candidate.
+func (s *Shard) WithMiningResult(block *types.Block, nonce types.BlockNonce, mixHash common.Hash) (*types.Block, error) {
+	header := block.Header()
+	extra, err := header.QKCExtra()
+	if err != nil {
+		return nil, err
+	}
+	extra.Nonce, extra.MixHash = nonce, mixHash
+	header.Extra = extra.Encode()
+	return block.WithSeal(header), nil
 }
 
 // InsertMinedBlock imports and propagates a sealed candidate through the same

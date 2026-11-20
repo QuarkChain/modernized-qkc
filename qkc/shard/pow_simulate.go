@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 )
 
 // simulatedSearch seals work without hashing, like pyquarkchain's POW_SIMULATE
@@ -37,11 +38,11 @@ type simulatedSearch struct {
 
 // NewSimulatedSearch returns a search sealing work blockTime after its
 // timestamp on average.
-func NewSimulatedSearch(blockTime time.Duration) NonceSearch {
+func NewSimulatedSearch(blockTime time.Duration) mining.NonceSearch {
 	return simulatedSearch{blockTime: blockTime}
 }
 
-func (s simulatedSearch) Search(ctx context.Context, work *MiningWork) (types.BlockNonce, common.Hash, bool) {
+func (s simulatedSearch) Search(ctx context.Context, work *mining.MiningWork) (types.BlockNonce, common.Hash, bool) {
 	delay := time.Duration(rand.ExpFloat64() * float64(s.blockTime))
 	timer := time.NewTimer(time.Until(time.Unix(int64(work.Time), 0).Add(delay)))
 	defer timer.Stop()
