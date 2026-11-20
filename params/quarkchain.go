@@ -89,9 +89,17 @@ func (c *QuarkChainConfig) Equal(other *QuarkChainConfig) bool {
 	if c == nil || other == nil {
 		return c == other
 	}
+	return c.EqualNetworkRules(other) &&
+		c.ConsensusType == other.ConsensusType && c.PoSW.Equal(other.PoSW)
+}
+
+// EqualNetworkRules compares the ordered network membership and the reward
+// and confirmation rules shared by root and every shard.
+func (c *QuarkChainConfig) EqualNetworkRules(other *QuarkChainConfig) bool {
+	if c == nil || other == nil {
+		return c == other
+	}
 	return slices.EqualFunc(c.ChainIDs, other.ChainIDs, configBlockEqual) &&
-		c.ConsensusType == other.ConsensusType &&
-		c.PoSW.Equal(other.PoSW) &&
 		configRatEqual(c.RewardTaxRate, other.RewardTaxRate) &&
 		c.MaxBlocksPerRootBlock == other.MaxBlocksPerRootBlock
 }

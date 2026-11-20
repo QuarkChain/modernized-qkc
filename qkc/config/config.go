@@ -326,6 +326,25 @@ func canonicalHost(host string) string {
 	return strings.ToLower(host)
 }
 
+func checkForkOverrides(eth *ethconfig.Config) error {
+	if eth.OverrideOsaka != nil || eth.OverrideAmsterdam != nil || eth.OverrideBPO1 != nil || eth.OverrideBPO2 != nil || eth.OverrideUBT != nil {
+		return errors.New("local fork overrides are not allowed; configure forks in Genesis")
+	}
+	return nil
+}
+
+func checkPrivateEndpoint(host string, port int) error {
+	ip, err := netip.ParseAddr(host)
+	if host == "" || strings.ContainsAny(host, " \t\r\n/[]") ||
+		(strings.Contains(host, ":") && err != nil) || (err == nil && ip.Unmap().IsUnspecified()) {
+		return fmt.Errorf("PrivateHost must be a concrete host without brackets or a port: %q", host)
+	}
+	if port < 1 || port > 65535 {
+		return errors.New("PrivatePort must be between 1 and 65535")
+	}
+	return nil
+}
+
 // checkShardChainID validates the EVM identifier used for execution and routing.
 func checkShardChainID(id *big.Int) error {
 	if id == nil || id.Sign() <= 0 || id.BitLen() > 256 {
@@ -364,13 +383,8 @@ func (c *NodeConfig) Validate(networkID uint64) error {
 		if err := checkShardChainID(c.ChainID); err != nil {
 			return err
 		}
-		ip, err := netip.ParseAddr(c.PrivateHost)
-		if c.PrivateHost == "" || strings.ContainsAny(c.PrivateHost, " \t\r\n/[]") ||
-			(strings.Contains(c.PrivateHost, ":") && err != nil) || (err == nil && ip.Unmap().IsUnspecified()) {
-			return fmt.Errorf("PrivateHost must be a concrete host without brackets or a port: %q", c.PrivateHost)
-		}
-		if c.PrivatePort < 1 || c.PrivatePort > 65535 {
-			return errors.New("PrivatePort must be between 1 and 65535")
+		if err := checkPrivateEndpoint(c.PrivateHost, c.PrivatePort); err != nil {
+			return err
 		}
 		p := c.Node.P2P
 		if p.ListenAddr != "" || p.DiscAddr != "" || p.MaxPeers != 0 || !p.NoDiscovery || !p.NoDial ||
@@ -384,8 +398,8 @@ func (c *NodeConfig) Validate(networkID uint64) error {
 		if c.Eth.NetworkId != 0 && c.Eth.NetworkId != networkID {
 			return fmt.Errorf("Eth.NetworkId %d conflicts with NetworkID %d", c.Eth.NetworkId, networkID)
 		}
-		if c.Eth.OverrideOsaka != nil || c.Eth.OverrideAmsterdam != nil || c.Eth.OverrideBPO1 != nil || c.Eth.OverrideBPO2 != nil || c.Eth.OverrideUBT != nil {
-			return errors.New("local fork overrides are not allowed; configure forks in Genesis")
+		if err := checkForkOverrides(c.Eth); err != nil {
+			return err
 		}
 		if c.Eth.StateScheme != "" && c.Eth.StateScheme != "hash" && c.Eth.StateScheme != "path" {
 			return fmt.Errorf("invalid Eth.StateScheme %q", c.Eth.StateScheme)

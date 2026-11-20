@@ -1,0 +1,32 @@
+# Local root node. Runtime paths resolve from the working directory.
+[Node]
+DataDir = "./qkc-data/master"
+IPCPath = "qkc-master.ipc"
+CoinbaseAddress = "0x1111111111111111111111111111111111111111"
+
+[Node.P2P]
+ListenAddr = ":30303"
+MaxPeers = 25
+NoDiscovery = true
+
+[Root]
+NetworkID = 2
+# Paths resolve relative to this file. ChainIDs in the shard configs sets the R0 order.
+ShardConfigs = ["shard-100001.toml", "shard-100002.toml"]
+
+[Root.Genesis]
+Timestamp = 0
+Difficulty = "1024"
+Coinbase = "0x0000000000000000000000000000000000000000"
+
+[Root.Genesis.Config]
+ConsensusType = "POW_SIMULATE"
+
+[Root.Genesis.Config.PoSW]
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1024"
+CoinbaseAmount = "123"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = false
