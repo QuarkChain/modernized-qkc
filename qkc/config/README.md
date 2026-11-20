@@ -54,8 +54,16 @@ This is a single-block client for a low-difficulty devnet. The client fetches wo
 and submits a valid seal. It prints the work, seal and acceptance, then exits.
 
 Shard 100001 uses `POW_ETHASH`; the optional shard 100002 uses `POW_SIMULATE`.
-Local seal search is disabled. The nodes use the existing mock cluster client:
-R0 stays at height 0, with no R1 production or cross-shard delivery.
+Local seal search is disabled. Root confirmation is manual:
+
+```sh
+build/bin/qkc m1 root --rpc http://127.0.0.1:18545
+```
+
+The command relays pending deposits between started shards, confirms their blocks
+with one offline root, and returns the current root tip. With no pending blocks,
+the tip stays unchanged. It accepts the HTTP endpoint of any shard started by the
+same `m1` process. The mock cluster client continues to log calls.
 
 The devnet HTTP configurations enable the `qkc` namespace. An external
 miner requests work for its coinbase address:
@@ -73,6 +81,105 @@ Submit the work hash, 8-byte hex nonce, and 32-byte hex mix hash, in that order:
 ```text
 qkc_submitWork(["<sealHash>", "<0x-prefixed nonce>", "<0x-prefixed mix hash>"])
 ```
+
+### Cross-shard transaction test
+
+Run the self-contained two-shard test:
+
+```sh
+go test ./cmd/qkc -run '^TestM1XShardTransfer$' -count=1 -v
+```
+
+It checks a transfer from shard 100001 to 100002, root confirmation, balances and
+fees, and that repeated deposit or root delivery does not credit the recipient twice.
+
+For manual testing, start both shards:
+
+```sh
+build/bin/qkc m1 --config qkc/config/devnet/shard-100001.toml \
+  --config qkc/config/devnet/shard-100002.toml
+```
+
+In another terminal, send 1 QKC from shard A (100001) to an address on shard B
+(100002), using the funded developer test account:
+
+```sh
+XSHARD_A_RPC=http://127.0.0.1:18545
+XSHARD_B_RPC=http://127.0.0.1:18546
+XSHARD_TO=0x00000000000000000000000000000000000000be
+XSHARD_TEST_KEY=0xb71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291
+
+cast balance "$XSHARD_TO" --rpc-url "$XSHARD_B_RPC"
+XSHARD_FROM=$(cast wallet address --private-key "$XSHARD_TEST_KEY")
+XSHARD_NONCE=$(cast nonce "$XSHARD_FROM" --block pending --rpc-url "$XSHARD_A_RPC")
+```
+
+Choose one of the following transaction examples; each sends 1 QKC with the same
+effective gas price and gas costs.
+
+Legacy:
+
+```sh
+XSHARD_TX=$(cast send 0x000000000000000000000000000000514b430100 \
+  'send(uint256,address,uint256,uint64,bool,bytes)' \
+  100002 "$XSHARD_TO" 1000000000000000000 9000 true 0x \
+  --rpc-url "$XSHARD_A_RPC" --chain 100001 \
+  --private-key "$XSHARD_TEST_KEY" --nonce "$XSHARD_NONCE" \
+  --legacy --gas-price 2000000000 --gas-limit 120000 \
+  --value 1000018000000000000 --async)
+```
+
+The `send` value is 1 QKC (`10^18` base units). The call's `--value` also prepays
+destination gas: `10^18 + 9000 * 2000000000 = 1000018000000000000`. Source transaction
+gas is charged separately. `--legacy` fixes the effective gas price at 2 gwei;
+`--async` returns the transaction hash before it is mined.
+
+EIP-1559 (use instead of the legacy example, with the same variables):
+
+```sh
+XSHARD_TX=$(cast send 0x000000000000000000000000000000514b430100 \
+  'send(uint256,address,uint256,uint64,bool,bytes)' \
+  100002 "$XSHARD_TO" 1000000000000000000 9000 true 0x \
+  --rpc-url "$XSHARD_A_RPC" --chain 100001 \
+  --private-key "$XSHARD_TEST_KEY" --nonce "$XSHARD_NONCE" \
+  --gas-price 2000000000 --priority-gas-price 2000000000 --gas-limit 120000 \
+  --value 1000018000000000000 --async)
+```
+
+Here `--gas-price` sets `maxFeePerGas` and `--priority-gas-price` sets
+`maxPriorityFeePerGas`. Both are 2 gwei, so the effective price is
+`min(2 gwei, baseFee + 2 gwei) = 2 gwei` whenever the transaction can be included,
+matching the legacy example. The transfer value, prepaid destination gas, and
+source gas charge are therefore unchanged.
+
+After sending either transaction, wait for the sender's pending nonce to advance
+on shard A. Then mine the source block and check the receipt.
+
+```sh
+(
+  for attempt in $(seq 15); do
+    pending_nonce=$(cast nonce "$XSHARD_FROM" --block pending --rpc-url "$XSHARD_A_RPC") || exit 1
+    if [ "$pending_nonce" -gt "$XSHARD_NONCE" ]; then
+      build/bin/qkc mine --rpc "$XSHARD_A_RPC" &&
+        cast receipt "$XSHARD_TX" --rpc-url "$XSHARD_A_RPC"
+      exit $?
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for the sender's pending nonce to advance" >&2
+  exit 1
+)
+```
+
+Explicitly confirm A1 in R1 (on a fresh run), then mine on B and check the recipient:
+
+```sh
+build/bin/qkc m1 root --rpc "$XSHARD_A_RPC"
+build/bin/qkc mine --rpc "$XSHARD_B_RPC"
+cast balance "$XSHARD_TO" --rpc-url "$XSHARD_B_RPC"
+```
+
+The balance increases by `1000000000000000000` base units.
 
 ### Test accounts
 
