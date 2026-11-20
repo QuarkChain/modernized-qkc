@@ -389,3 +389,14 @@ mining recipient.
 
 Load the file with `config.LoadRoot(path)` and pass the result to
 `root.BuildRootGenesis(cfg)` to derive R0 offline.
+
+## Initialize a local root database
+
+Open the dedicated root database and call `root.InitializeRootDatabase(db, cfg)`. On first use, it writes R0,
+its canonical mapping, head, shard confirmations and root rules in one batch.
+On restart it checks the stored genesis and head and returns the effective rules
+and R0 hash. An initialized database also accepts a TOML with the entire
+`[Root.Genesis]` section and its subtables omitted. The referenced shard TOMLs
+must still agree with the persisted rules and G0 headers. Pass the returned
+rules to the root consensus engine and `root.New`. Initialization is local and
+can run before a cluster connection exists.

@@ -76,7 +76,7 @@ var _ posw.RootChainReader = (*RootChain)(nil)
 // It binds the supplied client and engine without taking ownership of them or
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // backendCtx controls RootChain's lifetime and is canceled only by the backend.
-// Genesis, canonical indices and cumulative confirmations must already be stored.
+// Call SetupRootGenesisBlock before New to initialize or verify the local database.
 // TODO: Root insertion must persist the block, its confirmations and canonical
 // head updates atomically so recovery never observes a partially stored tip.
 func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
@@ -86,10 +86,22 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	if err := backendCtx.Err(); err != nil {
 		return nil, err
 	}
-	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
-	// genesis. For an empty database, atomically store genesis, its cumulative shard
-	// confirmations, the canonical index and root head. For an initialized database,
-	// validate genesis without replacing the persisted head.
+	tip, err := readRootHead(db, config)
+	if err != nil {
+		return nil, err
+	}
+	c := &RootChain{
+		backendCtx: backendCtx,
+		config:     config, client: client, db: db, engine: engine,
+		chainmu:    syncx.NewClosableMutex(),
+		blockCache: lru.NewCache[common.Hash, *types.RootBlock](blockCacheLimit),
+	}
+	c.blockCache.Add(tip.Hash(), tip)
+	c.tip.Store(tip.Header())
+	return c, nil
+}
+
+func readRootHead(db ethdb.KeyValueReader, config *params.QuarkChainConfig) (*types.RootBlock, error) {
 	hash, err := rawdb.ReadRootHeadBlockHash(db)
 	if err != nil {
 		return nil, fmt.Errorf("read persisted root head: %w", err)
@@ -108,33 +120,25 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	if canonical := rawdb.ReadRootCanonicalHash(db, tip.Number()); canonical != hash {
 		return nil, fmt.Errorf("canonical root hash at height %d does not match persisted head: have %x, want %x", tip.Number(), canonical, hash)
 	}
-	c := &RootChain{
-		backendCtx: backendCtx,
-		config:     config, client: client, db: db, engine: engine,
-		chainmu:    syncx.NewClosableMutex(),
-		blockCache: lru.NewCache[common.Hash, *types.RootBlock](blockCacheLimit),
+	confirmed, err := rawdb.ReadRootConfirmedShardBlocks(db, hash)
+	if err != nil {
+		return nil, fmt.Errorf("read confirmations for root %x: %w", hash, err)
 	}
-	if err := c.checkConfirmations(tip); err != nil {
+	if err := checkConfirmations(config, tip, confirmed); err != nil {
 		return nil, err
 	}
-	c.blockCache.Add(hash, tip)
-	c.tip.Store(tip.Header())
-	return c, nil
+	return tip, nil
 }
 
 // Recovery requires exactly one nonzero confirmation for every configured shard.
 // Non-genesis tips must also match their body commitment and the last carried
 // header for each shard; shards absent from the body retain inherited confirmations.
-func (c *RootChain) checkConfirmations(tip *types.RootBlock) error {
+func checkConfirmations(config *params.QuarkChainConfig, tip *types.RootBlock, confirmed map[string]common.Hash) error {
 	hash := tip.Hash()
-	confirmed, err := c.GetLastConfirmedShardBlocks(hash)
-	if err != nil {
-		return err
+	if len(confirmed) != len(config.ChainIDs) {
+		return fmt.Errorf("root %x shard confirmation count mismatch: have %d, want %d", hash, len(confirmed), len(config.ChainIDs))
 	}
-	if len(confirmed) != len(c.config.ChainIDs) {
-		return fmt.Errorf("root %x shard confirmation count mismatch: have %d, want %d", hash, len(confirmed), len(c.config.ChainIDs))
-	}
-	for _, id := range c.config.ChainIDs {
+	for _, id := range config.ChainIDs {
 		if confirmed[id.String()] == (common.Hash{}) {
 			return fmt.Errorf("%w: root %x chain %s confirmation", ErrRootDataMissing, hash, id)
 		}

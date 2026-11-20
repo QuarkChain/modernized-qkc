@@ -33,6 +33,7 @@ var (
 	shardBlockCommitPrefix = []byte("qkc_shard_commit")   // shardBlockCommitPrefix + block hash -> completed shard block delivery
 	rootCanonicalPrefix    = []byte("qkc_root_canonical") // rootCanonicalPrefix + height -> canonical root hash
 	rootConfirmedPrefix    = []byte("qkc_root_confirmed") // rootConfirmedPrefix + root hash -> cumulative shard confirmations
+	rootChainConfigKey     = []byte("qkc_root_config")    // root consensus rules
 	rootHeadBlockKey       = []byte("qkc_root_tip")       // persisted canonical root head
 )
 

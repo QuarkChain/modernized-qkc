@@ -91,8 +91,7 @@ type rootEnv struct {
 	confirmed  map[string]common.Hash
 }
 
-// Seed the DB directly: genesis creation and root insertion are outside this PR.
-// Unlike Python's empty-DB startup, root genesis already confirms every member.
+// Initialize the database with a root genesis that confirms every member.
 func newRootEnv(t *testing.T) *rootEnv {
 	t.Helper()
 	f := &rootEnv{
@@ -112,8 +111,9 @@ func newRootEnv(t *testing.T) *rootEnv {
 	var headers types.ShardBlockHeaders
 	for _, id := range f.config.ChainIDs {
 		header := &coretypes.Header{
-			Number: new(big.Int), Difficulty: new(big.Int), Time: 1,
-			Extra: (&coretypes.QKCExtra{ChainID: id}).Encode(),
+			Number: new(big.Int), Difficulty: new(big.Int), Time: 1, MixDigest: common.Hash{1}, GasLimit: 1_000_000,
+			UncleHash: coretypes.EmptyUncleHash, TxHash: coretypes.EmptyTxsHash, ReceiptHash: coretypes.EmptyReceiptsHash,
+			Extra: (&coretypes.QKCExtra{ChainID: id, Cursor: coretypes.XShardCursor{RootBlockHeight: 1}, XShardGasLimit: 1_000_000 / params.XShardGasLimitDivisor}).Encode(),
 		}
 		headers = append(headers, header)
 		f.confirmed[id.String()] = header.Hash()
@@ -121,7 +121,9 @@ func newRootEnv(t *testing.T) *rootEnv {
 	f.genesis = types.NewRootBlock(&types.RootBlockHeader{
 		Time: 1, Difficulty: *uint256.NewInt(100), TotalDifficulty: *uint256.NewInt(100),
 	}, headers, nil)
-	f.store(f.genesis, true)
+	if _, _, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err != nil {
+		t.Fatal(err)
+	}
 	f.chain = f.open()
 	return f
 }
