@@ -145,10 +145,11 @@ func NewShardChain(db ethdb.KeyValueStore, chain *core.BlockChain, builder *mine
 // circular hash dependency between G0 and R0. Store R0 and its confirmation
 // of G0 in one batch; no stored root is required.
 //
-// For a non-genesis root, its header and shard confirmation must already be
-// stored locally. Restore the shard head to the stored confirmation.
-// TODO(recovery): If the master's persisted tip is absent locally, restore its
-// locally stored direct parent before importing the supplied root block.
+// For a non-genesis root, restore its stored shard confirmation if it is local.
+// Otherwise, import it using its locally stored direct parent and restore the
+// supplied root's confirmation directly. Required roots,
+// confirmations, shard blocks, state and cross-shard data must be available;
+// Init does not synchronize data or search for an earlier checkpoint.
 //
 // Set the canonical shard head before publishing rootTip. Until initialization
 // succeeds, errors leave rootTip nil and allow retry. Init does not stop the blockchain.
@@ -188,16 +189,22 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 			return fmt.Errorf("store genesis root %x: %w", root.Hash(), err)
 		}
 	} else {
-		// Step 2b: recover a locally stored checkpoint.
-		// TODO(recovery): If the supplied root block is truly absent locally, load
-		// and validate its direct parent and confirmation, restore the shard head
-		// at that parent, then import the supplied root through the normal path.
-		// Distinguish absence from read/decode failures; missing parents,
-		// confirmations, minor blocks, state or required cross-shard data must
-		// return an error, never fall back to genesis or skip.
+		// Step 2b: prefer the stored checkpoint, ignoring the supplied body.
 		rootHeader = rawdb.ReadRootBlockHeader(c.db, root.Hash())
 		if rootHeader == nil {
-			return fmt.Errorf("%w: %w: %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, root.Hash())
+			parent := rawdb.ReadRootBlockHeader(c.db, root.ParentHash())
+			if parent == nil {
+				return fmt.Errorf("%w: %w: parent %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, root.ParentHash())
+			}
+			if root.TotalDifficulty().Cmp(&parent.TotalDifficulty) <= 0 {
+				return fmt.Errorf("%w: recovery root must outweigh its parent", ErrInvalidRootBlock)
+			}
+			// Keep rootTip nil until the supplied root is fully imported, so head
+			// selection restores its exact confirmation and failures remain retryable.
+			// The import validates the parent's confirmation without first switching
+			// the shard head to it. Pass the parent without publishing an initialized tip.
+			_, err := c.insertRootBlock(root, parent)
+			return err
 		}
 		var err error
 		confirmed, err = c.lastConfirmed(rootHeader)
@@ -471,8 +478,12 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	// do not reacquire c.mu or leave rootTip initialized after a failed Init.
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.insertRootBlock(root, c.rootTip)
+}
 
-	rootTip := c.rootTip
+// insertRootBlock requires c.mu. Init supplies the recovery parent as rootTip
+// while c.rootTip remains nil until both the shard head and root writes succeed.
+func (c *ShardChain) insertRootBlock(root *qkctypes.RootBlock, rootTip *qkctypes.RootBlockHeader) (bool, error) {
 	if rootTip == nil {
 		return false, ErrRootChainUninitialized
 	}
@@ -758,8 +769,7 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 // is capped by the required positive MaxBlocksPerRootBlock. Shard genesis
 // is already confirmed and excluded.
 //
-// The lock keeps the confirmation and canonical range consistent. Local headers
-// remain eligible while propagation is incomplete.
+// The lock keeps the confirmation and canonical range consistent.
 //
 // This query uses the shard's local root tip, not a root hash supplied by master.
 // Root construction assumes the queried shards use the candidate parent's root
@@ -769,22 +779,17 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 // discard that candidate and collect headers again after checkpoint synchronization.
 // Headers not yet reported to master must also be filtered out by master.
 //
-// Startup uses the master's persisted tip rather than a committing marker.
-// TODO(recovery): Restore the supplied root block directly if stored locally;
-// otherwise restore its local direct parent and import the supplied root block.
-// Missing required data must return an error.
+// Master must wait for all shards to acknowledge root delivery before collecting
+// headers. On delivery failure, RootChain stops accepting further imports.
+// The communication layer requests master shutdown on connection failure.
+// After a cluster restart, master reloads its persisted root tip and initializes every
+// shard at it. Each shard restores that root locally or imports it from its
+// stored direct parent. Root construction resumes only after all shards initialize
+// successfully, so they agree with master on the root tip.
 //
-// TODO: In master, ensure every shard has acknowledged the candidate parent
-// before collecting shard headers. While propagation is incomplete, wait with
-// context cancellation or return an error, so inconsistent checkpoints are
-// caught before building rather than during construction or later validation.
-// Use a lock to keep the parent fixed through header collection and building.
-//
-// Another option is to validate the returned headers against shard root tip.
-// Skip headers already confirmed by that parent, then include only a valid,
-// continuous sequence for each shard. Stop at the first unusable header.
-// This may include fewer headers, but reduces the need to wait for all shards
-// to reach the same root tip.
+// TODO(master): Integrate this query into root construction. Serialize root
+// delivery, header collection and root construction to keep the candidate parent
+// fixed and each shard's root tip aligned with it.
 func (c *ShardChain) GetUnconfirmedHeaderList() ([]*types.Header, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

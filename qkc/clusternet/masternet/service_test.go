@@ -37,12 +37,12 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
 	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
 	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
-	"github.com/ethereum/go-ethereum/qkc/master"
+	"github.com/ethereum/go-ethereum/qkc/root"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
 
-var _ master.ClusterClient = (*Service)(nil)
+var _ root.ClusterClient = (*Service)(nil)
 
 // startAndWait starts a fresh service once and waits for initialization.
 func startAndWait(t *testing.T, s *Service, backend MasterBackend) error {
