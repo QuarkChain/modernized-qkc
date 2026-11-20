@@ -256,13 +256,14 @@ func TestBuildRootBlockAlignsShardConfirmations(t *testing.T) {
 		chain.reported[fork.Hash()], chain.reported[child.Hash()] = uint256.NewInt(1), uint256.NewInt(1)
 		check(t, []*types.Header{headers[0], fork, child}, nil)
 	})
-	t.Run("broken link before confirmation", func(t *testing.T) {
+	t.Run("ignore broken link before confirmation", func(t *testing.T) {
 		fork := types.CopyHeader(headers[0])
 		fork.Coinbase = common.Address{99}
-		args.ShardHeaders["2"] = []*types.Header{fork, headers[1], headers[2]}
-		if block, err := builder.BuildBlock(t.Context(), args); block != nil || err == nil || !strings.Contains(err.Error(), "does not extend") {
-			t.Fatalf("broken link: got block %v, error %v", block, err)
-		}
+		check(t, []*types.Header{fork, headers[1], headers[2]}, headers[2:3])
+	})
+	t.Run("ignore height gap and shard ID before confirmation", func(t *testing.T) {
+		otherShardAt8 := chain.shardHeaders(3, 8, 100, 1)[0]
+		check(t, []*types.Header{otherShardAt8, headers[1], headers[2]}, headers[2:3])
 	})
 	t.Run("height gap immediately after confirmation", func(t *testing.T) {
 		gap := types.CopyHeader(headers[2])
