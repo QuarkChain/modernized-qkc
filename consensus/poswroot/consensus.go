@@ -18,6 +18,7 @@
 package poswroot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -125,13 +126,8 @@ func (p *PoSW) verifyHeader(header, parent *qkctypes.RootBlockHeader) error {
 	if header.Number != parent.Number+1 {
 		return consensus.ErrInvalidNumber
 	}
-	// Time must advance from the parent and stay within the allowed clock skew.
-	if header.Time <= parent.Time {
-		return errors.New("root timestamp must be greater than parent")
-	}
-	now := uint64(time.Now().Unix())
-	if header.Time > now && header.Time-now > futureTime {
-		return consensus.ErrFutureBlock
+	if err := verifyTimestamp(header.Time, parent.Time); err != nil {
+		return err
 	}
 	// The header records base difficulty; staking discounts apply only to the seal.
 	difficulty, overflow := uint256.FromBig(p.CalcDifficulty(header.Time, parent))
@@ -142,6 +138,17 @@ func (p *PoSW) verifyHeader(header, parent *qkctypes.RootBlockHeader) error {
 	total, overflow := new(uint256.Int).AddOverflow(&parent.TotalDifficulty, difficulty)
 	if overflow || total.Cmp(&header.TotalDifficulty) != 0 {
 		return errors.New("invalid or overflowing root total difficulty")
+	}
+	return nil
+}
+
+func verifyTimestamp(timestamp, parentTime uint64) error {
+	if timestamp <= parentTime {
+		return errors.New("root timestamp must be greater than parent")
+	}
+	now := uint64(time.Now().Unix())
+	if timestamp > now && timestamp-now > futureTime {
+		return consensus.ErrFutureBlock
 	}
 	return nil
 }
@@ -182,9 +189,7 @@ func (p *PoSW) verifyBody(chain RootChainReader, block *qkctypes.RootBlock, pare
 	if amount.Cmp(block.CoinbaseAmount()) != 0 {
 		return errors.New("invalid root coinbase amount")
 	}
-	// Cache only root references verified against this parent, not intermediate
-	// ancestors. The parent itself is already known to be on this branch.
-	verifiedRootHashes := map[common.Hash]bool{parent.Hash(): true}
+	isAncestor := NewRootAncestorCheck(context.Background(), chain, parent)
 	var previous *types.Header
 	var previousHash common.Hash
 	var chainID *big.Int
@@ -233,25 +238,43 @@ func (p *PoSW) verifyBody(chain RootChainReader, block *qkctypes.RootBlock, pare
 		}
 		// The shard block's previous root must be the parent root or one of its ancestors,
 		// never a root on another branch or above the candidate's parent.
-		if !verifiedRootHashes[extra.PrevRootBlock] {
-			sameChain, err := isRootDescendant(chain, parent, extra.PrevRootBlock)
-			if err != nil {
-				return err
-			}
-			if !sameChain {
-				return errors.New("shard previous root is not an ancestor of the parent root")
-			}
-			verifiedRootHashes[extra.PrevRootBlock] = true
+		sameChain, err := isAncestor(extra.PrevRootBlock)
+		if err != nil {
+			return err
+		}
+		if !sameChain {
+			return errors.New("shard previous root is not an ancestor of the parent root")
 		}
 		previousHash, previous = hash, header
 	}
 	return nil
 }
 
+// NewRootAncestorCheck returns a function that checks whether a root hash is the
+// parent or one of its ancestors. It caches checked references for one candidate.
+// Missing root headers and failed reads return an error.
+// Canceling ctx stops the walk between root header reads.
+func NewRootAncestorCheck(ctx context.Context, chain RootChainReader, parent *qkctypes.RootBlockHeader) func(common.Hash) (bool, error) {
+	checked := map[common.Hash]bool{parent.Hash(): true}
+	return func(hash common.Hash) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if sameChain, ok := checked[hash]; ok {
+			return sameChain, nil
+		}
+		sameChain, err := isRootDescendant(ctx, chain, parent, hash)
+		if err == nil {
+			checked[hash] = sameChain
+		}
+		return sameChain, err
+	}
+}
+
 // isRootDescendant checks whether descendant extends, or is, ancestorHash.
 // It walks parent links like pyquarkchain's is_same_chain. Block/header
 // caching belongs to RootChain.
-func isRootDescendant(chain RootChainReader, descendant *qkctypes.RootBlockHeader, ancestorHash common.Hash) (bool, error) {
+func isRootDescendant(ctx context.Context, chain RootChainReader, descendant *qkctypes.RootBlockHeader, ancestorHash common.Hash) (bool, error) {
 	// Missing data is a read error, rather than proof that the roots are unrelated.
 	ancestor, err := chain.GetRootHeader(ancestorHash)
 	if err != nil {
@@ -265,6 +288,9 @@ func isRootDescendant(chain RootChainReader, descendant *qkctypes.RootBlockHeade
 	}
 	// Follow this descendant's branch until the claimed ancestor's height.
 	for descendant.Number > ancestor.Number {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		previous, err := chain.GetRootHeader(descendant.ParentHash)
 		if err != nil {
 			return false, err
@@ -301,8 +327,8 @@ func (p *PoSW) Prepare(chain RootChainReader, header *qkctypes.RootBlockHeader) 
 	if header.Number != parent.Number+1 {
 		return consensus.ErrInvalidNumber
 	}
-	if header.Time <= parent.Time {
-		return errors.New("root timestamp must be greater than parent")
+	if err := verifyTimestamp(header.Time, parent.Time); err != nil {
+		return err
 	}
 	difficulty, overflow := uint256.FromBig(p.CalcDifficulty(header.Time, parent))
 	if overflow || difficulty.IsZero() {
