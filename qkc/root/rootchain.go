@@ -395,12 +395,12 @@ func (c *RootChain) rewriteCanonical(batch ethdb.KeyValueWriter, header *types.R
 	}
 }
 
-// Close marks the chain as stopping, then waits for chain writes to finish and
-// prevents further writes. Ready becomes false immediately; initialization stays
+// Close marks the chain as stopping, then waits for Init/InsertBlock to finish and
+// prevents further calls to them. Ready becomes false immediately; initialization stays
 // recorded. It is safe to call repeatedly or concurrently.
 // The backend must cancel backendCtx and stop new requests, cancel other RPC
-// contexts and close cluster
-// connections before calling Close, so pending RPC waits and network I/O finish.
+// contexts and wait for masternet.Service.Stop before calling Close.
+// Stop closes cluster connections and waits for calls to finish.
 // Close waits only for Init and InsertBlock; the owner must also wait for request
 // handlers and other readers before closing the shared engine and database.
 // Context cancellation belongs to the backend; Close does not request shutdown.
@@ -496,9 +496,10 @@ func (c *RootChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]co
 	return confirmed, nil
 }
 
-// AddShardBlockCoinbaseAmount stores after-tax income reported by a validated
-// shard. The caller verifies the report's source. This does not acquire chainmu:
-// shard reports may arrive while consensus is waiting for a cluster RPC.
+// AddShardBlockCoinbaseAmount stores reported after-tax income; the caller
+// verifies the source. It avoids chainmu so reports can proceed during RPCs.
+// TODO(backend): Stop the cluster client via masternet.Service.Stop, rejecting
+// new requests and draining AddShardBlockHeader writes before RootChain.Close.
 func (c *RootChain) AddShardBlockCoinbaseAmount(hash common.Hash, amount *uint256.Int) error {
 	if err := rawdb.WriteShardBlockCoinbaseAmount(c.db, hash, amount); err != nil {
 		return fmt.Errorf("store shard coinbase amount %x: %w", hash, err)
