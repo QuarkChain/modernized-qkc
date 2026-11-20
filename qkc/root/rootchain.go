@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
@@ -35,10 +36,14 @@ import (
 	"github.com/holiman/uint256"
 )
 
-const blockCacheLimit = 4096 // Match pyquarkchain's RootDb block cache.
-
-// Match pyquarkchain's MAX_STALE_ROOT_BLOCK_HEIGHT_DIFF admission limit.
-const maxStaleRootBlockHeightDiff uint32 = 22500
+const (
+	// Match pyquarkchain's RootDb block cache.
+	blockCacheLimit = 4096
+	// Match pyquarkchain's MAX_STALE_ROOT_BLOCK_HEIGHT_DIFF admission limit.
+	maxStaleRootBlockHeightDiff uint32 = 22500
+	// Default timeout for RootChain cluster RPCs.
+	rpcTimeout = 30 * time.Second
+)
 
 var (
 	ErrRootDataMissing = errors.New("missing root chain data")
@@ -390,12 +395,12 @@ func (c *RootChain) rewriteCanonical(batch ethdb.KeyValueWriter, header *types.R
 	}
 }
 
-// Close marks the chain as stopping, then waits for chain writes to finish and
-// prevents further writes. Ready becomes false immediately; initialization stays
+// Close marks the chain as stopping, then waits for Init/InsertBlock to finish and
+// prevents further calls to them. Ready becomes false immediately; initialization stays
 // recorded. It is safe to call repeatedly or concurrently.
 // The backend must cancel backendCtx and stop new requests, cancel other RPC
-// contexts and close cluster
-// connections before calling Close, so pending RPC waits and network I/O finish.
+// contexts and wait for masternet.Service.Stop before calling Close.
+// Stop closes cluster connections and waits for calls to finish.
 // Close waits only for Init and InsertBlock; the owner must also wait for request
 // handlers and other readers before closing the shared engine and database.
 // Context cancellation belongs to the backend; Close does not request shutdown.
@@ -417,6 +422,18 @@ func (c *RootChain) Ready() bool {
 // The returned header is read-only; callers must copy it before modification.
 func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
+}
+
+// GetRootTipWithLock waits for chain writes, including Init and root delivery,
+// before reading the tip. It does not check Ready: construction callers must do
+// that after obtaining the snapshot. The returned header is read-only; subsequent
+// inserts may replace the tip after this method releases chainmu.
+func (c *RootChain) GetRootTipWithLock() (*types.RootBlockHeader, error) {
+	if !c.chainmu.TryLock() {
+		return nil, errChainStopped
+	}
+	defer c.chainmu.Unlock()
+	return c.tip.Load(), nil
 }
 
 // GetRootHeader reads a header by hash from any stored branch.
@@ -479,14 +496,45 @@ func (c *RootChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]co
 	return confirmed, nil
 }
 
-// GetShardBlockCoinbaseAmount returns validated shard income.
-// TODO: Connect shard reports to the income store.
-func (c *RootChain) GetShardBlockCoinbaseAmount(common.Hash) (*uint256.Int, error) {
-	return nil, ErrNotImplemented
+// AddShardBlockCoinbaseAmount stores reported after-tax income; the caller
+// verifies the source. It avoids chainmu so reports can proceed during RPCs.
+// TODO(backend): Stop the cluster client via masternet.Service.Stop, rejecting
+// new requests and draining AddShardBlockHeader writes before RootChain.Close.
+func (c *RootChain) AddShardBlockCoinbaseAmount(hash common.Hash, amount *uint256.Int) error {
+	if err := rawdb.WriteShardBlockCoinbaseAmount(c.db, hash, amount); err != nil {
+		return fmt.Errorf("store shard coinbase amount %x: %w", hash, err)
+	}
+	return nil
+}
+
+// GetShardBlockCoinbaseAmount returns validated after-tax income. Nil without an
+// error means unreported; storage and decoding failures must not hide as missing.
+func (c *RootChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int, error) {
+	amount, err := rawdb.ReadShardBlockCoinbaseAmount(c.db, hash)
+	if err != nil {
+		return nil, fmt.Errorf("read shard coinbase amount %x: %w", hash, err)
+	}
+	return amount, nil
 }
 
 // GetRootChainStakes returns stakes and signer at the confirmed shard state.
-// TODO: Connect the client query with the current import's context.
-func (c *RootChain) GetRootChainStakes(*big.Int, common.Hash, common.Address) (*uint256.Int, common.Address, error) {
-	return nil, common.Address{}, ErrNotImplemented
+// Its deadline derives from the backend lifetime; the consensus reader interface
+// has no per-import context. Zero stakes and an unset signer are valid responses.
+// Query failures, including timeouts, abort the caller's operation without
+// substituting zero stakes or retrying here. Connection failures are managed by
+// the client. Wrapped context and remote errors remain identifiable with errors.Is/As.
+func (c *RootChain) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+	ctx, cancel := context.WithTimeout(c.backendCtx, rpcTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, common.Address{}, err
+	}
+	result, err := c.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
+	if err != nil {
+		return nil, common.Address{}, fmt.Errorf("query root stakes for chain %v, shard block %x, coinbase %s: %w", chainID, shardBlockHash, coinbase, err)
+	}
+	if result == nil || result.Stakes == nil {
+		return nil, common.Address{}, fmt.Errorf("missing root stakes response for chain %v, shard block %x, coinbase %s", chainID, shardBlockHash, coinbase)
+	}
+	return result.Stakes, result.Signer, nil
 }

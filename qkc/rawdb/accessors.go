@@ -17,6 +17,7 @@
 package rawdb
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/holiman/uint256"
 )
 
 // HasRootBlock verifies the existence of a root block corresponding to the hash.
@@ -120,6 +122,38 @@ func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number ui
 // DeleteRootCanonicalHash removes a canonical index, retaining the block itself.
 func DeleteRootCanonicalHash(db ethdb.KeyValueWriter, number uint32) error {
 	return db.Delete(rootCanonicalKey(number))
+}
+
+// ReadShardBlockCoinbaseAmount returns validated after-tax income, or nil if the
+// block has not been reported. Zero income is stored as a non-nil zero value.
+// Records are not deleted; Has distinguishes absence from Get errors across DBs.
+func ReadShardBlockCoinbaseAmount(db ethdb.KeyValueReader, hash common.Hash) (*uint256.Int, error) {
+	key := shardBlockCoinbaseAmountKey(hash)
+	has, err := db.Has(key)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		return nil, nil
+	}
+	data, err := db.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != common.HashLength {
+		return nil, fmt.Errorf("invalid shard coinbase amount length: %d", len(data))
+	}
+	return new(uint256.Int).SetBytes(data), nil
+}
+
+// WriteShardBlockCoinbaseAmount stores reported after-tax income, including zero.
+// Repeated reports overwrite the same hash, as in pyquarkchain.
+func WriteShardBlockCoinbaseAmount(db ethdb.KeyValueWriter, hash common.Hash, amount *uint256.Int) error {
+	if amount == nil {
+		return errors.New("missing shard coinbase amount")
+	}
+	data := amount.Bytes32()
+	return db.Put(shardBlockCoinbaseAmountKey(hash), data[:])
 }
 
 type rootShardConfirmation struct {
