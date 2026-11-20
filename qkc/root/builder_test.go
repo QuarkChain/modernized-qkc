@@ -162,6 +162,39 @@ func TestBuildRootBlock(t *testing.T) {
 	}
 }
 
+func TestBuildRootBlockStopsAtUnreportedShardHeader(t *testing.T) {
+	builder, chain := newTestBuilder(t, nil)
+	headers := chain.shardHeaders(2, 10, 100, 4)
+	a10, a11, a12, a13 := headers[0], headers[1], headers[2], headers[3]
+	chain.confirmed["2"] = a10.Hash()
+	delete(chain.reported, a12.Hash())
+
+	x12 := types.CopyHeader(a12)
+	x12.Coinbase = common.Address{99}
+	a13OnX12 := types.CopyHeader(a13)
+	a13OnX12.ParentHash = x12.Hash()
+	chain.reported[a13OnX12.Hash()] = chain.reported[a13.Hash()]
+
+	build := func(last *types.Header) common.Hash {
+		t.Helper()
+		block, err := builder.BuildBlock(t.Context(), RootBlockArgs{
+			Parent: chain.parent, Timestamp: 110,
+			ShardHeaders: map[string][]*types.Header{"2": {a11, a12, last}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := block.ShardBlockHeaders(); len(got) != 1 || got[0].Hash() != a11.Hash() {
+			t.Fatalf("A13 parent %s: got %d shard headers with commitment %s, want only A11", last.ParentHash, len(got), block.ShardHeaderHash())
+		}
+		return block.Hash()
+	}
+	control := build(a13)
+	if got := build(a13OnX12); got != control {
+		t.Fatalf("changing A13's parent changed the root hash from %s to %s", control, got)
+	}
+}
+
 func TestBuildEmptyRootBlock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		builder, chain := newTestBuilder(t, nil)
@@ -222,6 +255,23 @@ func TestBuildRootBlockAlignsShardConfirmations(t *testing.T) {
 		child.ParentHash = fork.Hash()
 		chain.reported[fork.Hash()], chain.reported[child.Hash()] = uint256.NewInt(1), uint256.NewInt(1)
 		check(t, []*types.Header{headers[0], fork, child}, nil)
+	})
+	t.Run("broken link before confirmation", func(t *testing.T) {
+		fork := types.CopyHeader(headers[0])
+		fork.Coinbase = common.Address{99}
+		args.ShardHeaders["2"] = []*types.Header{fork, headers[1], headers[2]}
+		if block, err := builder.BuildBlock(t.Context(), args); block != nil || err == nil || !strings.Contains(err.Error(), "does not extend") {
+			t.Fatalf("broken link: got block %v, error %v", block, err)
+		}
+	})
+	t.Run("height gap immediately after confirmation", func(t *testing.T) {
+		gap := types.CopyHeader(headers[2])
+		gap.Number.Add(gap.Number, common.Big1)
+		chain.reported[gap.Hash()] = uint256.NewInt(1)
+		args.ShardHeaders["2"] = []*types.Header{headers[0], headers[1], gap}
+		if block, err := builder.BuildBlock(t.Context(), args); block != nil || err == nil || !strings.Contains(err.Error(), "nonconsecutive") {
+			t.Fatalf("height gap: got block %v, error %v", block, err)
+		}
 	})
 	t.Run("unreported header still truncates selection", func(t *testing.T) {
 		delete(chain.reported, headers[3].Hash()) // A12 has not been reported.

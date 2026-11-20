@@ -138,49 +138,52 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 	if confirmed == (common.Hash{}) {
 		return errors.New("missing shard confirmation at the parent root")
 	}
-	if len(headers) == 0 {
-		return nil
-	}
-	aligned := headers[0] != nil && headers[0].ParentHash == confirmed
+	// Skip headers through the parent's confirmation. A direct child starts
+	// the pending list immediately. A list on another fork is skipped in full.
 	var previousHash common.Hash
-	var added uint64
-	for index, header := range headers {
+	if len(headers) > 0 && headers[0] != nil {
+		previousHash = headers[0].ParentHash
+	}
+	skipped := 0
+	for skipped < len(headers) && previousHash != confirmed {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if header == nil || header.Number == nil || header.Number.Sign() < 0 || (aligned && header.Number.Sign() == 0) {
-			return fmt.Errorf("missing header or invalid height at index %d", index)
+		if err := checkShardHeaderHeight(headers, skipped, common.Big0); err != nil {
+			return err
 		}
-		if index > 0 && header.Number.Cmp(new(big.Int).Add(headers[index-1].Number, common.Big1)) != 0 {
-			return fmt.Errorf("nonconsecutive shard heights %v and %v", headers[index-1].Number, header.Number)
+		header := headers[skipped]
+		if _, err := validateShardHeaderLink(header, skipped, previousHash, chainID); err != nil {
+			return err
 		}
-		if aligned && header.Time > block.Time() {
+		previousHash = header.Hash()
+		skipped++
+	}
+
+	pending := headers[skipped:]
+	limit := min(uint64(len(pending)), builder.maxPerShard)
+	for offset, header := range pending[:limit] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		index := skipped + offset
+		if err := checkShardHeaderHeight(headers, index, common.Big1); err != nil {
+			return err
+		}
+		if header.Time > block.Time() {
 			break
 		}
 		hash := header.Hash()
-		if aligned {
-			amount, err := builder.chain.GetShardBlockCoinbaseAmount(hash)
-			if err != nil {
-				return fmt.Errorf("read report for %s: %w", hash, err)
-			}
-			if amount == nil {
-				break
-			}
+		amount, err := builder.chain.GetShardBlockCoinbaseAmount(hash)
+		if err != nil {
+			return fmt.Errorf("read report for %s: %w", hash, err)
 		}
-		if index > 0 && header.ParentHash != previousHash {
-			return fmt.Errorf("header %s at height %v does not extend %s", hash, header.Number, previousHash)
+		if amount == nil {
+			break
 		}
-		extra, err := header.QKCExtra()
+		extra, err := validateShardHeaderLink(header, index, previousHash, chainID)
 		if err != nil {
 			return err
-		}
-		if extra.ChainID.Cmp(chainID) != 0 {
-			return fmt.Errorf("header %s belongs to shard %v", hash, extra.ChainID)
-		}
-		previousHash = hash
-		if !aligned {
-			aligned = hash == confirmed
-			continue
 		}
 		sameChain, err := isAncestor(extra.PrevRootBlock)
 		if err != nil {
@@ -190,10 +193,36 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 			break
 		}
 		block.AddShardBlockHeader(header)
-		added++
-		if added == builder.maxPerShard {
-			break
+		previousHash = hash
+	}
+	return nil
+}
+
+func checkShardHeaderHeight(headers []*types.Header, index int, minimum *big.Int) error {
+	header := headers[index]
+	if header == nil || header.Number == nil || header.Number.Cmp(minimum) < 0 {
+		return fmt.Errorf("missing header or invalid height at index %d", index)
+	}
+	if index > 0 {
+		previous := headers[index-1].Number
+		next := new(big.Int).Add(previous, common.Big1)
+		if header.Number.Cmp(next) != 0 {
+			return fmt.Errorf("nonconsecutive shard heights %v and %v", previous, header.Number)
 		}
 	}
 	return nil
+}
+
+func validateShardHeaderLink(header *types.Header, index int, parentHash common.Hash, chainID *big.Int) (*types.QKCExtra, error) {
+	if index > 0 && header.ParentHash != parentHash {
+		return nil, fmt.Errorf("header %s at height %v does not extend %s", header.Hash(), header.Number, parentHash)
+	}
+	extra, err := header.QKCExtra()
+	if err != nil {
+		return nil, err
+	}
+	if extra.ChainID.Cmp(chainID) != 0 {
+		return nil, fmt.Errorf("header %s belongs to shard %v", header.Hash(), extra.ChainID)
+	}
+	return extra, nil
 }
