@@ -60,6 +60,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/dnsdisc"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -101,7 +102,7 @@ type Ethereum struct {
 	blockchain     *core.BlockChain
 
 	shard         *shard.Shard
-	powMiner      *shard.PoWMiner
+	powMiner      *mining.PoWMiner
 	clusterClient shard.ClusterClient
 
 	miningRPCs       sync.WaitGroup
@@ -403,7 +404,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			return nil, err
 		}
 		client.Shard = eth.shard
-		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
+		eth.powMiner = mining.NewPoWMiner(eth.shard, mining.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
 	}
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
@@ -481,8 +482,8 @@ func (s *Ethereum) Miner() *miner.Miner { return s.miner }
 // Shard and PoWMiner are owned by Ethereum and called by the cluster service
 // and the mining RPC. Ethereum.Stop must reject new calls and wait for in-flight
 // ones before closing the chain and database.
-func (s *Ethereum) Shard() *shard.Shard       { return s.shard }
-func (s *Ethereum) PoWMiner() *shard.PoWMiner { return s.powMiner }
+func (s *Ethereum) Shard() *shard.Shard        { return s.shard }
+func (s *Ethereum) PoWMiner() *mining.PoWMiner { return s.powMiner }
 
 func (s *Ethereum) AccountManager() *accounts.Manager  { return s.accountManager }
 func (s *Ethereum) BlockChain() *core.BlockChain       { return s.blockchain }
