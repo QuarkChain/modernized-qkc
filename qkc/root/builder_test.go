@@ -36,6 +36,7 @@ import (
 )
 
 type builderCluster struct {
+	ClusterClient
 	headers map[string][]*types.Header
 	err     error
 }
@@ -75,7 +76,7 @@ func (chain *builderChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint2
 	return chain.reported[hash], chain.reportErr
 }
 
-func newTestBuilder(t *testing.T, cluster ShardHeaderSource) (*RootBlockBuilder, *builderChain) {
+func newTestBuilder(t *testing.T, cluster ClusterClient) (*RootBlockBuilder, *builderChain) {
 	t.Helper()
 	config := params.NewTestQuarkChainConfig(10, 10, 2, 3).QuarkChain
 	config.MaxBlocksPerRootBlock = 3
