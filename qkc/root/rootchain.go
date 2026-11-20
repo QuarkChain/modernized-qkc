@@ -231,25 +231,20 @@ func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
 }
 
-// CreateBlockToMine builds an unsigned, unsealed candidate on the initialized
-// root tip. Without an authorized signature its seal must meet the base difficulty.
-func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.RootBlock, *big.Int, error) {
+// CreateBlockToMine builds an unsigned, unsealed candidate on the initialized root tip.
+func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.RootBlock, error) {
 	if err := c.backendCtx.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !c.ready.Load() {
-		return nil, nil, ErrRootChainNotReady
+		return nil, ErrRootChainNotReady
 	}
 	// A pending shard RPC must stop on either request cancellation or shutdown.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(c.backendCtx, cancel)
 	defer stop()
-	block, err := c.builder.BuildBlock(ctx, RootBlockArgs{Parent: c.RootTip(), Coinbase: coinbase})
-	if err != nil {
-		return nil, nil, err
-	}
-	return block, block.Difficulty().ToBig(), nil
+	return c.builder.BuildBlock(ctx, RootBlockArgs{Parent: c.RootTip(), Coinbase: coinbase})
 }
 
 // GetRootHeader reads a header by hash from any stored branch.

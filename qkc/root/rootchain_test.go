@@ -208,13 +208,13 @@ func TestRootCreateBlockToMine(t *testing.T) {
 	f.store(parent, true)
 	chain := f.open()
 	coinbase := common.Address{42}
-	if block, _, err := chain.CreateBlockToMine(t.Context(), coinbase); block != nil || !errors.Is(err, ErrRootChainNotReady) {
+	if block, err := chain.CreateBlockToMine(t.Context(), coinbase); block != nil || !errors.Is(err, ErrRootChainNotReady) {
 		t.Fatalf("before Init: block %v, error %v", block, err)
 	}
 	if err := chain.Init(); err != nil {
 		t.Fatal(err)
 	}
-	block, difficulty, err := chain.CreateBlockToMine(t.Context(), coinbase)
+	block, err := chain.CreateBlockToMine(t.Context(), coinbase)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +224,9 @@ func TestRootCreateBlockToMine(t *testing.T) {
 	if len(f.client.calls) != 2 || f.client.calls[1] != "headers" {
 		t.Fatalf("expected a shard header request after initialization, got %v", f.client.calls)
 	}
-	if difficulty.Cmp(common.Big1) != 0 || difficulty.Cmp(block.Difficulty().ToBig()) != 0 {
-		t.Fatalf("unexpected seal difficulty %v for candidate with difficulty %v", difficulty, block.Difficulty())
+	difficulty := block.Difficulty().ToBig()
+	if difficulty.Cmp(common.Big1) != 0 {
+		t.Fatalf("candidate difficulty %v, want 1", difficulty)
 	}
 	miner := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
 	defer miner.Close()
@@ -260,7 +261,7 @@ func TestRootCreateBlockToMineCancelsShardRequest(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		}
-		if block, _, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); block != nil || !errors.Is(err, context.Canceled) {
+		if block, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); block != nil || !errors.Is(err, context.Canceled) {
 			t.Fatalf("backend shutdown during shard request: block %v, error %v", block, err)
 		}
 	})
