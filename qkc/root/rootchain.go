@@ -316,6 +316,11 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
+	// TODO(recovery): Init sends only the persisted canonical tip, so a shard
+	// missing a side-chain root after interrupted delivery may reject its children
+	// after restart. Persist pending delivery atomically with the local commit,
+	// clear it only after all shards acknowledge, and replay it during Init before
+	// publishing Ready, including when the pending block did not update the tip.
 	if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
 		// The communication layer requests master shutdown on connection failure.
 		// Some shards may already have advanced. Prevent further writes and
