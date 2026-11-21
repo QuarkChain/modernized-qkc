@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -65,12 +66,31 @@ func New(chain *ShardChain, client ClusterClient) (*Shard, error) {
 	return &Shard{chain: chain, clusterClient: client}, nil
 }
 
+// SetClusterClient replaces delivery before the owner starts the shard service.
+// It does not start or stop either client; the owner manages their lifecycle.
+// It must not run concurrently with mining, imports or cluster requests.
+func (s *Shard) SetClusterClient(client ClusterClient) error {
+	if client == nil {
+		return errors.New("missing cluster client")
+	}
+	s.clusterClient = client
+	return nil
+}
+
 // Init restores shard state from the master's persisted root tip.
 // TODO(recovery): If the supplied root block is absent locally, restore its local
 // direct parent, then import the supplied root block. ShardChain.Init currently
 // requires non-genesis roots and their confirmations to already be stored locally.
 func (s *Shard) Init(root *qkctypes.RootBlock) error {
-	return s.chain.Init(root)
+	err := s.chain.Init(root)
+	if errors.Is(err, ErrRootChainAlreadyInitialized) {
+		// Like pyquarkchain's create_shards, an existing shard must acknowledge
+		// repeated PINGs without resetting its checkpoint. Returning an error
+		// here would close the master connection and trigger node shutdown.
+		log.Warn("Shard already initialized; acknowledging repeated PING")
+		return nil
+	}
+	return err
 }
 
 // CreateBlockToMine builds an unsealed candidate on the shard head, paying

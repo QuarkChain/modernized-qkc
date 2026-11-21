@@ -48,6 +48,9 @@ type backendClusterClient struct {
 	report    func(context.Context, *types.Header, *uint256.Int) error
 }
 
+func (*backendClusterClient) Start(ShardBackend) error { return nil }
+func (*backendClusterClient) Stop() error              { return nil }
+
 func (c *backendClusterClient) BroadcastXShardTxList(ctx context.Context, chainID *big.Int, hash common.Hash, list []*types.DepositTx) error {
 	return c.broadcast(ctx, chainID, hash, list)
 }
@@ -136,6 +139,12 @@ func TestBackendLifecycle(t *testing.T) {
 			}, qkctypes.ShardBlockHeaders{s.CurrentBlock()}, nil)
 			if err := s.Init(root); err != nil {
 				t.Fatal(err)
+			}
+			if err := s.Init(root); err != nil {
+				t.Fatalf("repeated master PING must succeed: %v", err)
+			}
+			if err := shardChain.Init(root); !errors.Is(err, ErrRootChainAlreadyInitialized) {
+				t.Fatalf("ShardChain must retain its repeat-init error: %v", err)
 			}
 			if s.RootTip() != root.Hash() {
 				t.Fatal("Init did not select the master's root")
