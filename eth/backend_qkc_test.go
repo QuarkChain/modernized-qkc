@@ -84,7 +84,7 @@ func qkcBackendNode(t *testing.T, datadir string) *node.Node {
 func startQKCBackend(t *testing.T, stack *node.Node, config *ethconfig.Config) *Ethereum {
 	t.Helper()
 	prepareQKCGenesis(t, stack, config)
-	backend, err := New(stack, config)
+	backend, err := NewQKCBackendWithMockClient(stack, config)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,15 +26,22 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// MockClusterClient only logs delivery calls; it neither opens connections nor
-// initializes the shard. Replace it when the real SlaveService is integrated.
+// MockClusterClient logs delivery calls for standalone tools and tests. It
+// neither opens connections nor initializes the shard.
 // TODO(mock): Add mock xshard deposits and root blocks here, forwarding them to
 // Shard.AddXshardTxList and Shard.Init/AddRootBlock through the bound reference.
 type MockClusterClient struct {
-	Shard *Shard // Bound by Ethereum before any requests are handled.
+	Shard *Shard // May be bound by the caller before any requests are handled.
 }
 
 var _ ClusterClient = (*MockClusterClient)(nil)
+
+func (c *MockClusterClient) Start(backend ShardBackend) error {
+	c.Shard, _ = backend.(*Shard)
+	return nil
+}
+
+func (*MockClusterClient) Stop() error { return nil }
 
 func (*MockClusterClient) BroadcastXShardTxList(_ context.Context, chainID *big.Int, hash common.Hash, deposits []*types.DepositTx) error {
 	log.Info("Mock cross-shard delivery", "chain", chainID, "block", hash, "deposits", len(deposits))

@@ -20,10 +20,13 @@ package eth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"net"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -60,6 +63,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/dnsdisc"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -394,15 +398,33 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// Only QKC chains use root/shard coordination. Non-QKC configurations remain
 	// usable by the original geth tests without attaching shard-only validation.
 	if eth.isQKC() {
-		// TODO(SlaveService): Replace the mock with a real ClusterClient implementation.
-		client := &shard.MockClusterClient{}
-		eth.clusterClient = client
+		// Leave a missing host empty so NewService rejects it instead of
+		// accepting a wildcard listener address.
+		var listenAddr string
+		if stack.Config().PrivateHost != "" {
+			listenAddr = net.JoinHostPort(stack.Config().PrivateHost, strconv.Itoa(stack.Config().PrivatePort))
+		}
+		eth.clusterClient, err = slavenet.NewService(slavenet.ServiceConfig{
+			ListenAddr: listenAddr, LocalChainID: chainConfig.ChainID,
+			ConfiguredChainIDs: chainConfig.QuarkChain.ChainIDs,
+			// Closing the node stops this service and drains its handlers. Never
+			// wait for that from a handler or a connection-failure callback.
+			Shutdown: func() {
+				go func() {
+					if err := stack.Close(); err != nil && !errors.Is(err, node.ErrNodeStopped) {
+						log.Error("Failed to shut down shard node", "err", err)
+					}
+				}()
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create slave service: %w", err)
+		}
 		shardChain := shard.NewShardChain(chainDb, eth.blockchain, eth.miner)
 		eth.shard, err = shard.New(shardChain, eth.clusterClient)
 		if err != nil {
 			return nil, err
 		}
-		client.Shard = eth.shard
 		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
 	}
 
@@ -424,6 +446,31 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	eth.shutdownTracker.MarkStartup()
 
 	return eth, nil
+}
+
+// NewQKCBackendWithMockClient creates a backend for tests, using a mock cluster
+// client for QKC chains and the ordinary backend for non-QKC chains.
+// It defaults the private host before New validates the cluster listener settings.
+func NewQKCBackendWithMockClient(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+	if stack.Config().PrivateHost == "" {
+		stack.Config().PrivateHost = "127.0.0.1"
+	}
+	backend, err := New(stack, config)
+	if err != nil {
+		return nil, err
+	}
+	// Check the loaded chain so QKC restarts with a nil genesis still use the mock.
+	if !backend.isQKC() {
+		return backend, nil
+	}
+	// New constructs the real service without opening its listener. Replace
+	// both references before stack.Start so lifecycle and delivery use the same mock.
+	client := &shard.MockClusterClient{}
+	backend.clusterClient = client
+	if err := backend.shard.SetClusterClient(client); err != nil {
+		return nil, err
+	}
+	return backend, nil
 }
 
 func makeExtraData(extra []byte) []byte {
@@ -543,6 +590,12 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+	if s.isQKC() {
+		if err := s.clusterClient.Start(s.shard); err != nil {
+			// Node does not call Stop on a lifecycle whose Start failed.
+			return errors.Join(fmt.Errorf("start slave service: %w", err), s.Stop())
+		}
+	}
 	return nil
 }
 
@@ -661,12 +714,11 @@ func (s *Ethereum) Stop() error {
 		s.lock.Lock()
 		s.miningRPCStopped = true
 		s.lock.Unlock()
+		// Closing connections releases pending delivery RPCs before we wait
+		// for mining or handlers. Their shared chain and DB remain available.
+		s.clusterClient.Stop()
 		s.miningRPCs.Wait()
 	}
-	// TODO(SlaveService): When replacing the QKC mock, update this shutdown order
-	// with the service integration: reject new requests, cancel and wait for
-	// request handlers and mining, then close cluster connections before the
-	// chain resources and database below.
 	s.discmix.Close()
 	if !s.isQKC() {
 		s.dropper.Stop()
