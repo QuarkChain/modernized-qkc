@@ -146,7 +146,7 @@ func startM1Shard(path string, apis ...rpc.API) (*node.Node, *eth.Ethereum, erro
 		return nil, nil, err
 	}
 	stack.RegisterAPIs(apis)
-	backend, err := eth.New(stack, &cfg.Eth)
+	backend, err := eth.NewQKCBackendWithMockClient(stack, &cfg.Eth)
 	if err != nil {
 		stack.Close()
 		return nil, nil, err
