@@ -48,9 +48,6 @@ type backendClusterClient struct {
 	report    func(context.Context, *types.Header, *uint256.Int) error
 }
 
-func (*backendClusterClient) Start(ShardBackend) error { return nil }
-func (*backendClusterClient) Stop() error              { return nil }
-
 func (c *backendClusterClient) BroadcastXShardTxList(ctx context.Context, chainID *big.Int, hash common.Hash, list []*types.DepositTx) error {
 	return c.broadcast(ctx, chainID, hash, list)
 }
@@ -142,6 +139,25 @@ func TestBackendLifecycle(t *testing.T) {
 			}
 			if err := s.Init(root); err != nil {
 				t.Fatalf("repeated master PING must succeed: %v", err)
+			}
+			differentRoot := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+				Time: 1, Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
+			}, qkctypes.ShardBlockHeaders{s.CurrentBlock()}, nil)
+			for _, test := range []struct {
+				name string
+				root *qkctypes.RootBlock
+			}{
+				{"different root", differentRoot},
+				{"nil root", nil},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					if err := s.Init(test.root); !errors.Is(err, ErrRootChainAlreadyInitialized) {
+						t.Fatalf("repeat Init must reject a root other than the current tip: %v", err)
+					}
+					if s.RootTip() != root.Hash() {
+						t.Fatal("rejected Init changed the root tip")
+					}
+				})
 			}
 			if err := shardChain.Init(root); !errors.Is(err, ErrRootChainAlreadyInitialized) {
 				t.Fatalf("ShardChain must retain its repeat-init error: %v", err)

@@ -22,30 +22,14 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
-
-// ShardBackend supplies the concurrent-safe shard operations served by the
-// cluster client. Initialization must finish before mining and block imports.
-type ShardBackend interface {
-	Init(*qkctypes.RootBlock) error
-	AddRootBlock(*qkctypes.RootBlock) (bool, error)
-	GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error)
-	GetUnconfirmedHeaderList() ([]*types.Header, error)
-	AddXshardTxList(common.Hash, []*types.DepositTx) error
-}
 
 // ClusterClient is implemented by the component that owns the cluster
 // connections. A Shard holds this narrow interface instead of the connections
 // or wire-message encoders.
 // Implementations must support concurrent calls and honor context cancellation and deadlines.
 type ClusterClient interface {
-	// Start binds the backend and starts communication without waiting for Init.
-	Start(backend ShardBackend) error
-	// Stop closes connections and drains handlers before shard resources close.
-	Stop() error
-
 	// BroadcastXShardTxList delivers depositTxList from shardBlockHash to the
 	// hosts serving chainID. An empty transaction list still advances that
 	// chain's inbox cursor. A send failure, a nonzero remote ErrorCode

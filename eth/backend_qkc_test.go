@@ -84,9 +84,13 @@ func qkcBackendNode(t *testing.T, datadir string) *node.Node {
 func startQKCBackend(t *testing.T, stack *node.Node, config *ethconfig.Config) *Ethereum {
 	t.Helper()
 	prepareQKCGenesis(t, stack, config)
+	privateHost := stack.Config().PrivateHost
 	backend, err := NewQKCBackendWithMockClient(stack, config)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if stack.Config().PrivateHost != privateHost {
+		t.Fatal("mock backend changed the private host")
 	}
 	if err := stack.Start(); err != nil {
 		t.Fatal(err)

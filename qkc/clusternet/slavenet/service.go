@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
@@ -37,7 +36,14 @@ import (
 // ShardBackend supplies concurrent-safe business operations borrowed by Service.
 // Init errors close the master connection. Other methods may return
 // *clusternet.RemoteError as a protocol rejection; all other errors close the connection.
-type ShardBackend = shard.ShardBackend
+// Initialization must finish before mining and block imports.
+type ShardBackend interface {
+	Init(*qkctypes.RootBlock) error
+	AddRootBlock(*qkctypes.RootBlock) (bool, error)
+	GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error)
+	GetUnconfirmedHeaderList() ([]*types.Header, error)
+	AddXshardTxList(common.Hash, []*types.DepositTx) error
+}
 
 // ServiceConfig supplies validated deployment settings, not wire messages.
 // ConfiguredChainIDs includes the local chain and allowed remote chains.
@@ -75,7 +81,6 @@ type Service struct {
 }
 
 var (
-	_ shard.ClusterClient  = (*Service)(nil)
 	_ MasterRequestHandler = (*Service)(nil)
 	_ XshardRequestHandler = (*Service)(nil)
 	_ SlaveDialer          = (*Service)(nil)

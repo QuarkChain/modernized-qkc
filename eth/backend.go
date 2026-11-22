@@ -94,6 +94,27 @@ const (
 // Deprecated: use ethconfig.Config instead.
 type Config = ethconfig.Config
 
+// clusterClient combines shard delivery with the lifecycle owned by Ethereum.
+type clusterClient interface {
+	shard.ClusterClient
+	// Start binds the backend and starts communication without waiting for Init.
+	Start(slavenet.ShardBackend) error
+	// Stop closes connections and drains handlers before shard resources close.
+	Stop() error
+}
+
+// mockClusterClient adapts the delivery mock to Ethereum's lifecycle.
+type mockClusterClient struct {
+	shard.MockClusterClient
+}
+
+func (c *mockClusterClient) Start(backend slavenet.ShardBackend) error {
+	c.Shard, _ = backend.(*shard.Shard)
+	return nil
+}
+
+func (*mockClusterClient) Stop() error { return nil }
+
 // Ethereum implements the Ethereum full node service.
 type Ethereum struct {
 	// core protocol objects
@@ -106,7 +127,7 @@ type Ethereum struct {
 
 	shard         *shard.Shard
 	powMiner      *shard.PoWMiner
-	clusterClient shard.ClusterClient
+	clusterClient clusterClient
 
 	miningRPCs       sync.WaitGroup
 	miningRPCStopped bool // protected by lock
@@ -149,6 +170,14 @@ type Ethereum struct {
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
 // whose lifecycle will be managed by the provided node.
 func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+	return newBackend(stack, config, func(cfg slavenet.ServiceConfig) (clusterClient, error) {
+		return slavenet.NewService(cfg)
+	})
+}
+
+// newBackend selects the cluster client before binding it to the shard. The
+// factory is used only for QKC chains, including those loaded from the database.
+func newBackend(stack *node.Node, config *ethconfig.Config, newClient func(slavenet.ServiceConfig) (clusterClient, error)) (*Ethereum, error) {
 	// Ensure configuration values are compatible and sane
 	if !config.SyncMode.IsValid() {
 		return nil, fmt.Errorf("invalid sync mode %d", config.SyncMode)
@@ -404,7 +433,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		if stack.Config().PrivateHost != "" {
 			listenAddr = net.JoinHostPort(stack.Config().PrivateHost, strconv.Itoa(stack.Config().PrivatePort))
 		}
-		eth.clusterClient, err = slavenet.NewService(slavenet.ServiceConfig{
+		eth.clusterClient, err = newClient(slavenet.ServiceConfig{
 			ListenAddr: listenAddr, LocalChainID: chainConfig.ChainID,
 			ConfiguredChainIDs: chainConfig.QuarkChain.ChainIDs,
 			// Closing the node stops this service and drains its handlers. Never
@@ -450,27 +479,10 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 // NewQKCBackendWithMockClient creates a backend for tests, using a mock cluster
 // client for QKC chains and the ordinary backend for non-QKC chains.
-// It defaults the private host before New validates the cluster listener settings.
 func NewQKCBackendWithMockClient(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
-	if stack.Config().PrivateHost == "" {
-		stack.Config().PrivateHost = "127.0.0.1"
-	}
-	backend, err := New(stack, config)
-	if err != nil {
-		return nil, err
-	}
-	// Check the loaded chain so QKC restarts with a nil genesis still use the mock.
-	if !backend.isQKC() {
-		return backend, nil
-	}
-	// New constructs the real service without opening its listener. Replace
-	// both references before stack.Start so lifecycle and delivery use the same mock.
-	client := &shard.MockClusterClient{}
-	backend.clusterClient = client
-	if err := backend.shard.SetClusterClient(client); err != nil {
-		return nil, err
-	}
-	return backend, nil
+	return newBackend(stack, config, func(slavenet.ServiceConfig) (clusterClient, error) {
+		return &mockClusterClient{}, nil
+	})
 }
 
 func makeExtraData(extra []byte) []byte {

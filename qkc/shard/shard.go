@@ -83,10 +83,9 @@ func (s *Shard) SetClusterClient(client ClusterClient) error {
 // an error; master does not rewind its persisted tip.
 func (s *Shard) Init(root *qkctypes.RootBlock) error {
 	err := s.chain.Init(root)
-	if errors.Is(err, ErrRootChainAlreadyInitialized) {
-		// Like pyquarkchain's create_shards, an existing shard must acknowledge
-		// repeated PINGs without resetting its checkpoint. Returning an error
-		// here would close the master connection and trigger node shutdown.
+	if errors.Is(err, ErrRootChainAlreadyInitialized) && root != nil && root.Hash() == s.RootTip() {
+		// Acknowledge repeated PINGs only when master agrees with the current
+		// root tip, without resetting the shard's checkpoint.
 		log.Warn("Shard already initialized; acknowledging repeated PING")
 		return nil
 	}

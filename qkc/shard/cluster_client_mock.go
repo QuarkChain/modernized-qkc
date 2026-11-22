@@ -36,13 +36,6 @@ type MockClusterClient struct {
 
 var _ ClusterClient = (*MockClusterClient)(nil)
 
-func (c *MockClusterClient) Start(backend ShardBackend) error {
-	c.Shard, _ = backend.(*Shard)
-	return nil
-}
-
-func (*MockClusterClient) Stop() error { return nil }
-
 func (*MockClusterClient) BroadcastXShardTxList(_ context.Context, chainID *big.Int, hash common.Hash, deposits []*types.DepositTx) error {
 	log.Info("Mock cross-shard delivery", "chain", chainID, "block", hash, "deposits", len(deposits))
 	return nil
