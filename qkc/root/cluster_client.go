@@ -43,8 +43,8 @@ type ClusterClient interface {
 	// for all acknowledgements. A send failure, a nonzero remote ErrorCode
 	// (returned as *clusternet.RemoteError), or a ShardNode without a connection is
 	// returned as an error, so a disconnected chain never silently misses the
-	// root block. Startup recovery uses Ping at the persisted root tip rather
-	// than a separate broadcast driven by a committing marker.
+	// root block. Startup first initializes the persisted tip with Ping, then
+	// replays a committing root through this method if it differs from the tip.
 	BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock) error
 
 	// GetUnconfirmedHeaderList collects unconfirmed shard headers from the cluster,

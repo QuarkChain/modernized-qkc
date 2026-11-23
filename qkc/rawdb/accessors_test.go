@@ -114,8 +114,14 @@ func TestRootChainStorage(t *testing.T) {
 	if err := WriteRootHeadBlockHash(batch, hash); err != nil {
 		t.Fatal(err)
 	}
+	if err := WriteRootCommittingHash(batch, hash); err != nil {
+		t.Fatal(err)
+	}
 	if stored := ReadRootBlock(db, hash); stored != nil {
 		t.Fatalf("uncommitted block visible: %v", stored)
+	}
+	if pending, err := ReadRootCommittingHash(db); err != nil || pending != (common.Hash{}) {
+		t.Fatal("uncommitted broadcast marker visible", pending, err)
 	}
 	if err := batch.Write(); err != nil {
 		t.Fatal(err)
@@ -128,6 +134,15 @@ func TestRootChainStorage(t *testing.T) {
 	}
 	if got, err := ReadRootHeadBlockHash(db); err != nil || got != hash {
 		t.Fatalf("head hash round trip: have %x, want %x, error %v", got, hash, err)
+	}
+	if pending, err := ReadRootCommittingHash(db); err != nil || pending != hash {
+		t.Fatal("root and broadcast marker were not committed together", pending, err)
+	}
+	if err := DeleteRootCommittingHash(db); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := ReadRootCommittingHash(db); err != nil || pending != (common.Hash{}) {
+		t.Fatal("broadcast marker survived cleanup", pending, err)
 	}
 	if got := ReadRootCanonicalHash(db, 1); got != hash {
 		t.Fatalf("canonical hash round trip: have %x, want %x", got, hash)
@@ -145,6 +160,44 @@ func TestRootChainStorage(t *testing.T) {
 type rootReadFailure struct {
 	ethdb.Database
 	err error
+}
+
+// Recovery reads use Has to distinguish absence from a Get failure. The older
+// accessors deliberately keep their geth-compatible empty-on-error behavior.
+type recoveryReadFailure struct {
+	rootReadFailure
+	hasErr error
+}
+
+func (db recoveryReadFailure) Has(key []byte) (bool, error) {
+	if db.hasErr != nil {
+		return false, db.hasErr
+	}
+	return db.Database.Has(key)
+}
+
+func TestRootCommittingHashReadErrors(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	t.Cleanup(func() { db.Close() })
+	hash := common.Hash{1}
+	if err := WriteRootCommittingHash(db, hash); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("recovery read failed")
+	for _, hasErr := range []error{nil, failure} {
+		reader := recoveryReadFailure{rootReadFailure: rootReadFailure{Database: db, err: failure}, hasErr: hasErr}
+		if pending, err := ReadRootCommittingHash(reader); pending != (common.Hash{}) || !errors.Is(err, failure) {
+			t.Fatal("marker read failure treated as absence:", err)
+		}
+	}
+	for _, malformed := range [][]byte{nil, {1}, make([]byte, common.HashLength+1)} {
+		if err := db.Put(rootCommittingHashKey, malformed); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadRootCommittingHash(db); err == nil {
+			t.Fatal("malformed committing marker treated as absent")
+		}
+	}
 }
 
 func (db rootReadFailure) Has([]byte) (bool, error) {
@@ -361,6 +414,8 @@ func TestRootChainWriteErrors(t *testing.T) {
 		write func() error
 	}{
 		{"root head", func() error { return WriteRootHeadBlockHash(db, hash) }},
+		{"committing root", func() error { return WriteRootCommittingHash(db, hash) }},
+		{"clear committing root", func() error { return DeleteRootCommittingHash(db) }},
 		{"canonical root", func() error { return WriteRootCanonicalHash(db, hash, 1) }},
 		{"delete canonical root", func() error { return DeleteRootCanonicalHash(db, 1) }},
 		{"root block", func() error {

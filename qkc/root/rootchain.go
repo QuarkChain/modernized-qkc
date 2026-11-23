@@ -198,8 +198,8 @@ func (c *RootChain) readConfirmations(hash common.Hash) (map[string]common.Hash,
 // ShardChain.Init currently requires non-genesis roots and their confirmations
 // to already be stored locally.
 // Connections must be ready before this call. Init records initialization after
-// all shards succeed, using backendCtx for PING cancellation. Ready becomes true
-// only while backendCtx is active and the chain is not stopping.
+// PING and any pending side-root broadcast succeed and the committing marker is
+// cleared. Ready becomes true only while backendCtx is active and not stopping.
 // On failure, the backend must abort startup and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
 // a cluster restart. Repeating a successful Init is a no-op until the chain stops;
@@ -230,7 +230,53 @@ func (c *RootChain) Init() error {
 	if err := c.client.Ping(c.backendCtx, block); err != nil {
 		return fmt.Errorf("initialize shards: %w", err)
 	}
+	if err := c.replayCommittingBlock(block.Hash()); err != nil {
+		// PING or replay may already have changed shards. Keep the marker and
+		// require a fresh cluster lifetime instead of repeating initialization.
+		c.stopping.Store(true)
+		return err
+	}
 	c.initialized.Store(true)
+	return nil
+}
+
+// replayCommittingBlock requires chainmu and runs after every shard accepts tip.
+// PING already covers a committing tip; a side root still needs an explicit RPC.
+func (c *RootChain) replayCommittingBlock(tip common.Hash) error {
+	committingHash, err := rawdb.ReadRootCommittingHash(c.db)
+	if err != nil {
+		return fmt.Errorf("read committing root: %w", err)
+	}
+	if committingHash == (common.Hash{}) {
+		return nil
+	}
+	// PING already recovered the canonical tip on every shard. Only a pending
+	// side-chain root, whose hash differs from the tip, still needs a broadcast.
+	if committingHash != tip {
+		block, err := c.GetRootBlock(committingHash)
+		if err != nil {
+			return err
+		}
+		if block == nil {
+			return fmt.Errorf("%w: committing root %x", ErrRootDataMissing, committingHash)
+		}
+		if block.Hash() != committingHash {
+			return fmt.Errorf("committing root hash mismatch: have %x, want %x", block.Hash(), committingHash)
+		}
+		// Stored blocks were validated at insertion. Replay only checks that
+		// the block hash and body still match their persisted commitments.
+		if types.CalcShardHeaderHash(block.ShardBlockHeaders()) != block.ShardHeaderHash() {
+			return fmt.Errorf("committing root %x shard header commitment mismatch", committingHash)
+		}
+		if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
+			return fmt.Errorf("replay committing root %x: %w", committingHash, err)
+		}
+	}
+	// Clear the marker in both cases: a committing tip was acknowledged by
+	// PING, while a side-chain root was acknowledged by the replay above.
+	if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
+		return fmt.Errorf("clear committing root: %w", err)
+	}
 	return nil
 }
 
@@ -312,6 +358,11 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 			return fmt.Errorf("store root head: %w", err)
 		}
 	}
+	// Every broadcast, including a side root or a known block, must be
+	// recoverable once its local commit succeeds. Never publish the marker alone.
+	if err := rawdb.WriteRootCommittingHash(batch, hash); err != nil {
+		return fmt.Errorf("store committing root: %w", err)
+	}
 	// Validation and batch preparation may outlive backendCtx. Check again before
 	// committing so an already canceled import leaves DB and runtime tip unchanged.
 	// Once the batch succeeds, publish the tip without another cancellation check.
@@ -327,17 +378,18 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
-	// TODO(recovery): Init sends only the persisted canonical tip, so a shard
-	// missing a side-chain root after interrupted delivery may reject its children
-	// after restart. Persist pending delivery atomically with the local commit,
-	// clear it only after all shards acknowledge, and replay it during Init before
-	// publishing Ready, including when the pending block did not update the tip.
 	if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
 		// The communication layer requests master shutdown on connection failure.
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.
 		c.stopping.Store(true)
 		return fmt.Errorf("broadcast root block: %w", err)
+	}
+	if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
+		// Prevent the next insertion from overwriting recovery work whose ACKs
+		// have not yet been durably recorded, even though delivery succeeded.
+		c.stopping.Store(true)
+		return fmt.Errorf("clear committing root: %w", err)
 	}
 	return nil
 }
