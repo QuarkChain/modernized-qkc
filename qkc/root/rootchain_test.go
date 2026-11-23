@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
@@ -806,6 +807,201 @@ func TestRootInitRecordsSuccessfulPingAfterBackendCancellation(t *testing.T) {
 	}
 	if !f.chain.initialized.Load() || f.chain.Ready() {
 		t.Fatal("initialization must be recorded without reporting readiness after cancellation")
+	}
+}
+
+func TestRootNewRequiresBackendContext(t *testing.T) {
+	f := newRootEnv(t)
+	if chain, err := New(nil, f.config, f.client, f.db, f.engine); chain != nil || err == nil {
+		t.Fatal("missing backend context accepted", err)
+	}
+}
+
+func TestRootShardIncomePersistenceAndErrors(t *testing.T) {
+	f := newRootEnv(t)
+	hash := common.Hash{9}
+	if err := f.chain.AddShardBlockCoinbaseAmount(hash, uint256.NewInt(0)); err != nil {
+		t.Fatal(err)
+	}
+	// Income reports must not reenter the chain write lock, and must survive a
+	// RootChain restart independently of whether their shard block is canonical.
+	f.chain = f.open()
+	if !f.chain.chainmu.TryLock() {
+		t.Fatal("chain already closed")
+	}
+	defer f.chain.chainmu.Unlock()
+	if amount, err := f.chain.GetShardBlockCoinbaseAmount(hash); err != nil || amount == nil || !amount.IsZero() {
+		t.Fatal("stored zero income was lost", amount, err)
+	}
+	if err := f.chain.AddShardBlockCoinbaseAmount(hash, uint256.NewInt(42)); err != nil {
+		t.Fatal(err)
+	}
+	if amount, err := f.chain.GetShardBlockCoinbaseAmount(hash); err != nil || amount == nil || amount.Uint64() != 42 {
+		t.Fatal("repeated income report did not overwrite", amount, err)
+	}
+	failure := errors.New("income storage failed")
+	f.db.putErr = failure
+	if err := f.chain.AddShardBlockCoinbaseAmount(hash, uint256.NewInt(99)); !errors.Is(err, failure) {
+		t.Fatal("write error lost", err)
+	}
+	f.db.putErr = nil
+	for _, stage := range []string{"has", "get"} {
+		if stage == "has" {
+			f.db.hasErr = failure
+		} else {
+			f.db.readErr = failure
+		}
+		if amount, err := f.chain.GetShardBlockCoinbaseAmount(hash); amount != nil || !errors.Is(err, failure) {
+			t.Fatal("failed report read was treated as unreported", stage, amount, err)
+		}
+		f.db.hasErr, f.db.readErr = nil, nil
+	}
+	if amount, err := f.chain.GetShardBlockCoinbaseAmount(hash); err != nil || amount == nil || amount.Uint64() != 42 {
+		t.Fatal("failed write changed persisted income", amount, err)
+	}
+	if amount, err := f.chain.GetShardBlockCoinbaseAmount(common.Hash{10}); amount != nil || err != nil {
+		t.Fatal("unreported block returned data or error", amount, err)
+	}
+}
+
+func TestRootTipWithLockWaitsForWrites(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newRootEnv(t)
+		if tip, err := f.chain.GetRootTipWithLock(); err != nil || tip.Hash() != f.genesis.Hash() || f.chain.Ready() {
+			t.Fatal("locked tip should also be available before Init", tip, err)
+		}
+		if !f.chain.chainmu.TryLock() {
+			t.Fatal("chain already closed")
+		}
+		// Model an import which has published its local tip but still holds the
+		// write lock while delivering the root to shards.
+		next := f.block(f.genesis, 1).Header()
+		f.chain.tip.Store(next)
+		tips := make(chan *types.RootBlockHeader, 1)
+		errs := make(chan error, 1)
+		go func() {
+			tip, err := f.chain.GetRootTipWithLock()
+			tips <- tip
+			errs <- err
+		}()
+		synctest.Wait()
+		select {
+		case <-tips:
+			t.Fatal("locked tip returned before delivery finished")
+		default:
+		}
+		if f.chain.RootTip() != next {
+			t.Fatal("atomic tip query blocked or lost the locally published tip")
+		}
+		f.chain.chainmu.Unlock()
+		if tip, err := <-tips, <-errs; tip != next || err != nil {
+			t.Fatal("wrong tip after delivery", tip, err)
+		}
+		f.chain.Close()
+		if tip, err := f.chain.GetRootTipWithLock(); tip != nil || err != errChainStopped {
+			t.Fatal("closed chain returned a locked tip", tip, err)
+		}
+	})
+}
+
+func TestRootChainStakeQuery(t *testing.T) {
+	f := newRootEnv(t)
+	id, hash, coinbase := big.NewInt(10002), common.Hash{9}, common.Address{10}
+	want := &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(123), Signer: common.Address{11}}
+	var rpcCtx context.Context
+	f.client.onStakes = func(ctx context.Context, gotID *big.Int, gotCoinbase common.Address, gotHash common.Hash) (*clusternet.RootChainStakesResult, error) {
+		rpcCtx = ctx
+		if gotID.Cmp(id) != 0 || gotCoinbase != coinbase || gotHash != hash {
+			t.Fatal("stake query changed the requested shard, block or account")
+		}
+		if deadline, ok := ctx.Deadline(); !ok || !deadline.After(time.Now()) {
+			t.Fatal("stake query has no usable deadline")
+		}
+		// A shard can report a block while consensus is waiting for its RPC.
+		if err := f.chain.AddShardBlockCoinbaseAmount(hash, uint256.NewInt(0)); err != nil {
+			t.Fatal(err)
+		}
+		return want, nil
+	}
+	if !f.chain.chainmu.TryLock() {
+		t.Fatal("chain already closed")
+	}
+	amount, signer, err := f.chain.GetRootChainStakes(id, hash, coinbase)
+	f.chain.chainmu.Unlock()
+	if err != nil || amount == nil || !amount.Eq(want.Stakes) || signer != want.Signer {
+		t.Fatal("stake response changed", amount, signer, err)
+	}
+	if !errors.Is(rpcCtx.Err(), context.Canceled) {
+		t.Fatal("stake query context leaked after returning")
+	}
+	failure := &clusternet.RemoteError{Code: 7}
+	for _, stage := range []string{"zero", "missing response", "missing stakes", "rpc error"} {
+		f.client.onStakes = func(context.Context, *big.Int, common.Address, common.Hash) (*clusternet.RootChainStakesResult, error) {
+			switch stage {
+			case "missing response":
+				return nil, nil
+			case "missing stakes":
+				return &clusternet.RootChainStakesResult{}, nil
+			case "rpc error":
+				return nil, failure
+			default:
+				return &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(0)}, nil
+			}
+		}
+		amount, signer, err := f.chain.GetRootChainStakes(id, hash, coinbase)
+		if stage == "zero" {
+			if err != nil || amount == nil || !amount.IsZero() || signer != (common.Address{}) {
+				t.Fatal("valid zero stakes or unset signer rejected", amount, signer, err)
+			}
+		} else if amount != nil || err == nil || (stage == "rpc error" && !errors.Is(err, failure)) {
+			t.Fatal("missing or failed stake response accepted", stage, amount, err)
+		}
+		if stage == "rpc error" {
+			var remote *clusternet.RemoteError
+			if !errors.As(err, &remote) || remote.Code != failure.Code {
+				t.Fatal("remote error code lost after wrapping", err)
+			}
+		}
+	}
+}
+
+func TestRootChainStakeQueryCancellation(t *testing.T) {
+	for _, stage := range []string{"already canceled", "backend shutdown", "timeout"} {
+		t.Run(stage, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newRootEnv(t)
+				if stage == "already canceled" {
+					f.cancel()
+				}
+				f.client.onStakes = func(ctx context.Context, _ *big.Int, _ common.Address, _ common.Hash) (*clusternet.RootChainStakesResult, error) {
+					if stage == "backend shutdown" {
+						f.cancel()
+					}
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				want := context.Canceled
+				if stage == "timeout" {
+					want = context.DeadlineExceeded
+				}
+				if amount, _, err := f.chain.GetRootChainStakes(big.NewInt(10001), common.Hash{9}, common.Address{}); amount != nil || !errors.Is(err, want) {
+					t.Fatal("stake query did not observe cancellation", amount, err)
+				}
+				if stage == "already canceled" && len(f.client.calls) != 0 {
+					t.Fatal("canceled backend started a cluster RPC")
+				}
+				if stage == "timeout" {
+					// A read timeout expires only this query, not the backend or
+					// future queries against the same confirmed shard state.
+					f.client.onStakes = func(ctx context.Context, _ *big.Int, _ common.Address, _ common.Hash) (*clusternet.RootChainStakesResult, error) {
+						return &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(1)}, ctx.Err()
+					}
+					if amount, _, err := f.chain.GetRootChainStakes(big.NewInt(10001), common.Hash{9}, common.Address{}); err != nil || amount == nil || amount.Uint64() != 1 {
+						t.Fatal("query timeout affected subsequent stake queries", amount, err)
+					}
+				}
+			})
+		})
 	}
 }
 
