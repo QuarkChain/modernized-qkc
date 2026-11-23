@@ -26,6 +26,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
+	"github.com/ethereum/go-ethereum/consensus/poswshard"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -44,6 +45,7 @@ type rootClient struct {
 	broadcasts   []common.Hash
 	pingErr      error
 	onPing       func(context.Context, *types.RootBlock) error
+	onHeaders    func(context.Context) error
 	broadcastErr error
 	onBroadcast  func(context.Context, *types.RootBlock) error
 	onStakes     func(context.Context, *big.Int, common.Address, common.Hash) (*clusternet.RootChainStakesResult, error)
@@ -71,6 +73,14 @@ func (c *rootClient) BroadcastRootBlock(ctx context.Context, block *types.RootBl
 		return c.onBroadcast(ctx, block)
 	}
 	return c.broadcastErr
+}
+
+func (c *rootClient) GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*coretypes.Header, error) {
+	c.calls = append(c.calls, "headers")
+	if c.onHeaders != nil {
+		return nil, c.onHeaders(ctx)
+	}
+	return nil, ctx.Err()
 }
 
 func (c *rootClient) GetRootChainStakes(ctx context.Context, chainID *big.Int, coinbase common.Address, hash common.Hash) (*clusternet.RootChainStakesResult, error) {
@@ -171,6 +181,8 @@ func newRootEnv(t *testing.T) *rootEnv {
 		confirmed: make(map[string]common.Hash),
 	}
 	t.Cleanup(func() { f.db.Close() })
+	// An old parent brings a candidate down to difficulty one for the Ethash test.
+	f.config.PoSW.AdjustmentFactor = 1
 	engine, err := posw.New(f.config)
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +270,128 @@ func TestRootGenesisRecovery(t *testing.T) {
 	if len(f.client.calls) != 0 {
 		t.Fatal("local recovery made cluster RPCs")
 	}
+}
+
+func TestRootCreateBlockToMine(t *testing.T) {
+	f := newRootEnv(t)
+	parent := f.block(f.genesis, 1)
+	f.store(parent, true)
+	chain := f.open()
+	coinbase := common.Address{42}
+	if block, err := chain.CreateBlockToMine(t.Context(), coinbase); block != nil || !errors.Is(err, errChainNotReady) {
+		t.Fatalf("before Init: block %v, error %v", block, err)
+	}
+	if err := chain.Init(); err != nil {
+		t.Fatal(err)
+	}
+	block, err := chain.CreateBlockToMine(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.ParentHash() != parent.Hash() || block.Number() != parent.Number()+1 || block.Coinbase() != coinbase {
+		t.Fatal("candidate does not extend the root tip or pay the requested coinbase")
+	}
+	if len(f.client.calls) != 2 || f.client.calls[1] != "headers" {
+		t.Fatalf("expected a shard header request after initialization, got %v", f.client.calls)
+	}
+	difficulty := block.Difficulty().ToBig()
+	if difficulty.Cmp(common.Big1) != 0 {
+		t.Fatalf("candidate difficulty %v, want 1", difficulty)
+	}
+	miner := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
+	defer miner.Close()
+	nonce, mix, ok := miner.SearchNonce(t.Context(), block.NumberU64(), f.engine.SealHash(block.Header()), difficulty, 0)
+	if !ok {
+		t.Fatal("Ethash search failed")
+	}
+	sealed := block.WithMiningResult(nonce.Uint64(), mix, nil)
+	if err := f.engine.VerifyBlock(chain, sealed); err != nil {
+		t.Fatalf("valid Ethash seal rejected: %v", err)
+	}
+	mix[0] ^= 1
+	if err := f.engine.VerifyBlock(chain, block.WithMiningResult(nonce.Uint64(), mix, nil)); err == nil {
+		t.Fatal("invalid Ethash mix digest accepted")
+	}
+	if block.Nonce() != 0 || block.MixDigest() != (common.Hash{}) || block.Signature() != ([65]byte{}) {
+		t.Fatal("original candidate is sealed or signed")
+	}
+	if chain.RootTip().Hash() != parent.Hash() || qkcrawdb.HasRootBlock(f.db, block.Hash()) || len(f.client.broadcasts) != 0 {
+		t.Fatal("candidate construction advanced the tip, stored or broadcast the block")
+	}
+}
+
+func TestRootCreateBlockToMineWaitsForDelivery(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		deliveryErr error
+	}{
+		{name: "success"},
+		{name: "failure", deliveryErr: errors.New("root delivery failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f, _ := newInsertEnv(t)
+				parent := f.block(f.genesis, 1)
+				delivering, release := make(chan struct{}), make(chan struct{})
+				f.client.onBroadcast = func(context.Context, *types.RootBlock) error {
+					close(delivering)
+					<-release
+					return test.deliveryErr
+				}
+				inserted := make(chan error, 1)
+				go func() { inserted <- f.chain.InsertBlock(parent) }()
+				<-delivering
+
+				type result struct {
+					block *types.RootBlock
+					err   error
+				}
+				built := make(chan result, 1)
+				go func() {
+					block, err := f.chain.CreateBlockToMine(t.Context(), common.Address{})
+					built <- result{block, err}
+				}()
+				synctest.Wait()
+				if len(built) != 0 || len(f.client.calls) != 2 {
+					t.Errorf("mining proceeded before root delivery completed: calls %v", f.client.calls)
+				}
+				close(release)
+				if err := <-inserted; !errors.Is(err, test.deliveryErr) {
+					t.Fatal("unexpected insert result", err)
+				}
+				got := <-built
+				if test.deliveryErr != nil {
+					if got.block != nil || !errors.Is(got.err, errChainNotReady) || len(f.client.calls) != 2 {
+						t.Fatalf("mining after failed delivery: block %v, error %v, calls %v", got.block, got.err, f.client.calls)
+					}
+					return
+				}
+				if got.err != nil || got.block == nil || got.block.ParentHash() != parent.Hash() {
+					t.Fatalf("mining after delivery: block %v, error %v", got.block, got.err)
+				}
+			})
+		})
+	}
+}
+
+func TestRootCreateBlockToMineCancelsShardRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newRootEnv(t)
+		if err := f.chain.Init(); err != nil {
+			t.Fatal(err)
+		}
+		f.client.onHeaders = func(ctx context.Context) error {
+			f.cancel()
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		if block, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); block != nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("backend shutdown during shard request: block %v, error %v", block, err)
+		}
+		if block, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); block != nil || !errors.Is(err, errChainNotReady) {
+			t.Fatalf("new request after backend shutdown: block %v, error %v", block, err)
+		}
+	})
 }
 
 // Recovery selects the persisted head on every restart, retaining canonical and
@@ -653,6 +787,9 @@ func TestRootCloseWaitsForWrites(t *testing.T) {
 				}
 				if err := f.chain.InsertBlock(block); !errors.Is(err, errChainStopped) {
 					t.Fatal("closed chain accepted insertion", err)
+				}
+				if candidate, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); candidate != nil || !errors.Is(err, errChainNotReady) {
+					t.Fatalf("mining after Close: candidate %v, error %v", candidate, err)
 				}
 			})
 		})

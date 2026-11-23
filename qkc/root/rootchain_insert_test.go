@@ -434,7 +434,7 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 func TestRootInsertRequiresReadyAndOpenChain(t *testing.T) {
 	f := newRootEnv(t)
 	block := f.block(f.genesis, 1)
-	if err := f.chain.InsertBlock(block); !errors.Is(err, errChainNotReady) {
+	if err := f.chain.InsertBlock(block); !errors.Is(err, errChainNotInitialized) {
 		t.Fatal("uninitialized chain accepted an import", err)
 	}
 	if err := f.chain.Init(); err != nil {
