@@ -17,8 +17,10 @@
 package root
 
 import (
+	"math/big"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -74,5 +76,34 @@ func TestBuildRootGenesisNetworkOrder(t *testing.T) {
 		} else if genesis.Hash() != first {
 			t.Fatalf("independent build produced %s, want %s", genesis.Hash(), first)
 		}
+	}
+}
+
+func TestBuildRootGenesisInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		edit       func(*config.RootConfig)
+	}{
+		{"missing genesis", "missing root genesis", func(c *config.RootConfig) { c.Genesis = nil }},
+		{"zero difficulty", "positive uint256", func(c *config.RootConfig) { c.Genesis.Difficulty = new(big.Int) }},
+		{"difficulty below minimum", "below MinimumDifficulty", func(c *config.RootConfig) { c.Genesis.Difficulty = big.NewInt(1023) }},
+		{"shard count", "shard genesis count", func(c *config.RootConfig) { c.ShardGeneses = c.ShardGeneses[:1] }},
+		{"shard order", "missing shard genesis for chain", func(c *config.RootConfig) { slices.Reverse(c.ShardGeneses) }},
+		{"network rules", "network rules differ", func(c *config.RootConfig) { c.ShardGeneses[1].Config.QuarkChain.MaxBlocksPerRootBlock++ }},
+		{"invalid shard genesis", "invalid gas limit", func(c *config.RootConfig) { c.ShardGeneses[0].GasLimit = 10000 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.LoadRoot(filepath.Join("..", "config", "devnet", "root.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(cfg)
+			if _, err := BuildRootGenesis(cfg); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+	if _, err := BuildRootGenesis(nil); err == nil {
+		t.Fatal("nil config accepted")
 	}
 }

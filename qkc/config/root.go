@@ -67,21 +67,69 @@ func (g *rootGenesisTOML) resolve(shared *params.QuarkChainConfig) (*RootGenesis
 	if g.Timestamp == nil {
 		return nil, errors.New("Timestamp is required")
 	}
-	if g.Difficulty == nil || g.Difficulty.Sign() <= 0 || g.Difficulty.BitLen() > 256 {
-		return nil, errors.New("Difficulty must be a positive uint256")
-	}
 	cfg := *shared
 	cfg.ConsensusType, cfg.PoSW = g.Config.ConsensusType, g.Config.PoSW
-	if err := cfg.ConsensusType.Check(); err != nil {
+	genesis := &RootGenesis{Timestamp: *g.Timestamp, Difficulty: g.Difficulty, Coinbase: g.Coinbase, Config: &cfg}
+	if err := genesis.Validate(); err != nil {
 		return nil, err
 	}
-	if err := cfg.Check(); err != nil {
-		return nil, err
+	return genesis, nil
+}
+
+// Validate checks the root consensus rules and the fixed R0 difficulty.
+func (g *RootGenesis) Validate() error {
+	if g == nil || g.Config == nil {
+		return errors.New("missing root genesis")
 	}
-	if g.Difficulty.Cmp(cfg.PoSW.MinimumDifficulty) < 0 {
-		return nil, errors.New("Difficulty is below MinimumDifficulty")
+	if g.Difficulty == nil || g.Difficulty.Sign() <= 0 || g.Difficulty.BitLen() > 256 {
+		return errors.New("Difficulty must be a positive uint256")
 	}
-	return &RootGenesis{Timestamp: *g.Timestamp, Difficulty: g.Difficulty, Coinbase: g.Coinbase, Config: &cfg}, nil
+	if err := g.Config.ConsensusType.Check(); err != nil {
+		return err
+	}
+	if err := g.Config.Check(); err != nil {
+		return err
+	}
+	if g.Difficulty.Cmp(g.Config.PoSW.MinimumDifficulty) < 0 {
+		return errors.New("Difficulty is below MinimumDifficulty")
+	}
+	return nil
+}
+
+// Validate checks the root genesis and that every shard genesis input matches
+// its chain ID position and the root's network rules. LoadRoot already checks
+// each shard while loading; this also covers a RootConfig built by hand.
+func (c *RootConfig) Validate() error {
+	if c == nil || c.Genesis == nil {
+		return errors.New("missing root genesis")
+	}
+	if err := c.Genesis.Validate(); err != nil {
+		return err
+	}
+	rules := c.Genesis.Config
+	if len(c.ShardGeneses) != len(rules.ChainIDs) {
+		return errors.New("shard genesis count differs from configured chain IDs")
+	}
+	for i, shard := range c.ShardGeneses {
+		id := rules.ChainIDs[i]
+		if shard == nil || shard.Config == nil || shard.Config.ChainID == nil || shard.Config.ChainID.Cmp(id) != 0 || shard.Config.QuarkChain == nil {
+			return fmt.Errorf("missing shard genesis for chain %s", id)
+		}
+		if !shard.Config.QuarkChain.EqualNetworkRules(rules) {
+			return fmt.Errorf("shard %s network rules differ from root", id)
+		}
+		if err := checkShardGenesis(shard); err != nil {
+			return fmt.Errorf("shard %s genesis: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func checkShardGenesis(g *core.Genesis) error {
+	if err := g.ValidateQuarkChain(); err != nil {
+		return err
+	}
+	return g.Config.CheckConfigForkOrder()
 }
 
 // LoadRoot loads a root TOML and resolves its shard TOML references relative
@@ -184,10 +232,7 @@ func loadRootShard(path string, networkID uint64) (*core.Genesis, clusternet.Sla
 	if g == nil || g.Config == nil || g.Config.QuarkChain == nil {
 		return nil, slave, errors.New("Eth.Genesis.Config.QuarkChain is required")
 	}
-	if err := g.ValidateQuarkChain(); err != nil {
-		return nil, slave, err
-	}
-	if err := g.Config.CheckConfigForkOrder(); err != nil {
+	if err := checkShardGenesis(g); err != nil {
 		return nil, slave, err
 	}
 	// As in eth.New, an unset/zero NetworkId selects the EVM chain ID.
