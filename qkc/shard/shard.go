@@ -66,10 +66,10 @@ func New(chain *ShardChain, client ClusterClient) (*Shard, error) {
 	return &Shard{chain: chain, clusterClient: client}, nil
 }
 
-// Init restores shard state from the master's persisted root tip.
-// TODO(recovery): If the supplied root block is absent locally, restore its local
-// direct parent, then import the supplied root block. ShardChain.Init currently
-// requires non-genesis roots and their confirmations to already be stored locally.
+// Init restores the master's persisted root tip and its last confirmed shard
+// block. If the supplied root is absent locally, restore its stored direct
+// parent, then import the supplied root. Missing required recovery data returns
+// an error; master does not rewind its persisted tip.
 func (s *Shard) Init(root *qkctypes.RootBlock) error {
 	return s.chain.Init(root)
 }

@@ -138,8 +138,8 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 	if confirmed == (common.Hash{}) {
 		return errors.New("missing shard confirmation at the parent root")
 	}
-	// Skip headers through the parent's confirmation. A direct child starts
-	// the pending list immediately. A list on another fork is skipped in full.
+	// Start at a direct child of the parent's confirmation, or scan for the
+	// confirmed header by hash and discard the prefix through it.
 	var previousHash common.Hash
 	if len(headers) > 0 && headers[0] != nil {
 		previousHash = headers[0].ParentHash
@@ -149,12 +149,9 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := checkShardHeaderHeight(headers, skipped, common.Big0); err != nil {
-			return err
-		}
 		header := headers[skipped]
-		if _, err := validateShardHeaderLink(header, skipped, previousHash, chainID); err != nil {
-			return err
+		if header == nil || header.Number == nil || header.Number.Sign() < 0 {
+			return fmt.Errorf("missing header or invalid height at index %d", skipped)
 		}
 		previousHash = header.Hash()
 		skipped++
@@ -167,7 +164,7 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 			return err
 		}
 		index := skipped + offset
-		if err := checkShardHeaderHeight(headers, index, common.Big1); err != nil {
+		if err := checkShardHeaderHeight(headers, index); err != nil {
 			return err
 		}
 		if header.Time > block.Time() {
@@ -181,7 +178,7 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 		if amount == nil {
 			break
 		}
-		extra, err := validateShardHeaderLink(header, index, previousHash, chainID)
+		extra, err := validateShardHeaderLink(header, previousHash, chainID)
 		if err != nil {
 			return err
 		}
@@ -198,9 +195,9 @@ func (builder *RootBlockBuilder) appendShardHeaders(ctx context.Context, block *
 	return nil
 }
 
-func checkShardHeaderHeight(headers []*types.Header, index int, minimum *big.Int) error {
+func checkShardHeaderHeight(headers []*types.Header, index int) error {
 	header := headers[index]
-	if header == nil || header.Number == nil || header.Number.Cmp(minimum) < 0 {
+	if header == nil || header.Number == nil || header.Number.Sign() <= 0 {
 		return fmt.Errorf("missing header or invalid height at index %d", index)
 	}
 	if index > 0 {
@@ -213,8 +210,8 @@ func checkShardHeaderHeight(headers []*types.Header, index int, minimum *big.Int
 	return nil
 }
 
-func validateShardHeaderLink(header *types.Header, index int, parentHash common.Hash, chainID *big.Int) (*types.QKCExtra, error) {
-	if index > 0 && header.ParentHash != parentHash {
+func validateShardHeaderLink(header *types.Header, parentHash common.Hash, chainID *big.Int) (*types.QKCExtra, error) {
+	if header.ParentHash != parentHash {
 		return nil, fmt.Errorf("header %s at height %v does not extend %s", header.Hash(), header.Number, parentHash)
 	}
 	extra, err := header.QKCExtra()

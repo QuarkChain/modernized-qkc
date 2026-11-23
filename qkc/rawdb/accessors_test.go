@@ -236,6 +236,43 @@ func TestRootStorageInvalidEncoding(t *testing.T) {
 	}
 }
 
+func TestShardBlockCoinbaseStorage(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	t.Cleanup(func() { db.Close() })
+	hash := common.Hash{1}
+	if got, err := ReadShardBlockCoinbaseAmount(db, hash); got != nil || err != nil {
+		t.Fatal("unreported block returned an amount or error", got, err)
+	}
+	// Zero is a report, and full uint256 values must survive encoding. Reusing
+	// the hash also checks pyquarkchain's overwrite behavior on repeated reports.
+	for _, amount := range []*uint256.Int{uint256.NewInt(0), new(uint256.Int).SetAllOne(), uint256.NewInt(42)} {
+		if err := WriteShardBlockCoinbaseAmount(db, hash, amount); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ReadShardBlockCoinbaseAmount(db, hash)
+		if err != nil || got == nil || !got.Eq(amount) {
+			t.Fatal("coinbase amount did not round-trip", got, err)
+		}
+	}
+	if err := WriteShardBlockCoinbaseAmount(db, hash, nil); err == nil {
+		t.Fatal("nil amount accepted")
+	}
+	if got, err := ReadShardBlockCoinbaseAmount(db, hash); err != nil || got == nil || got.Uint64() != 42 {
+		t.Fatal("nil report changed the stored amount", got, err)
+	}
+	if got, err := ReadShardBlockCoinbaseAmount(db, common.Hash{2}); got != nil || err != nil {
+		t.Fatal("report leaked to another block", got, err)
+	}
+	for _, data := range [][]byte{nil, {1}, make([]byte, 31), make([]byte, 33)} {
+		if err := db.Put(shardBlockCoinbaseAmountKey(hash), data); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := ReadShardBlockCoinbaseAmount(db, hash); got != nil || err == nil {
+			t.Fatal("malformed stored report was treated as missing or valid", got, err)
+		}
+	}
+}
+
 func TestLastConfirmedStorage(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	root := common.Hash{0x01}
@@ -325,6 +362,11 @@ func TestRootChainWriteErrors(t *testing.T) {
 	}{
 		{"root head", func() error { return WriteRootHeadBlockHash(db, hash) }},
 		{"canonical root", func() error { return WriteRootCanonicalHash(db, hash, 1) }},
+		{"delete canonical root", func() error { return DeleteRootCanonicalHash(db, 1) }},
+		{"root block", func() error {
+			return WriteRootBlockWithError(db, types.NewRootBlock(&types.RootBlockHeader{}, nil, nil))
+		}},
+		{"shard coinbase amount", func() error { return WriteShardBlockCoinbaseAmount(db, hash, uint256.NewInt(0)) }},
 		{"root confirmations", func() error { return WriteRootConfirmedShardBlocks(db, hash, map[string]common.Hash{"10001": hash}) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {

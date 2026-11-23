@@ -27,13 +27,14 @@ import (
 // The fields below define the QuarkChain specific database schema. All keys
 // start with qkc_, keeping them apart from the geth ones.
 var (
-	rootBlockPrefix        = []byte("qkc_rb")             // rootBlockPrefix + hash -> root block
-	lastConfirmedPrefix    = []byte("qkc_rLM")            // lastConfirmedPrefix + root hash -> last confirmed shard block hash
-	xShardDepositsPrefix   = []byte("qkc_xShard")         // xShardDepositsPrefix + source block hash -> deposits sent to this shard by the block
-	shardBlockCommitPrefix = []byte("qkc_shard_commit")   // shardBlockCommitPrefix + block hash -> completed shard block delivery
-	rootCanonicalPrefix    = []byte("qkc_root_canonical") // rootCanonicalPrefix + height -> canonical root hash
-	rootConfirmedPrefix    = []byte("qkc_root_confirmed") // rootConfirmedPrefix + root hash -> cumulative shard confirmations
-	rootHeadBlockKey       = []byte("qkc_root_tip")       // persisted canonical root head
+	rootBlockPrefix                = []byte("qkc_rb")             // rootBlockPrefix + hash -> root block
+	lastConfirmedPrefix            = []byte("qkc_rLM")            // lastConfirmedPrefix + root hash -> last confirmed shard block hash
+	xShardDepositsPrefix           = []byte("qkc_xShard")         // xShardDepositsPrefix + source block hash -> deposits sent to this shard by the block
+	shardBlockCommitPrefix         = []byte("qkc_shard_commit")   // shardBlockCommitPrefix + block hash -> completed shard block delivery
+	shardBlockCoinbaseAmountPrefix = []byte("qkc_shard_coinbase") // shardBlockCoinbaseAmountPrefix + block hash -> validated after-tax shard income
+	rootCanonicalPrefix            = []byte("qkc_root_canonical") // rootCanonicalPrefix + height -> canonical root hash
+	rootConfirmedPrefix            = []byte("qkc_root_confirmed") // rootConfirmedPrefix + root hash -> cumulative shard confirmations
+	rootHeadBlockKey               = []byte("qkc_root_tip")       // persisted canonical root head
 )
 
 // rootBlockKey = rootBlockPrefix + hash
@@ -53,6 +54,10 @@ func xShardDepositsKey(hash common.Hash) []byte {
 
 func shardBlockCommitKey(hash common.Hash) []byte {
 	return append(common.CopyBytes(shardBlockCommitPrefix), hash.Bytes()...)
+}
+
+func shardBlockCoinbaseAmountKey(hash common.Hash) []byte {
+	return append(common.CopyBytes(shardBlockCoinbaseAmountPrefix), hash.Bytes()...)
 }
 
 func rootCanonicalKey(number uint32) []byte {
