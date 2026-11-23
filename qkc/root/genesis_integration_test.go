@@ -74,6 +74,9 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 	if err != nil || restored != hash || !loaded.Equal(rules) {
 		t.Fatalf("reopening with shard configs only: hash %s, rules %+v, err %v", restored, loaded, err)
 	}
+	if cfg.Genesis != nil {
+		t.Fatal("database recovery changed the supplied configuration")
+	}
 	engine, err := posw.NewSimulate(rules)
 	if err != nil {
 		t.Fatal(err)
@@ -97,12 +100,12 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	headers := block.ShardBlockHeaders()
-	if len(headers) != 2 || len(confirmations) != 2 || len(cfg.ShardGeneses) != 2 {
-		t.Fatalf("devnet shard count: %d headers, %d confirmations, %d configurations", len(headers), len(confirmations), len(cfg.ShardGeneses))
+	if len(headers) != 2 || len(confirmations) != 2 || len(cfg.Shards) != 2 {
+		t.Fatalf("devnet shard count: %d headers, %d confirmations, %d configurations", len(headers), len(confirmations), len(cfg.Shards))
 	}
-	for i, shard := range cfg.ShardGeneses {
-		id := shard.Config.ChainID.String()
-		want := shard.ToBlock().Hash()
+	for i, shard := range cfg.Shards {
+		id := shard.Genesis.Config.ChainID.String()
+		want := shard.Genesis.ToBlock().Hash()
 		if got := headers[i].Hash(); got != want {
 			t.Errorf("shard %s genesis header hash %s, want %s", id, got, want)
 		}
@@ -114,7 +117,7 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		t.Fatalf("local genesis recovery issued cluster calls %v", client.calls)
 	}
 	t.Run("changed allocation", func(t *testing.T) {
-		alloc := cfg.ShardGeneses[0].Alloc
+		alloc := cfg.Shards[0].Genesis.Alloc
 		address := common.Address{1}
 		alloc[address] = types.Account{Balance: big.NewInt(1)}
 		defer delete(alloc, address)
@@ -123,8 +126,8 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		}
 	})
 	t.Run("changed shared rules", func(t *testing.T) {
-		for _, shard := range cfg.ShardGeneses {
-			shard.Config.QuarkChain.MaxBlocksPerRootBlock++
+		for _, shard := range cfg.Shards {
+			shard.Genesis.Config.QuarkChain.MaxBlocksPerRootBlock++
 		}
 		if _, _, err := InitializeRootDatabase(db, cfg); err == nil {
 			t.Fatal("accepted different network rules with the same shard genesis headers")

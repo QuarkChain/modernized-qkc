@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
@@ -35,12 +36,20 @@ import (
 	"github.com/holiman/uint256"
 )
 
-const blockCacheLimit = 4096 // Match pyquarkchain's RootDb block cache.
+const (
+	// Match pyquarkchain's RootDb block cache.
+	blockCacheLimit = 4096
+	// Match pyquarkchain's MAX_STALE_ROOT_BLOCK_HEIGHT_DIFF admission limit.
+	maxStaleRootBlockHeightDiff uint32 = 22500
+	// Default timeout for RootChain cluster RPCs.
+	rpcTimeout = 30 * time.Second
+)
 
 var (
 	ErrRootDataMissing = errors.New("missing root chain data")
 	ErrNotImplemented  = errors.New("root chain: function not implemented")
 	errChainStopped    = errors.New("root chain is stopped")
+	errChainNotReady   = errors.New("root chain is not initialized")
 )
 
 // RootChain manages root-chain data and recovery using a caller-provided database,
@@ -65,8 +74,12 @@ type RootChain struct {
 	closeOnce sync.Once
 
 	// Published headers are immutable; updates replace the tip pointer.
-	tip   atomic.Pointer[types.RootBlockHeader]
-	ready atomic.Bool
+	tip atomic.Pointer[types.RootBlockHeader]
+
+	// Initialization stays recorded when delivery fails or Close begins.
+	initialized atomic.Bool
+	// Stopping is terminal and makes Ready false before in-flight writes finish.
+	stopping atomic.Bool
 }
 
 var _ posw.RootChainReader = (*RootChain)(nil)
@@ -77,8 +90,6 @@ var _ posw.RootChainReader = (*RootChain)(nil)
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // backendCtx controls RootChain's lifetime and is canceled only by the backend.
 // Call SetupRootGenesisBlock before New to initialize or verify the local database.
-// TODO: Root insertion must persist the block, its confirmations and canonical
-// head updates atomically so recovery never observes a partially stored tip.
 func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
 	if backendCtx == nil || config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing backend context, root configuration, cluster client, database or engine")
@@ -120,11 +131,11 @@ func readRootHead(db ethdb.KeyValueReader, config *params.QuarkChainConfig) (*ty
 	if canonical := rawdb.ReadRootCanonicalHash(db, tip.Number()); canonical != hash {
 		return nil, fmt.Errorf("canonical root hash at height %d does not match persisted head: have %x, want %x", tip.Number(), canonical, hash)
 	}
-	confirmed, err := rawdb.ReadRootConfirmedShardBlocks(db, hash)
+	confirmed, err := readConfirmations(db, config, hash)
 	if err != nil {
-		return nil, fmt.Errorf("read confirmations for root %x: %w", hash, err)
+		return nil, err
 	}
-	if err := checkConfirmations(config, tip, confirmed); err != nil {
+	if err := checkConfirmations(tip, confirmed); err != nil {
 		return nil, err
 	}
 	return tip, nil
@@ -133,16 +144,8 @@ func readRootHead(db ethdb.KeyValueReader, config *params.QuarkChainConfig) (*ty
 // Recovery requires exactly one nonzero confirmation for every configured shard.
 // Non-genesis tips must also match their body commitment and the last carried
 // header for each shard; shards absent from the body retain inherited confirmations.
-func checkConfirmations(config *params.QuarkChainConfig, tip *types.RootBlock, confirmed map[string]common.Hash) error {
+func checkConfirmations(tip *types.RootBlock, confirmed map[string]common.Hash) error {
 	hash := tip.Hash()
-	if len(confirmed) != len(config.ChainIDs) {
-		return fmt.Errorf("root %x shard confirmation count mismatch: have %d, want %d", hash, len(confirmed), len(config.ChainIDs))
-	}
-	for _, id := range config.ChainIDs {
-		if confirmed[id.String()] == (common.Hash{}) {
-			return fmt.Errorf("%w: root %x chain %s confirmation", ErrRootDataMissing, hash, id)
-		}
-	}
 	if tip.Number() == 0 {
 		return nil
 	}
@@ -166,6 +169,24 @@ func checkConfirmations(config *params.QuarkChainConfig, tip *types.RootBlock, c
 	return nil
 }
 
+// readConfirmations requires exactly one nonzero confirmation for every
+// configured shard, including shards omitted by the next root's body.
+func readConfirmations(db ethdb.KeyValueReader, config *params.QuarkChainConfig, hash common.Hash) (map[string]common.Hash, error) {
+	confirmed, err := rawdb.ReadRootConfirmedShardBlocks(db, hash)
+	if err != nil {
+		return nil, fmt.Errorf("read confirmations for root %x: %w", hash, err)
+	}
+	if len(confirmed) != len(config.ChainIDs) {
+		return nil, fmt.Errorf("root %x shard confirmation count mismatch: have %d, want %d", hash, len(confirmed), len(config.ChainIDs))
+	}
+	for _, id := range config.ChainIDs {
+		if confirmed[id.String()] == (common.Hash{}) {
+			return nil, fmt.Errorf("%w: root %x chain %s confirmation", ErrRootDataMissing, hash, id)
+		}
+	}
+	return confirmed, nil
+}
+
 // Init sends the persisted root tip recovered by New to every shard in PING.
 // Shards that already store this root block restore their confirmed shard head
 // from it. Otherwise, they must restore its locally stored direct parent, then
@@ -174,21 +195,26 @@ func checkConfirmations(config *params.QuarkChainConfig, tip *types.RootBlock, c
 // TODO(shard): Implement recovery when the supplied root block is absent locally;
 // ShardChain.Init currently requires non-genesis roots and their confirmations
 // to already be stored locally.
-// Connections must be ready before this call. Init waits for all shards to
-// succeed before publishing Ready and uses backendCtx for PING cancellation.
+// Connections must be ready before this call. Init records initialization after
+// all shards succeed, using backendCtx for PING cancellation. Ready becomes true
+// only while backendCtx is active and the chain is not stopping.
 // On failure, the backend must abort startup and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
-// a cluster restart. Repeating a successful Init is a no-op.
+// a cluster restart. Repeating a successful Init is a no-op until the chain stops;
+// calls after that return errChainStopped.
 // Init does not change the local tip.
 func (c *RootChain) Init() error {
 	if !c.chainmu.TryLock() {
 		return errChainStopped
 	}
 	defer c.chainmu.Unlock()
+	if c.stopping.Load() {
+		return errChainStopped
+	}
 	if err := c.backendCtx.Err(); err != nil {
 		return err
 	}
-	if c.ready.Load() {
+	if c.initialized.Load() {
 		return nil
 	}
 	block, err := c.GetRootBlock(c.tip.Load().Hash())
@@ -202,31 +228,216 @@ func (c *RootChain) Init() error {
 	if err := c.client.Ping(c.backendCtx, block); err != nil {
 		return fmt.Errorf("initialize shards: %w", err)
 	}
-	c.ready.Store(true)
+	c.initialized.Store(true)
 	return nil
 }
 
-// Close waits for chain writes to finish and prevents further writes. It is safe
-// to call repeatedly or concurrently. Before calling Close, the backend must
-// cancel backendCtx and unblock pending RPCs, closing connections if needed.
-// Readers must be drained before shared resources are closed. Context cancellation
-// belongs to the backend.
+// InsertBlock verifies and stores a root block, then delivers it to all shards.
+// Init must complete first. Insertion and delivery use backendCtx, so cancellation
+// is controlled by the backend. Delivery failures leave the local commit intact,
+// disable Init and insertion, and return an error. The client handles connection
+// failures and requests master shutdown for cluster recovery.
+func (c *RootChain) InsertBlock(block *types.RootBlock) error {
+	if block == nil || block.Number() == 0 {
+		return errors.New("missing or genesis root block")
+	}
+	if !c.chainmu.TryLock() {
+		return errChainStopped
+	}
+	defer c.chainmu.Unlock()
+	if c.stopping.Load() {
+		return errChainStopped
+	}
+	if err := c.backendCtx.Err(); err != nil {
+		return err
+	}
+	if !c.initialized.Load() {
+		return errChainNotReady
+	}
+	// Reject stale blocks before loading, verifying or broadcasting them, even
+	// if already stored. Compare heights first to avoid unsigned underflow.
+	if tip := c.tip.Load().Number; tip > block.Number() && tip-block.Number() > maxStaleRootBlockHeightDiff {
+		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip, maxStaleRootBlockHeightDiff)
+	}
+	hash := block.Hash()
+	stored, err := c.GetRootBlock(hash)
+	batch := c.db.NewBatch()
+	defer batch.Close()
+	if err == nil && stored != nil {
+		// The hash identifies only the header. Use the previously verified DB
+		// body, not the supplied body, and require its atomic confirmation record.
+		block = stored
+		if _, err := readConfirmations(c.db, c.config, hash); err != nil {
+			return err
+		}
+	} else {
+		// Missing, unreadable or hash-mismatched records are repaired only after
+		// fully verifying the supplied block and atomically rewriting its snapshot.
+		// Reader methods do not acquire chainmu, so engine queries can run while
+		// insertion holds the write lock without reentering it.
+		if err := c.engine.VerifyBlock(c, block); err != nil {
+			return fmt.Errorf("verify root block: %w", err)
+		}
+		confirmed, err := readConfirmations(c.db, c.config, block.ParentHash())
+		if err != nil {
+			return err
+		}
+		// Each snapshot inherits chains omitted by this root from its parent
+		// branch, then advances chains to the last header confirmed in this root.
+		for _, header := range block.ShardBlockHeaders() {
+			extra, err := header.QKCExtra()
+			if err != nil {
+				return err
+			}
+			confirmed[extra.ChainID.String()] = header.Hash()
+		}
+		if err := rawdb.WriteRootBlockWithError(batch, block); err != nil {
+			return fmt.Errorf("store root block: %w", err)
+		}
+		if err := rawdb.WriteRootConfirmedShardBlocks(batch, hash, confirmed); err != nil {
+			return fmt.Errorf("store root confirmations: %w", err)
+		}
+	}
+	header := block.Header()
+	// Stored blocks can belong to side branches. Re-evaluate fork choice and
+	// promote a block only when its TD strictly exceeds the current runtime tip.
+	updateTip := header.TotalDifficulty.Cmp(&c.tip.Load().TotalDifficulty) > 0
+	if updateTip {
+		if err := c.rewriteCanonical(batch, header); err != nil {
+			return err
+		}
+		if err := rawdb.WriteRootHeadBlockHash(batch, hash); err != nil {
+			return fmt.Errorf("store root head: %w", err)
+		}
+	}
+	// Validation and batch preparation may outlive backendCtx. Check again before
+	// committing so an already canceled import leaves DB and runtime tip unchanged.
+	// Once the batch succeeds, publish the tip without another cancellation check.
+	if err := c.backendCtx.Err(); err != nil {
+		return err
+	}
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("commit root block: %w", err)
+	}
+	c.blockCache.Add(hash, block)
+	if updateTip {
+		c.tip.Store(header)
+	}
+	// Keep serialization through delivery so another insertion cannot overtake
+	// this block's broadcast.
+	// TODO(recovery): Init sends only the persisted canonical tip, so a shard
+	// missing a side-chain root after interrupted delivery may reject its children
+	// after restart. Persist pending delivery atomically with the local commit,
+	// clear it only after all shards acknowledge, and replay it during Init before
+	// publishing Ready, including when the pending block did not update the tip.
+	if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
+		// The communication layer requests master shutdown on connection failure.
+		// Some shards may already have advanced. Prevent further writes and
+		// reinitialization until the cluster restarts from the persisted tip.
+		c.stopping.Store(true)
+		return fmt.Errorf("broadcast root block: %w", err)
+	}
+	return nil
+}
+
+// SetHead is reserved for rewinding the canonical root head to the given height.
+// TODO: Implement when a caller needs it and the use case is confirmed.
+// Serialize with chainmu and use rewriteCanonical to atomically update
+// canonical indices and the persisted head, retaining blocks and confirmations.
+// Coordinate forced shard switching and wait for all acknowledgements before
+// resuming cluster work; return an error and stop further writes on failure.
+func (c *RootChain) SetHead(number uint32) error {
+	return ErrNotImplemented
+}
+
+// rewriteCanonical stages only changed indices, walking back to the shared
+// canonical ancestor. It does not acquire chainmu or commit the batch.
+// The caller must hold chainmu until the batch is committed and the runtime
+// tip is updated.
+func (c *RootChain) rewriteCanonical(batch ethdb.KeyValueWriter, header *types.RootBlockHeader) error {
+	// The persisted head bounds canonical indices above a shorter, heavier tip.
+	headHash, err := rawdb.ReadRootHeadBlockHash(c.db)
+	if err != nil {
+		return fmt.Errorf("read persisted root head: %w", err)
+	}
+	head, err := c.GetRootHeader(headHash)
+	if err != nil {
+		return err
+	}
+	if head == nil {
+		return fmt.Errorf("%w: persisted root head", ErrRootDataMissing)
+	}
+	for number := uint64(header.Number) + 1; number <= uint64(head.Number); number++ {
+		if err := rawdb.DeleteRootCanonicalHash(batch, uint32(number)); err != nil {
+			return fmt.Errorf("delete canonical root %d: %w", number, err)
+		}
+	}
+	for {
+		if header.Number <= head.Number {
+			hash := rawdb.ReadRootCanonicalHash(c.db, header.Number)
+			if hash == header.Hash() {
+				return nil
+			}
+		}
+		if header.Number == 0 {
+			return errors.New("root branch does not share canonical genesis")
+		}
+		if err := rawdb.WriteRootCanonicalHash(batch, header.Hash(), header.Number); err != nil {
+			return fmt.Errorf("store canonical root %d: %w", header.Number, err)
+		}
+		parent, err := c.GetRootHeader(header.ParentHash)
+		if err != nil {
+			return err
+		}
+		if parent == nil {
+			return fmt.Errorf("%w: canonical ancestor %x", ErrRootDataMissing, header.ParentHash)
+		}
+		if parent.Number != header.Number-1 {
+			return errors.New("invalid root ancestor height")
+		}
+		header = parent
+	}
+}
+
+// Close marks the chain as stopping, then waits for Init/InsertBlock to finish and
+// prevents further calls to them. Ready becomes false immediately; initialization stays
+// recorded. It is safe to call repeatedly or concurrently.
+// The backend must cancel backendCtx and stop new requests, cancel other RPC
+// contexts and wait for masternet.Service.Stop before calling Close.
+// Stop closes cluster connections and waits for calls to finish.
+// Close waits only for Init and InsertBlock; the owner must also wait for request
+// handlers and other readers before closing the shared engine and database.
+// Context cancellation belongs to the backend; Close does not request shutdown.
 func (c *RootChain) Close() {
 	c.closeOnce.Do(func() {
+		c.stopping.Store(true)
 		c.chainmu.Close()
-		c.ready.Store(false)
 	})
 }
 
-// Ready reports whether Init completed, the backend context is active and the
-// chain has not been closed.
+// Ready reports whether Init completed, backendCtx is active, and shutdown has
+// not begun, either from Close or a root-block delivery failure.
 // Sync, mining and imports must wait for it.
-func (c *RootChain) Ready() bool { return c.ready.Load() && c.backendCtx.Err() == nil }
+func (c *RootChain) Ready() bool {
+	return c.initialized.Load() && !c.stopping.Load() && c.backendCtx.Err() == nil
+}
 
 // RootTip returns the recovered local tip, including before Init.
 // The returned header is read-only; callers must copy it before modification.
 func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
+}
+
+// GetRootTipWithLock waits for chain writes, including Init and root delivery,
+// before reading the tip. It does not check Ready: construction callers must do
+// that after obtaining the snapshot. The returned header is read-only; subsequent
+// inserts may replace the tip after this method releases chainmu.
+func (c *RootChain) GetRootTipWithLock() (*types.RootBlockHeader, error) {
+	if !c.chainmu.TryLock() {
+		return nil, errChainStopped
+	}
+	defer c.chainmu.Unlock()
+	return c.tip.Load(), nil
 }
 
 // GetRootHeader reads a header by hash from any stored branch.
@@ -289,14 +500,45 @@ func (c *RootChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]co
 	return confirmed, nil
 }
 
-// GetShardBlockCoinbaseAmount returns validated shard income.
-// TODO: Connect shard reports to the income store.
-func (c *RootChain) GetShardBlockCoinbaseAmount(common.Hash) (*uint256.Int, error) {
-	return nil, ErrNotImplemented
+// AddShardBlockCoinbaseAmount stores reported after-tax income; the caller
+// verifies the source. It avoids chainmu so reports can proceed during RPCs.
+// TODO(backend): Stop the cluster client via masternet.Service.Stop, rejecting
+// new requests and draining AddShardBlockHeader writes before RootChain.Close.
+func (c *RootChain) AddShardBlockCoinbaseAmount(hash common.Hash, amount *uint256.Int) error {
+	if err := rawdb.WriteShardBlockCoinbaseAmount(c.db, hash, amount); err != nil {
+		return fmt.Errorf("store shard coinbase amount %x: %w", hash, err)
+	}
+	return nil
+}
+
+// GetShardBlockCoinbaseAmount returns validated after-tax income. Nil without an
+// error means unreported; storage and decoding failures must not hide as missing.
+func (c *RootChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int, error) {
+	amount, err := rawdb.ReadShardBlockCoinbaseAmount(c.db, hash)
+	if err != nil {
+		return nil, fmt.Errorf("read shard coinbase amount %x: %w", hash, err)
+	}
+	return amount, nil
 }
 
 // GetRootChainStakes returns stakes and signer at the confirmed shard state.
-// TODO: Connect the client query with the current import's context.
-func (c *RootChain) GetRootChainStakes(*big.Int, common.Hash, common.Address) (*uint256.Int, common.Address, error) {
-	return nil, common.Address{}, ErrNotImplemented
+// Its deadline derives from the backend lifetime; the consensus reader interface
+// has no per-import context. Zero stakes and an unset signer are valid responses.
+// Query failures, including timeouts, abort the caller's operation without
+// substituting zero stakes or retrying here. Connection failures are managed by
+// the client. Wrapped context and remote errors remain identifiable with errors.Is/As.
+func (c *RootChain) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+	ctx, cancel := context.WithTimeout(c.backendCtx, rpcTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, common.Address{}, err
+	}
+	result, err := c.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
+	if err != nil {
+		return nil, common.Address{}, fmt.Errorf("query root stakes for chain %v, shard block %x, coinbase %s: %w", chainID, shardBlockHash, coinbase, err)
+	}
+	if result == nil || result.Stakes == nil {
+		return nil, common.Address{}, fmt.Errorf("missing root stakes response for chain %v, shard block %x, coinbase %s", chainID, shardBlockHash, coinbase)
+	}
+	return result.Stakes, result.Signer, nil
 }

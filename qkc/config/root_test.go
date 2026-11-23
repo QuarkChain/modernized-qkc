@@ -64,11 +64,11 @@ func TestLoadRoot(t *testing.T) {
 		cfg.Genesis.Config.ConsensusType != params.ConsensusSimulate || cfg.Genesis.Config.PoSW == nil {
 		t.Fatalf("unexpected root genesis: %+v", cfg.Genesis)
 	}
-	if len(cfg.Slaves) != 2 || len(cfg.ShardGeneses) != 2 {
-		t.Fatalf("got %d slaves, %d shard geneses", len(cfg.Slaves), len(cfg.ShardGeneses))
+	if len(cfg.Shards) != 2 {
+		t.Fatalf("got %d shards", len(cfg.Shards))
 	}
 	for i, id := range []int64{100001, 100002} {
-		g, slave := cfg.ShardGeneses[i], cfg.Slaves[i]
+		g, slave := cfg.Shards[i].Genesis, cfg.Shards[i].Slave
 		if g.Config.ChainID.Cmp(big.NewInt(id)) != 0 || slave.ChainID.Cmp(big.NewInt(id)) != 0 ||
 			slave.Host != "127.0.0.1" || int(slave.Port) != 38000+i || !cfg.Genesis.Config.EqualNetworkRules(g.Config.QuarkChain) {
 			t.Fatalf("shard %d: got genesis for %v, endpoint %+v", id, g.Config.ChainID, slave)
@@ -81,7 +81,7 @@ func TestLoadRootWithoutGenesis(t *testing.T) {
 		return strings.Split(s, "[Root.Genesis]")[0]
 	})
 	cfg, err := LoadRoot(path)
-	if err != nil || cfg.Genesis != nil || len(cfg.Slaves) != 2 {
+	if err != nil || cfg.Genesis != nil || len(cfg.Shards) != 2 {
 		t.Fatalf("got %v, %v", cfg, err)
 	}
 }
@@ -92,6 +92,9 @@ func TestInvalidRootDeployment(t *testing.T) {
 	for _, tc := range []struct {
 		name, file, old, new, want string
 	}{
+		{"zero root network", root, "NetworkID = 2", "NetworkID = 0", "NetworkID must be positive"},
+		{"invalid root listener", root, `ListenAddr = ":30303"`, `ListenAddr = ":70000"`, "invalid port"},
+		{"shard-only root setting", root, "[Node]", "[Node]\nPrivatePort = 38000", "only shards"},
 		{"missing shard file", root, shard, "missing.toml", "missing.toml"},
 		{"missing member", root, `, "shard-100002.toml"`, "", "missing shard config for chain ID 100002"},
 		{"duplicate member", root, shard, "shard-100001.toml", "duplicate shard chain ID"},

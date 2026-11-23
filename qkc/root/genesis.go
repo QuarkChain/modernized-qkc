@@ -48,15 +48,22 @@ func InitializeRootDatabase(db ethdb.Database, cfg *config.RootConfig) (*params.
 	if err != nil {
 		return nil, hash, err
 	}
-	headers, err := shardGenesisHeaders(cfg.ShardGeneses, rules)
-	if err != nil {
-		return nil, hash, err
-	}
 	header := rawdb.ReadRootBlockHeader(db, hash)
 	if header == nil {
 		return nil, hash, fmt.Errorf("cannot read stored root genesis %s", hash)
 	}
-	if header.ShardHeaderHash != types.CalcShardHeaderHash(headers) {
+	// Reuse the loaded-config validation and G0 construction with the stored
+	// root seed, keeping the caller's omitted genesis unchanged.
+	restored := *cfg
+	restored.Genesis = &config.RootGenesis{
+		Timestamp: header.Time, Difficulty: header.Difficulty.ToBig(),
+		Coinbase: header.Coinbase, Config: rules,
+	}
+	genesis, err := BuildRootGenesis(&restored)
+	if err != nil {
+		return nil, hash, err
+	}
+	if header.ShardHeaderHash != genesis.ShardHeaderHash() {
 		return nil, hash, errors.New("configured shard genesis headers differ from stored root genesis")
 	}
 	return rules, hash, nil
