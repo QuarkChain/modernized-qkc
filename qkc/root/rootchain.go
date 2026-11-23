@@ -41,11 +41,11 @@ const blockCacheLimit = 4096 // Match pyquarkchain's RootDb block cache.
 const maxStaleRootBlockHeightDiff uint32 = 22500
 
 var (
-	ErrRootDataMissing   = errors.New("missing root chain data")
-	ErrNotImplemented    = errors.New("root chain: function not implemented")
-	ErrRootChainNotReady = errors.New("root chain is not ready for mining")
-	errChainStopped      = errors.New("root chain is stopped")
-	errChainNotReady     = errors.New("root chain is not initialized")
+	ErrRootDataMissing     = errors.New("missing root chain data")
+	ErrNotImplemented      = errors.New("root chain: function not implemented")
+	errChainNotInitialized = errors.New("root chain is not initialized")
+	errChainStopped        = errors.New("root chain is stopped")
+	errChainNotReady       = errors.New("root chain is not ready")
 )
 
 // RootChain manages root-chain data and recovery using a caller-provided database,
@@ -249,7 +249,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 		return err
 	}
 	if !c.initialized.Load() {
-		return errChainNotReady
+		return errChainNotInitialized
 	}
 	// Reject stale blocks before loading, verifying or broadcasting them, even
 	// if already stored. Compare heights first to avoid unsigned underflow.
@@ -428,10 +428,7 @@ func (c *RootChain) RootTip() *types.RootBlockHeader {
 // CreateBlockToMine builds an unsigned, unsealed candidate on the initialized root tip.
 func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.RootBlock, error) {
 	if !c.Ready() {
-		if err := c.backendCtx.Err(); err != nil {
-			return nil, err
-		}
-		return nil, ErrRootChainNotReady
+		return nil, errChainNotReady
 	}
 	// A pending shard RPC must stop on either request cancellation or shutdown.
 	ctx, cancel := context.WithCancel(ctx)

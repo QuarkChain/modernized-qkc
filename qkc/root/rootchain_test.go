@@ -252,7 +252,7 @@ func TestRootCreateBlockToMine(t *testing.T) {
 	f.store(parent, true)
 	chain := f.open()
 	coinbase := common.Address{42}
-	if block, err := chain.CreateBlockToMine(t.Context(), coinbase); block != nil || !errors.Is(err, ErrRootChainNotReady) {
+	if block, err := chain.CreateBlockToMine(t.Context(), coinbase); block != nil || !errors.Is(err, errChainNotReady) {
 		t.Fatalf("before Init: block %v, error %v", block, err)
 	}
 	if err := chain.Init(); err != nil {
@@ -307,6 +307,9 @@ func TestRootCreateBlockToMineCancelsShardRequest(t *testing.T) {
 		}
 		if block, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); block != nil || !errors.Is(err, context.Canceled) {
 			t.Fatalf("backend shutdown during shard request: block %v, error %v", block, err)
+		}
+		if block, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); block != nil || !errors.Is(err, errChainNotReady) {
+			t.Fatalf("new request after backend shutdown: block %v, error %v", block, err)
 		}
 	})
 }
@@ -705,7 +708,7 @@ func TestRootCloseWaitsForWrites(t *testing.T) {
 				if err := f.chain.InsertBlock(block); !errors.Is(err, errChainStopped) {
 					t.Fatal("closed chain accepted insertion", err)
 				}
-				if candidate, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); candidate != nil || !errors.Is(err, ErrRootChainNotReady) {
+				if candidate, err := f.chain.CreateBlockToMine(t.Context(), common.Address{}); candidate != nil || !errors.Is(err, errChainNotReady) {
 					t.Fatalf("mining after Close: candidate %v, error %v", candidate, err)
 				}
 			})
