@@ -1,6 +1,8 @@
 # Local root node. Runtime paths resolve from the working directory.
 [Node]
 DataDir = "./qkc-data/master"
+PrivateHost = "127.0.0.1"
+PrivatePort = 38491
 IPCPath = "qkc-master.ipc"
 CoinbaseAddress = "0x1111111111111111111111111111111111111111"
 
@@ -17,7 +19,6 @@ ShardConfigs = ["shard-100001.toml", "shard-100002.toml"]
 [Root.Genesis]
 Timestamp = 0
 Difficulty = "1024"
-Coinbase = "0x0000000000000000000000000000000000000000"
 
 [Root.Genesis.Config]
 ConsensusType = "POW_SIMULATE"

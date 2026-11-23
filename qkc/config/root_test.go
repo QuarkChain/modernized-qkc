@@ -57,6 +57,12 @@ func TestLoadRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.Node.PrivateHost != "127.0.0.1" || cfg.Node.PrivatePort != 38491 {
+		t.Fatalf("unexpected root private JSON-RPC endpoint %s:%d", cfg.Node.PrivateHost, cfg.Node.PrivatePort)
+	}
+	if endpoint := cfg.Node.HTTPEndpoint(); endpoint != "" {
+		t.Fatalf("unexpected root HTTP endpoint %q", endpoint)
+	}
 	if cfg.NetworkID != 2 || cfg.Node.CoinbaseAddress == (common.Address{}) || cfg.Genesis.Coinbase != (common.Address{}) {
 		t.Fatal("incorrect network or genesis/runtime coinbase")
 	}
@@ -94,7 +100,7 @@ func TestInvalidRootDeployment(t *testing.T) {
 	}{
 		{"zero root network", root, "NetworkID = 2", "NetworkID = 0", "NetworkID must be positive"},
 		{"invalid root listener", root, `ListenAddr = ":30303"`, `ListenAddr = ":70000"`, "invalid port"},
-		{"shard-only root setting", root, "[Node]", "[Node]\nPrivatePort = 38000", "only shards"},
+		{"invalid root private RPC port", root, "PrivatePort = 38491", "PrivatePort = 65536", "Node.PrivatePort must be between 0 and 65535"},
 		{"missing shard file", root, shard, "missing.toml", "missing.toml"},
 		{"missing member", root, `, "shard-100002.toml"`, "", "missing shard config for chain ID 100002"},
 		{"duplicate member", root, shard, "shard-100001.toml", "duplicate shard chain ID"},
