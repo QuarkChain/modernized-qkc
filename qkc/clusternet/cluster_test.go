@@ -211,7 +211,7 @@ func TestMockClusterActiveShutdown(t *testing.T) {
 	})
 }
 
-// TestMockClusterFailureShutdown returns an error from either receiver's handler.
+// TestMockClusterFailureShutdown returns an error from a master or slave request handler.
 // All three nodes must request Shutdown exactly once without an explicit Stop.
 func TestMockClusterFailureShutdown(t *testing.T) {
 	t.Run("master", func(t *testing.T) {
@@ -268,6 +268,31 @@ func TestMockClusterFailureShutdown(t *testing.T) {
 		}
 
 		// Step 3. Verify that each node requests Shutdown exactly once and all three stop.
+		cluster.checkShutdownCalls(t, ctx, [3]int32{1, 1, 1})
+	})
+
+	t.Run("xshard", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		entered := make(chan struct{})
+		cluster := newMockCluster()
+		cluster.slaveB.onXshard = func(common.Hash, []*types.DepositTx) error {
+			close(entered)
+			return errors.New("simulated cross-shard handler failure")
+		}
+		cluster.start(t, ctx)
+
+		err := cluster.slaveA.service.BroadcastXShardTxList(ctx, big.NewInt(slaveBChainID), common.Hash{1}, nil)
+		if !errors.Is(err, conn.ErrConnectionClosed) {
+			t.Fatalf("failed cross-shard request: got %v, want closed connection", err)
+		}
+
+		select {
+		case <-entered:
+		default:
+			t.Fatal("cross-shard request disconnected before reaching slave B's failing handler")
+		}
+
 		cluster.checkShutdownCalls(t, ctx, [3]int32{1, 1, 1})
 	})
 }
