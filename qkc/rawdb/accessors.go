@@ -224,11 +224,7 @@ func ReadRootConfirmedShardBlocks(db ethdb.KeyValueReader, hash common.Hash) (ma
 	}
 	confirmed := make(map[string]common.Hash, len(entries))
 	for _, entry := range entries {
-		id := entry.ChainID.String()
-		if _, exists := confirmed[id]; exists {
-			return nil, fmt.Errorf("duplicate root shard confirmation for chain %s", id)
-		}
-		confirmed[id] = entry.Hash
+		confirmed[entry.ChainID.String()] = entry.Hash
 	}
 	return confirmed, nil
 }
