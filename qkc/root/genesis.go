@@ -23,7 +23,6 @@ import (
 	"maps"
 
 	"github.com/ethereum/go-ethereum/common"
-	gethrawdb "github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/config"
@@ -69,8 +68,8 @@ func InitializeRootDatabase(db ethdb.Database, cfg *config.RootConfig) (*params.
 	return rules, hash, nil
 }
 
-// SetupRootGenesisBlock initializes an empty root database in one batch, or
-// checks the existing genesis and consensus rules without rewinding the head.
+// SetupRootGenesisBlock writes genesis in one batch when canonical(0) is absent,
+// or checks the existing genesis and consensus rules without rewinding the head.
 // An initialized database can supply both values when genesis and config are
 // nil. A supplied genesis requires its config. Call with exclusive access to
 // the database before starting the chain.
@@ -146,14 +145,6 @@ func SetupRootGenesisBlock(db ethdb.Database, genesis *types.RootBlock, config *
 }
 
 func commitRootGenesis(db ethdb.Database, genesis *types.RootBlock, config *params.QuarkChainConfig, confirmed map[string]common.Hash) error {
-	// Missing canonical(0) can also mean a partial root database or a shard DB.
-	empty, err := gethrawdb.IsEmptyDatabase(db)
-	if err != nil {
-		return fmt.Errorf("check empty root database: %w", err)
-	}
-	if !empty {
-		return errors.New("database has existing data without a canonical root genesis")
-	}
 	batch := db.NewBatch()
 	defer batch.Close()
 	hash := genesis.Hash()

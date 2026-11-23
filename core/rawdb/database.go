@@ -338,22 +338,6 @@ func Open(db ethdb.KeyValueStore, opts OpenOptions) (ethdb.Database, error) {
 	}, nil
 }
 
-// IsEmptyDatabase reports whether both the key-value store and any attached
-// chain freezer are empty. Storage errors must not permit fresh initialization.
-func IsEmptyDatabase(db ethdb.Database) (bool, error) {
-	it := db.NewIterator(nil, nil)
-	defer it.Release()
-	hasData := it.Next()
-	if err := it.Error(); err != nil || hasData {
-		return false, err
-	}
-	frozen, err := db.Ancients()
-	if err != nil && !errors.Is(err, errNotSupported) {
-		return false, err
-	}
-	return frozen == 0, nil
-}
-
 // NewMemoryDatabase creates an ephemeral in-memory key-value database without a
 // freezer moving immutable chain segments into cold storage.
 func NewMemoryDatabase() ethdb.Database {

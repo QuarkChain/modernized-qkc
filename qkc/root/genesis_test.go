@@ -59,7 +59,7 @@ func TestRootGenesisSetupPreservesAdvancedHead(t *testing.T) {
 	}
 }
 
-func TestRootGenesisSetupRejectsPartialDatabase(t *testing.T) {
+func TestRootGenesisSetupMissingRecords(t *testing.T) {
 	f := newRootEnv(t)
 	records := make(map[string][]byte)
 	it := f.db.NewIterator(nil, nil)
@@ -70,10 +70,24 @@ func TestRootGenesisSetupRejectsPartialDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	it.Release()
-	// Dropping any record, including canonical(0), must fail without repairs.
+	// Missing canonical(0) selects initialization. Other missing records in an
+	// initialized database must fail without repairs.
 	for key := range records {
 		if err := f.db.Delete([]byte(key)); err != nil {
 			t.Fatal(err)
+		}
+		hash, err := qkcrawdb.ReadRootGenesisHash(f.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hash == (common.Hash{}) {
+			if _, hash, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err != nil || hash != f.genesis.Hash() {
+				t.Fatalf("initialization without canonical genesis returned %x, error %v", hash, err)
+			}
+			if hash, err := qkcrawdb.ReadRootGenesisHash(f.db); err != nil || hash != f.genesis.Hash() {
+				t.Fatalf("canonical genesis after initialization = %x, error %v", hash, err)
+			}
+			continue
 		}
 		if _, _, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err == nil {
 			t.Fatalf("accepted missing record %x", key)
@@ -131,29 +145,6 @@ func TestRootGenesisSetupRejectsInvalidSeed(t *testing.T) {
 				t.Fatalf("rejected seed left canonical genesis %x, error %v", hash, err)
 			}
 		})
-	}
-}
-
-type genesisFreezer struct {
-	ethdb.Database
-	frozen uint64
-	err    error
-}
-
-func (db genesisFreezer) Ancients() (uint64, error) { return db.frozen, db.err }
-
-func TestRootGenesisSetupRequiresEmptyFreezer(t *testing.T) {
-	f := newRootEnv(t)
-	db := rawdb.NewMemoryDatabase()
-	defer db.Close()
-	for _, store := range []genesisFreezer{{Database: db, frozen: 1}, {Database: db, err: errors.New("freezer failed")}} {
-		_, _, err := SetupRootGenesisBlock(store, f.genesis, f.config)
-		if err == nil || (store.err != nil && !errors.Is(err, store.err)) {
-			t.Fatalf("freezer count %d, error %v: setup returned %v", store.frozen, store.err, err)
-		}
-	}
-	if empty, err := rawdb.IsEmptyDatabase(db); err != nil || !empty {
-		t.Fatalf("rejected setup modified the database: empty %t, error %v", empty, err)
 	}
 }
 
