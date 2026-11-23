@@ -426,6 +426,7 @@ func (c *RootChain) RootTip() *types.RootBlockHeader {
 }
 
 // CreateBlockToMine builds an unsigned, unsealed candidate on the initialized root tip.
+// TODO(sync): Skip candidate construction while the root synchronizer is running.
 func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.RootBlock, error) {
 	if !c.Ready() {
 		return nil, errChainNotReady
