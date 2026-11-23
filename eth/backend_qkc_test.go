@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -205,8 +206,8 @@ func TestQKCBackendSimulatedMining(t *testing.T) {
 	initQKCBackend(t, backend)
 	coinbase := common.Address{0x42}
 	// Local mining does not yet select a searcher from ConsensusType.
-	backend.powMiner = shard.NewPoWMiner(backend.Shard(), shard.PoWMinerConfig{
-		Coinbase: coinbase, Search: shard.NewSimulatedSearch(100 * time.Millisecond),
+	backend.powMiner = mining.NewPoWMiner(backend.Shard(), mining.PoWMinerConfig{
+		Coinbase: coinbase, Search: mining.NewSimulatedSearch(100 * time.Millisecond),
 	})
 	m := backend.PoWMiner()
 	t.Cleanup(m.StopLocalMining)
@@ -251,7 +252,7 @@ type qkcWaitingSearch struct {
 	started, cancelled, release chan struct{}
 }
 
-func (s *qkcWaitingSearch) Search(ctx context.Context, _ *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
+func (s *qkcWaitingSearch) Search(ctx context.Context, _ *mining.MiningWork) (types.BlockNonce, common.Hash, bool) {
 	close(s.started)
 	<-ctx.Done()
 	close(s.cancelled)
@@ -273,7 +274,7 @@ func TestQKCBackendStopWaitsForMining(t *testing.T) {
 		t.Fatal("local mining started without a searcher")
 	}
 	// The default miner is idle; construct the test miner with its searcher.
-	backend.powMiner = shard.NewPoWMiner(backend.Shard(), shard.PoWMinerConfig{
+	backend.powMiner = mining.NewPoWMiner(backend.Shard(), mining.PoWMinerConfig{
 		Coinbase: config.Miner.PendingFeeRecipient, Search: search,
 	})
 	if err := backend.PoWMiner().StartLocalMining(); err != nil {
