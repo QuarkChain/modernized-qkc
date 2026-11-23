@@ -92,6 +92,9 @@ func TestInvalidRootDeployment(t *testing.T) {
 	for _, tc := range []struct {
 		name, file, old, new, want string
 	}{
+		{"zero root network", root, "NetworkID = 2", "NetworkID = 0", "NetworkID must be positive"},
+		{"invalid root listener", root, `ListenAddr = ":30303"`, `ListenAddr = ":70000"`, "invalid port"},
+		{"shard-only root setting", root, "[Node]", "[Node]\nPrivatePort = 38000", "only shards"},
 		{"missing shard file", root, shard, "missing.toml", "missing.toml"},
 		{"missing member", root, `, "shard-100002.toml"`, "", "missing shard config for chain ID 100002"},
 		{"duplicate member", root, shard, "shard-100001.toml", "duplicate shard chain ID"},

@@ -96,13 +96,19 @@ func LoadRoot(file string) (*RootConfig, error) {
 			Genesis      *rootGenesisTOML
 		}
 	}
-	master := DefaultNodeConfig(nil)
-	spec.Node = master.Node
+	spec.Node = node.DefaultConfig
+	spec.Node.Name = "qkc-master"
+	spec.Node.IPCPath = "qkc-master.ipc"
+	if spec.Node.DataDir != "" {
+		spec.Node.DataDir = filepath.Join(spec.Node.DataDir, "qkc", "master")
+	}
 	if err := load(file, &spec); err != nil {
 		return nil, err
 	}
-	master.Node, master.PrivateHost, master.PrivatePort = spec.Node, spec.Node.PrivateHost, spec.Node.PrivatePort
-	if err := master.Validate(spec.Root.NetworkID); err != nil {
+	if spec.Root.NetworkID == 0 {
+		return nil, fmt.Errorf("%s: Root.NetworkID must be positive", file)
+	}
+	if err := checkRootNode(&spec.Node); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
 	if len(spec.Root.ShardConfigs) == 0 {
@@ -171,8 +177,8 @@ func loadRootShard(path string, networkID uint64) (*core.Genesis, clusternet.Sla
 	if err := load(path, &spec); err != nil {
 		return nil, slave, err
 	}
-	if err := checkForkOverrides(&spec.Eth); err != nil {
-		return nil, slave, err
+	if spec.Eth.OverrideOsaka != nil || spec.Eth.OverrideAmsterdam != nil || spec.Eth.OverrideBPO1 != nil || spec.Eth.OverrideBPO2 != nil || spec.Eth.OverrideUBT != nil {
+		return nil, slave, errors.New("local fork overrides are not allowed; configure forks in Genesis")
 	}
 	g := spec.Eth.Genesis
 	if g == nil || g.Config == nil || g.Config.QuarkChain == nil {
