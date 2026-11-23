@@ -66,17 +66,6 @@ func New(chain *ShardChain, client ClusterClient) (*Shard, error) {
 	return &Shard{chain: chain, clusterClient: client}, nil
 }
 
-// SetClusterClient replaces delivery before the owner starts the shard service.
-// It does not start or stop either client; the owner manages their lifecycle.
-// It must not run concurrently with mining, imports or cluster requests.
-func (s *Shard) SetClusterClient(client ClusterClient) error {
-	if client == nil {
-		return errors.New("missing cluster client")
-	}
-	s.clusterClient = client
-	return nil
-}
-
 // Init restores the master's persisted root tip and its last confirmed shard
 // block. If the supplied root is absent locally, restore its stored direct
 // parent, then import the supplied root. Missing required recovery data returns
