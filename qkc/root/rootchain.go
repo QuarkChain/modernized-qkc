@@ -259,6 +259,9 @@ func (c *RootChain) replayCommittingBlock(tip common.Hash) error {
 			return err
 		}
 		if block == nil {
+			// The block and committing marker are persisted in one batch. A
+			// marker without a readable block indicates missing or corrupt data;
+			// keep it and fail recovery rather than hide the inconsistency.
 			return fmt.Errorf("%w: committing root %x", ErrRootDataMissing, committingHash)
 		}
 		if block.Hash() != committingHash {

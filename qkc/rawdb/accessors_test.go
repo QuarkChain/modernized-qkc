@@ -190,7 +190,7 @@ func TestRootCommittingHashReadErrors(t *testing.T) {
 			t.Fatal("marker read failure treated as absence:", err)
 		}
 	}
-	for _, malformed := range [][]byte{nil, {1}, make([]byte, common.HashLength+1)} {
+	for _, malformed := range [][]byte{nil, {1}, make([]byte, common.HashLength), make([]byte, common.HashLength+1)} {
 		if err := db.Put(rootCommittingHashKey, malformed); err != nil {
 			t.Fatal(err)
 		}

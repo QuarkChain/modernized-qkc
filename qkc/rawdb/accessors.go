@@ -120,7 +120,11 @@ func ReadRootCommittingHash(db ethdb.KeyValueReader) (common.Hash, error) {
 	if len(data) != common.HashLength {
 		return common.Hash{}, fmt.Errorf("invalid committing root hash length %d", len(data))
 	}
-	return common.BytesToHash(data), nil
+	hash := common.BytesToHash(data)
+	if hash == (common.Hash{}) {
+		return common.Hash{}, fmt.Errorf("invalid zero committing root hash")
+	}
+	return hash, nil
 }
 
 // WriteRootCommittingHash stages the pending broadcast with the local root commit.
