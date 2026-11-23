@@ -103,18 +103,6 @@ type clusterClient interface {
 	Stop() error
 }
 
-// mockClusterClient adapts the delivery mock to Ethereum's lifecycle.
-type mockClusterClient struct {
-	shard.MockClusterClient
-}
-
-func (c *mockClusterClient) Start(backend slavenet.ShardBackend) error {
-	c.Shard, _ = backend.(*shard.Shard)
-	return nil
-}
-
-func (*mockClusterClient) Stop() error { return nil }
-
 // Ethereum implements the Ethereum full node service.
 type Ethereum struct {
 	// core protocol objects
@@ -475,14 +463,6 @@ func newBackend(stack *node.Node, config *ethconfig.Config, newClient func(slave
 	eth.shutdownTracker.MarkStartup()
 
 	return eth, nil
-}
-
-// NewQKCBackendWithMockClient creates a backend for tests, using a mock cluster
-// client for QKC chains and the ordinary backend for non-QKC chains.
-func NewQKCBackendWithMockClient(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
-	return newBackend(stack, config, func(slavenet.ServiceConfig) (clusterClient, error) {
-		return &mockClusterClient{}, nil
-	})
 }
 
 func makeExtraData(extra []byte) []byte {
