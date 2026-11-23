@@ -30,6 +30,7 @@ import (
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/internal/syncx"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
@@ -198,8 +199,8 @@ func (c *RootChain) readConfirmations(hash common.Hash) (map[string]common.Hash,
 // ShardChain.Init currently requires non-genesis roots and their confirmations
 // to already be stored locally.
 // Connections must be ready before this call. Init records initialization after
-// PING and any pending side-root broadcast succeed and the committing marker is
-// cleared. Ready becomes true only while backendCtx is active and not stopping.
+// PING and any pending side-root broadcast succeed. Marker cleanup is best-effort.
+// Ready becomes true only while backendCtx is active and not stopping.
 // On failure, the backend must abort startup and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
 // a cluster restart. Repeating a successful Init is a no-op until the chain stops;
@@ -274,8 +275,9 @@ func (c *RootChain) replayCommittingBlock(tip common.Hash) error {
 	}
 	// Clear the marker in both cases: a committing tip was acknowledged by
 	// PING, while a side-chain root was acknowledged by the replay above.
+	// A cleanup failure only leaves an acknowledged block for safe replay.
 	if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
-		return fmt.Errorf("clear committing root: %w", err)
+		log.Warn("Failed to clear committing root", "root", committingHash, "err", err)
 	}
 	return nil
 }
@@ -386,10 +388,9 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 		return fmt.Errorf("broadcast root block: %w", err)
 	}
 	if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
-		// Prevent the next insertion from overwriting recovery work whose ACKs
-		// have not yet been durably recorded, even though delivery succeeded.
-		c.stopping.Store(true)
-		return fmt.Errorf("clear committing root: %w", err)
+		// Every shard acknowledged this block. A stale marker can be safely
+		// replayed after restart or overwritten by the next local commit.
+		log.Warn("Failed to clear committing root", "root", hash, "err", err)
 	}
 	return nil
 }

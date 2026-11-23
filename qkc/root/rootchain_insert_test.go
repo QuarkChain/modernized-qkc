@@ -386,6 +386,7 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 				f.client.broadcastErr = failure
 			case "clear marker":
 				f.db.deleteErr = failure
+				failure = nil // Delivery succeeded; cleanup is best-effort.
 			case "cancel rpc":
 				failure = context.Canceled
 				f.client.onBroadcast = func(ctx context.Context, _ *types.RootBlock) error { f.cancel(); return ctx.Err() }
@@ -398,6 +399,11 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 			}
 			if f.chain.RootTip().Hash() != block.Hash() || qkcrawdb.ReadRootBlock(f.db, block.Hash()) == nil {
 				t.Fatal("delivery failure lost the local commit")
+			}
+			if stage == "clear marker" {
+				if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != block.Hash() {
+					t.Fatal("failed cleanup did not leave the acknowledged marker", hash, err)
+				}
 			}
 			f.client.broadcastErr, f.client.onBroadcast = nil, nil
 			f.db.deleteErr = nil

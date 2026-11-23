@@ -863,7 +863,7 @@ func TestRootCommittingRecovery(t *testing.T) {
 	}
 }
 
-func TestRootCommittingRecoveryFailure(t *testing.T) {
+func TestRootCommittingRecoveryResults(t *testing.T) {
 	for _, stage := range []string{"missing block", "changed header", "corrupt block", "broadcast", "clear"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newRootEnv(t)
@@ -889,11 +889,18 @@ func TestRootCommittingRecoveryFailure(t *testing.T) {
 			case "clear":
 				f.db.deleteErr = failure
 			}
-			if err := f.chain.Init(); err == nil || (stage != "missing block" && stage != "changed header" && stage != "corrupt block" && !errors.Is(err, failure)) {
-				t.Fatal("recovery failure lost:", err)
-			}
-			if f.chain.Ready() {
-				t.Fatal("failed recovery published readiness")
+			err := f.chain.Init()
+			if stage == "clear" {
+				if err != nil || !f.chain.Ready() {
+					t.Fatal("cleanup failure prevented successful recovery:", err)
+				}
+			} else {
+				if err == nil || (stage == "broadcast" && !errors.Is(err, failure)) {
+					t.Fatal("recovery failure lost:", err)
+				}
+				if f.chain.Ready() {
+					t.Fatal("failed recovery published readiness")
+				}
 			}
 			f.db.deleteErr = nil
 			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != pending.Hash() {
