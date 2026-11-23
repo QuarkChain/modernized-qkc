@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/params"
@@ -58,8 +59,8 @@ var (
 // backendCtx before calling Close. Configuration must match the engine and stay
 // unchanged after New. The caller must drain in-flight operations before closing
 // shared resources.
-// TODO(backend): Call Init after cluster connections are ready and before
-// starting sync, mining or imports.
+// master.Backend calls Init after cluster connections are ready and before
+// allowing normal business activity.
 type RootChain struct {
 	backendCtx context.Context
 	config     *params.QuarkChainConfig
@@ -519,6 +520,21 @@ func (c *RootChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]co
 		return nil, fmt.Errorf("read confirmations for root %x: %w", hash, err)
 	}
 	return confirmed, nil
+}
+
+// AddShardBlockHeader records a block already validated by a configured shard.
+// Service verifies connection identity; root does not repeat shard validation.
+// Failures are handler errors, not recoverable business rejections. Avoid
+// chainmu because a root insertion may itself be awaiting a shard RPC. The
+// backend drains Service handlers before releasing the database.
+func (c *RootChain) AddShardBlockHeader(_ *big.Int, header *coretypes.Header, amount *uint256.Int) error {
+	if !c.Ready() {
+		return errChainNotReady
+	}
+	if header == nil {
+		return errors.New("missing shard block header")
+	}
+	return c.AddShardBlockCoinbaseAmount(header.Hash(), amount)
 }
 
 // AddShardBlockCoinbaseAmount stores reported after-tax income; the caller
