@@ -30,10 +30,10 @@ func BuildRootGenesis(cfg *config.RootConfig) (*qkctypes.RootBlock, error) {
 		return nil, err
 	}
 	seed := cfg.Genesis
-	headers := make(qkctypes.ShardBlockHeaders, len(cfg.ShardGeneses))
-	for i, shard := range cfg.ShardGeneses {
+	headers := make(qkctypes.ShardBlockHeaders, len(cfg.Shards))
+	for i, shard := range cfg.Shards {
 		// Validate has checked the genesis, so ToBlock cannot fail on a bad allocation.
-		header := shard.ToBlock().Header()
+		header := shard.Genesis.ToBlock().Header()
 		if err := header.SanityCheckQKC(); err != nil {
 			return nil, fmt.Errorf("shard %s genesis: %w", seed.Config.ChainIDs[i], err)
 		}

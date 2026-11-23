@@ -103,7 +103,7 @@ func checkPrivateEndpoint(host string, port int) error {
 		(strings.Contains(host, ":") && err != nil) || (err == nil && ip.Unmap().IsUnspecified()) {
 		return fmt.Errorf("PrivateHost must be a concrete host without brackets or a port: %q", host)
 	}
-	if port < 1 || port > 65535 {
+	if port < 1 || port > math.MaxUint16 {
 		return errors.New("PrivatePort must be between 1 and 65535")
 	}
 	return nil

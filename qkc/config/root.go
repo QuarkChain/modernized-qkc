@@ -33,14 +33,21 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
 )
 
+const rootNodeName = "qkc-master"
+
 // RootConfig contains the root node settings and the referenced shard inputs.
-// Slaves and ShardGeneses follow the consensus ChainIDs order.
+// Shards follow the consensus ChainIDs order.
 type RootConfig struct {
-	Node         node.Config
-	NetworkID    uint64
-	Genesis      *RootGenesis
-	ShardGeneses []*core.Genesis
-	Slaves       []clusternet.SlaveInfo
+	Node      node.Config
+	NetworkID uint64
+	Genesis   *RootGenesis
+	Shards    []ShardConfig
+}
+
+// ShardConfig is one shard's genesis and its private endpoint.
+type ShardConfig struct {
+	Genesis *core.Genesis
+	Slave   clusternet.SlaveInfo
 }
 
 // RootGenesis holds the fixed R0 inputs and the effective root consensus rules.
@@ -107,11 +114,11 @@ func (c *RootConfig) Validate() error {
 		return err
 	}
 	rules := c.Genesis.Config
-	if len(c.ShardGeneses) != len(rules.ChainIDs) {
+	if len(c.Shards) != len(rules.ChainIDs) {
 		return errors.New("shard genesis count differs from configured chain IDs")
 	}
-	for i, shard := range c.ShardGeneses {
-		id := rules.ChainIDs[i]
+	for i, sc := range c.Shards {
+		shard, id := sc.Genesis, rules.ChainIDs[i]
 		if shard == nil || shard.Config == nil || shard.Config.ChainID == nil || shard.Config.ChainID.Cmp(id) != 0 || shard.Config.QuarkChain == nil {
 			return fmt.Errorf("missing shard genesis for chain %s", id)
 		}
@@ -145,8 +152,8 @@ func LoadRoot(file string) (*RootConfig, error) {
 		}
 	}
 	spec.Node = node.DefaultConfig
-	spec.Node.Name = "qkc-master"
-	spec.Node.IPCPath = "qkc-master.ipc"
+	spec.Node.Name = rootNodeName
+	spec.Node.IPCPath = rootNodeName + ".ipc"
 	if spec.Node.DataDir != "" {
 		spec.Node.DataDir = filepath.Join(spec.Node.DataDir, "qkc", "master")
 	}
@@ -171,15 +178,15 @@ func LoadRoot(file string) (*RootConfig, error) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(filepath.Dir(file), path)
 		}
-		g, slave, err := loadRootShard(path, cfg.NetworkID)
+		shard, err := loadRootShard(path, cfg.NetworkID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: shard %q: %w", file, ref, err)
 		}
-		q := g.Config.QuarkChain
+		slave := shard.Slave
+		q := shard.Genesis.Config.QuarkChain
 		if shared == nil {
 			shared = q
-			cfg.ShardGeneses = make([]*core.Genesis, len(q.ChainIDs))
-			cfg.Slaves = make([]clusternet.SlaveInfo, len(q.ChainIDs))
+			cfg.Shards = make([]ShardConfig, len(q.ChainIDs))
 			for i, id := range q.ChainIDs {
 				indices[id.String()] = i
 			}
@@ -187,7 +194,7 @@ func LoadRoot(file string) (*RootConfig, error) {
 			return nil, fmt.Errorf("%s: ChainIDs, RewardTaxRate and MaxBlocksPerRootBlock must agree across shards", path)
 		}
 		i := indices[slave.ChainID.String()] // ValidateQuarkChain checks local membership.
-		if cfg.ShardGeneses[i] != nil {
+		if cfg.Shards[i].Genesis != nil {
 			return nil, fmt.Errorf("%s: duplicate shard chain ID %v", path, slave.ChainID)
 		}
 		addr := net.JoinHostPort(canonicalHost(slave.Host), strconv.Itoa(int(slave.Port)))
@@ -195,10 +202,10 @@ func LoadRoot(file string) (*RootConfig, error) {
 			return nil, fmt.Errorf("%s: duplicate shard private endpoint %s", path, addr)
 		}
 		endpoints[addr] = true
-		cfg.ShardGeneses[i], cfg.Slaves[i] = g, slave
+		cfg.Shards[i] = shard
 	}
-	for i, g := range cfg.ShardGeneses {
-		if g == nil {
+	for i, shard := range cfg.Shards {
+		if shard.Genesis == nil {
 			return nil, fmt.Errorf("%s: missing shard config for chain ID %v", file, shared.ChainIDs[i])
 		}
 	}
@@ -212,7 +219,7 @@ func LoadRoot(file string) (*RootConfig, error) {
 	return cfg, nil
 }
 
-func loadRootShard(path string, networkID uint64) (*core.Genesis, clusternet.SlaveInfo, error) {
+func loadRootShard(path string, networkID uint64) (ShardConfig, error) {
 	// Decode native geth TOML, including unrelated runtime sections so a shard
 	// can use the same file for standalone startup.
 	var spec struct {
@@ -221,19 +228,18 @@ func loadRootShard(path string, networkID uint64) (*core.Genesis, clusternet.Sla
 		Metrics  metrics.Config
 		Ethstats struct{ URL string }
 	}
-	var slave clusternet.SlaveInfo
 	if err := load(path, &spec); err != nil {
-		return nil, slave, err
+		return ShardConfig{}, err
 	}
 	if spec.Eth.OverrideOsaka != nil || spec.Eth.OverrideAmsterdam != nil || spec.Eth.OverrideBPO1 != nil || spec.Eth.OverrideBPO2 != nil || spec.Eth.OverrideUBT != nil {
-		return nil, slave, errors.New("local fork overrides are not allowed; configure forks in Genesis")
+		return ShardConfig{}, errors.New("local fork overrides are not allowed; configure forks in Genesis")
 	}
 	g := spec.Eth.Genesis
 	if g == nil || g.Config == nil || g.Config.QuarkChain == nil {
-		return nil, slave, errors.New("Eth.Genesis.Config.QuarkChain is required")
+		return ShardConfig{}, errors.New("Eth.Genesis.Config.QuarkChain is required")
 	}
 	if err := checkShardGenesis(g); err != nil {
-		return nil, slave, err
+		return ShardConfig{}, err
 	}
 	// As in eth.New, an unset/zero NetworkId selects the EVM chain ID.
 	id := spec.Eth.NetworkId
@@ -241,10 +247,11 @@ func loadRootShard(path string, networkID uint64) (*core.Genesis, clusternet.Sla
 		id = g.Config.ChainID.Uint64()
 	}
 	if id != networkID {
-		return nil, slave, fmt.Errorf("shard network ID %d differs from root NetworkID %d", id, networkID)
+		return ShardConfig{}, fmt.Errorf("shard network ID %d differs from root NetworkID %d", id, networkID)
 	}
 	if err := checkPrivateEndpoint(spec.Node.PrivateHost, spec.Node.PrivatePort); err != nil {
-		return nil, slave, err
+		return ShardConfig{}, err
 	}
-	return g, clusternet.SlaveInfo{Host: spec.Node.PrivateHost, Port: uint16(spec.Node.PrivatePort), ChainID: g.Config.ChainID}, nil
+	slave := clusternet.SlaveInfo{Host: spec.Node.PrivateHost, Port: uint16(spec.Node.PrivatePort), ChainID: g.Config.ChainID}
+	return ShardConfig{Genesis: g, Slave: slave}, nil
 }
