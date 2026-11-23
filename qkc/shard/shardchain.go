@@ -192,6 +192,10 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		// Step 2b: prefer the stored checkpoint, ignoring the supplied body.
 		rootHeader = rawdb.ReadRootBlockHeader(c.db, root.Hash())
 		if rootHeader == nil {
+			// ReadRootBlockHeader returns nil for missing data, DB read errors or
+			// invalid SSZ. All three intentionally share this recovery path: restore
+			// the local parent, then import the root supplied by master. This may
+			// replace an existing unusable record; recovery failures still return errors.
 			parent := rawdb.ReadRootBlockHeader(c.db, root.ParentHash())
 			if parent == nil {
 				return fmt.Errorf("%w: %w: parent %x", ErrClusterStateInconsistency, ErrUnknownRootBlock, root.ParentHash())
