@@ -243,5 +243,9 @@ full shard genesis header per chain in `ChainIDs` order. `Root.Genesis.Coinbase`
 defaults to the zero address in the R0 header. `Node.CoinbaseAddress` configures
 the local mining recipient.
 
-Load the file with `config.LoadRoot(path)` and pass the result to
-`root.BuildRootGenesis(cfg)` to derive R0 offline.
+Load the file with `config.LoadRoot(path)` and call
+`root.BuildRootGenesis(cfg.Genesis, cfg.ShardGeneses())` to derive R0 offline.
+
+Set both `Node.PrivateHost` and `Node.PrivatePort` to configure the root private
+RPC listener. The root can bind a wildcard address. Shard endpoints require
+concrete hosts for dialing. Each configured private endpoint must be distinct.
