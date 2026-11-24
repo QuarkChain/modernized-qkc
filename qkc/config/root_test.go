@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -51,7 +52,9 @@ func writeRootDeployment(t *testing.T, filename string, edit func(string) string
 
 func TestLoadRoot(t *testing.T) {
 	path := writeRootDeployment(t, "root.toml", func(s string) string {
-		return strings.Replace(s, `"shard-100001.toml", "shard-100002.toml"`, `"shard-100002.toml", "shard-100001.toml"`, 1)
+		s = strings.Replace(s, `"shard-100001.toml", "shard-100002.toml"`, `"shard-100002.toml", "shard-100001.toml"`, 1)
+		// Loading genesis does not apply platform-specific IPC listener limits.
+		return strings.Replace(s, "qkc-master.ipc", strings.Repeat("a", 108)+".ipc", 1)
 	})
 	cfg, err := LoadRoot(path)
 	if err != nil {
@@ -92,6 +95,21 @@ func TestLoadRootWithoutGenesis(t *testing.T) {
 	}
 }
 
+func TestLoadRootPrivateEndpoint(t *testing.T) {
+	for _, host := range []string{"0.0.0.0", "::", ""} {
+		path := writeRootDeployment(t, "root.toml", func(s string) string {
+			if host == "" {
+				return strings.Replace(s, "PrivateHost = \"127.0.0.1\"\nPrivatePort = 38491\n", "", 1)
+			}
+			return strings.Replace(s, "PrivateHost = \"127.0.0.1\"", "PrivateHost = "+strconv.Quote(host), 1)
+		})
+		cfg, err := LoadRoot(path)
+		if err != nil || cfg.Node.PrivateHost != host {
+			t.Fatalf("loading root with private host %q: got %v, error %v", host, cfg, err)
+		}
+	}
+}
+
 func TestInvalidRootDeployment(t *testing.T) {
 	const shard = "shard-100002.toml"
 	const root = "root.toml"
@@ -99,8 +117,10 @@ func TestInvalidRootDeployment(t *testing.T) {
 		name, file, old, new, want string
 	}{
 		{"zero root network", root, "NetworkID = 2", "NetworkID = 0", "NetworkID must be positive"},
-		{"invalid root listener", root, `ListenAddr = ":30303"`, `ListenAddr = ":70000"`, "invalid port"},
-		{"invalid root private RPC port", root, "PrivatePort = 38491", "PrivatePort = 65536", "Node.PrivatePort must be between 0 and 65535"},
+		{"invalid root private host", root, `PrivateHost = "127.0.0.1"`, `PrivateHost = "a b"`, "root private endpoint: PrivateHost"},
+		{"invalid root private RPC port", root, "PrivatePort = 38491", "PrivatePort = 65536", "root private endpoint: PrivatePort"},
+		{"missing root private RPC port", root, "PrivatePort = 38491", "", "root private endpoint: PrivatePort"},
+		{"duplicate root and shard endpoint", root, "PrivatePort = 38491", "PrivatePort = 38000", "duplicate private endpoint 127.0.0.1:38000"},
 		{"missing shard file", root, shard, "missing.toml", "missing.toml"},
 		{"missing member", root, `, "shard-100002.toml"`, "", "missing shard config for chain ID 100002"},
 		{"duplicate member", root, shard, "shard-100001.toml", "duplicate shard chain ID"},
@@ -108,10 +128,10 @@ func TestInvalidRootDeployment(t *testing.T) {
 		{"network", shard, "NetworkId = 2", "NetworkId = 1", "differs from root"},
 		{"private host", shard, `PrivateHost = "127.0.0.1"`, `PrivateHost = "0.0.0.0"`, "PrivateHost"},
 		{"private port", shard, "PrivatePort = 38001", "PrivatePort = 65536", "PrivatePort"},
-		{"duplicate endpoint", shard, "PrivatePort = 38001", "PrivatePort = 38000", "duplicate shard private endpoint"},
-		{"chain IDs", shard, `"100001", "100002"`, `"100001", "100002", "100003"`, "must agree across shards"},
-		{"tax", shard, `RewardTaxRate = "0.5"`, `RewardTaxRate = "0.4"`, "must agree across shards"},
-		{"block limit", shard, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", "must agree across shards"},
+		{"duplicate endpoint", shard, "PrivatePort = 38001", "PrivatePort = 38000", "duplicate private endpoint"},
+		{"chain IDs", shard, `"100001", "100002"`, `"100001", "100002", "100003"`, "shard network rules differ"},
+		{"tax", shard, `RewardTaxRate = "0.5"`, `RewardTaxRate = "0.4"`, "shard network rules differ"},
+		{"block limit", shard, "MaxBlocksPerRootBlock = 18", "MaxBlocksPerRootBlock = 19", "shard network rules differ"},
 		{"invalid shard genesis", shard, "GasLimit = 12000000", "GasLimit = 10000", "invalid gas limit"},
 		{"missing timestamp", root, "Timestamp = 0", "", "Timestamp is required"},
 		{"difficulty overflow", root, `Difficulty = "1024"`, `Difficulty = "` + new(big.Int).Lsh(big.NewInt(1), 256).String() + `"`, "positive uint256"},

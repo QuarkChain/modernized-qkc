@@ -17,25 +17,84 @@
 package root
 
 import (
+	"errors"
 	"fmt"
+	"math/big"
 
-	"github.com/ethereum/go-ethereum/qkc/config"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/params"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
 
-// BuildRootGenesis derives R0 from the native shard allocations without opening any node data directory.
-func BuildRootGenesis(cfg *config.RootConfig) (*qkctypes.RootBlock, error) {
-	if err := cfg.Validate(); err != nil {
+// RootGenesis holds the fixed R0 inputs and the effective root consensus rules.
+type RootGenesis struct {
+	Timestamp  uint64
+	Difficulty *big.Int
+	Coinbase   common.Address
+	Config     *params.QuarkChainConfig
+}
+
+// Validate checks the root consensus rules and the fixed R0 difficulty.
+func (g *RootGenesis) Validate() error {
+	if g == nil || g.Config == nil {
+		return errors.New("missing root genesis")
+	}
+	if g.Difficulty == nil || g.Difficulty.Sign() <= 0 || g.Difficulty.BitLen() > 256 {
+		return errors.New("Difficulty must be a positive uint256")
+	}
+	if err := g.Config.ConsensusType.Check(); err != nil {
+		return err
+	}
+	if err := g.Config.Check(); err != nil {
+		return err
+	}
+	if g.Difficulty.Cmp(g.Config.PoSW.MinimumDifficulty) < 0 {
+		return errors.New("Difficulty is below MinimumDifficulty")
+	}
+	return nil
+}
+
+// ValidateShardGenesis checks one shard's native genesis. When rules is set,
+// the shard must also agree with the shared network rules.
+func ValidateShardGenesis(shard *core.Genesis, rules *params.QuarkChainConfig) error {
+	if shard == nil || shard.Config == nil || shard.Config.QuarkChain == nil {
+		return errors.New("missing shard genesis or QuarkChain config")
+	}
+	if err := shard.ValidateQuarkChain(); err != nil {
+		return err
+	}
+	if err := shard.Config.CheckConfigForkOrder(); err != nil {
+		return err
+	}
+	if rules != nil && !shard.Config.QuarkChain.EqualNetworkRules(rules) {
+		return errors.New("shard network rules differ: ChainIDs, RewardTaxRate and MaxBlocksPerRootBlock must agree")
+	}
+	return nil
+}
+
+// BuildRootGenesis derives R0 offline from shard geneses in ChainIDs order.
+func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.RootBlock, error) {
+	if err := seed.Validate(); err != nil {
 		return nil, err
 	}
-	seed := cfg.Genesis
-	headers := make(qkctypes.ShardBlockHeaders, len(cfg.Shards))
-	for i, shard := range cfg.Shards {
-		// Validate has checked the genesis, so ToBlock cannot fail on a bad allocation.
-		header := shard.Genesis.ToBlock().Header()
+	rules := seed.Config
+	if len(shards) != len(rules.ChainIDs) {
+		return nil, errors.New("shard genesis count differs from configured chain IDs")
+	}
+	headers := make(qkctypes.ShardBlockHeaders, len(shards))
+	for i, shard := range shards {
+		id := rules.ChainIDs[i]
+		if err := ValidateShardGenesis(shard, rules); err != nil {
+			return nil, fmt.Errorf("shard %s genesis: %w", id, err)
+		}
+		if shard.Config.ChainID.Cmp(id) != 0 {
+			return nil, fmt.Errorf("expected shard genesis for chain %s at index %d, got chain %s", id, i, shard.Config.ChainID)
+		}
+		header := shard.ToBlock().Header()
 		if err := header.SanityCheckQKC(); err != nil {
-			return nil, fmt.Errorf("shard %s genesis: %w", seed.Config.ChainIDs[i], err)
+			return nil, fmt.Errorf("shard %s genesis: %w", id, err)
 		}
 		headers[i] = header
 	}

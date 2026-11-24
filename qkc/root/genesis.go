@@ -23,25 +23,22 @@ import (
 	"maps"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// InitializeRootDatabase installs or verifies the genesis described by a loaded root TOML.
-// When the root seed is omitted, the stored rules and R0 must still agree with the configured shards.
-func InitializeRootDatabase(db ethdb.Database, cfg *config.RootConfig) (*params.QuarkChainConfig, common.Hash, error) {
-	if cfg == nil {
-		return nil, common.Hash{}, errors.New("missing root configuration")
-	}
-	if cfg.Genesis != nil {
-		genesis, err := BuildRootGenesis(cfg)
+// InitializeRootDatabase installs or verifies R0 for shards in ChainIDs order.
+// A nil seed uses the stored root rules and verifies them against the shards.
+func InitializeRootDatabase(db ethdb.Database, seed *RootGenesis, shards []*core.Genesis) (*params.QuarkChainConfig, common.Hash, error) {
+	if seed != nil {
+		genesis, err := BuildRootGenesis(seed, shards)
 		if err != nil {
 			return nil, common.Hash{}, err
 		}
-		return SetupRootGenesisBlock(db, genesis, cfg.Genesis.Config)
+		return SetupRootGenesisBlock(db, genesis, seed.Config)
 	}
 	rules, hash, err := SetupRootGenesisBlock(db, nil, nil)
 	if err != nil {
@@ -51,14 +48,11 @@ func InitializeRootDatabase(db ethdb.Database, cfg *config.RootConfig) (*params.
 	if header == nil {
 		return nil, hash, fmt.Errorf("cannot read stored root genesis %s", hash)
 	}
-	// Reuse the loaded-config validation and G0 construction with the stored
-	// root seed, keeping the caller's omitted genesis unchanged.
-	restored := *cfg
-	restored.Genesis = &config.RootGenesis{
+	restored := &RootGenesis{
 		Timestamp: header.Time, Difficulty: header.Difficulty.ToBig(),
 		Coinbase: header.Coinbase, Config: rules,
 	}
-	genesis, err := BuildRootGenesis(&restored)
+	genesis, err := BuildRootGenesis(restored, shards)
 	if err != nil {
 		return nil, hash, err
 	}

@@ -243,13 +243,19 @@ full shard genesis header per chain in `ChainIDs` order. `Root.Genesis.Coinbase`
 defaults to the zero address in the R0 header. `Node.CoinbaseAddress` configures
 the local mining recipient.
 
-Load the file with `config.LoadRoot(path)` and pass the result to
-`root.BuildRootGenesis(cfg)` to derive R0 offline.
+Load the file with `config.LoadRoot(path)` and call
+`root.BuildRootGenesis(cfg.Genesis, cfg.ShardGeneses())` to derive R0 offline.
+
+Set both `Node.PrivateHost` and `Node.PrivatePort` to configure the root private
+RPC listener. The root can bind a wildcard address. Shard endpoints require
+concrete hosts for dialing. Each configured private endpoint must be distinct.
 
 ## Initialize a local root database
 
-Open the dedicated root database and call `root.InitializeRootDatabase(db, cfg)`. On first use, it writes R0,
-its canonical mapping, head, shard confirmations and root rules in one batch.
+Open the dedicated root database and call
+`root.InitializeRootDatabase(db, cfg.Genesis, cfg.ShardGeneses())`. On first use,
+it writes R0, its canonical mapping, head, shard confirmations and root rules in
+one batch.
 On restart it checks the stored genesis and head and returns the effective rules
 and R0 hash. An initialized database also accepts a TOML with the entire
 `[Root.Genesis]` section and its subtables omitted. The referenced shard TOMLs

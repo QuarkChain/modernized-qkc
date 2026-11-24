@@ -14,15 +14,21 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
+// Package config loads QuarkChain root and shard TOML settings.
 package config
 
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
+	"net/netip"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -31,16 +37,24 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/root"
+	"github.com/naoina/toml"
 )
 
 const rootNodeName = "qkc-master"
+
+// TOML uses geth's case-sensitive Go field names and rejects unknown fields.
+var tomlSettings = toml.Config{
+	NormFieldName: func(_ reflect.Type, key string) string { return key },
+	FieldToKey:    func(_ reflect.Type, field string) string { return field },
+}
 
 // RootConfig contains the root node settings and the referenced shard inputs.
 // Shards follow the consensus ChainIDs order.
 type RootConfig struct {
 	Node      node.Config
 	NetworkID uint64
-	Genesis   *RootGenesis
+	Genesis   *root.RootGenesis
 	Shards    []ShardConfig
 }
 
@@ -50,12 +64,13 @@ type ShardConfig struct {
 	Slave   clusternet.SlaveInfo
 }
 
-// RootGenesis holds the fixed R0 inputs and the effective root consensus rules.
-type RootGenesis struct {
-	Timestamp  uint64
-	Difficulty *big.Int
-	Coinbase   common.Address
-	Config     *params.QuarkChainConfig
+// ShardGeneses returns the shard genesis specifications in ChainIDs order.
+func (c *RootConfig) ShardGeneses() []*core.Genesis {
+	genesis := make([]*core.Genesis, len(c.Shards))
+	for i, shard := range c.Shards {
+		genesis[i] = shard.Genesis
+	}
+	return genesis
 }
 
 // Shared rules come exclusively from the shard TOMLs. Keeping the on-disk
@@ -70,73 +85,17 @@ type rootGenesisTOML struct {
 	}
 }
 
-func (g *rootGenesisTOML) resolve(shared *params.QuarkChainConfig) (*RootGenesis, error) {
+func (g *rootGenesisTOML) resolve(shared *params.QuarkChainConfig) (*root.RootGenesis, error) {
 	if g.Timestamp == nil {
 		return nil, errors.New("Timestamp is required")
 	}
 	cfg := *shared
 	cfg.ConsensusType, cfg.PoSW = g.Config.ConsensusType, g.Config.PoSW
-	genesis := &RootGenesis{Timestamp: *g.Timestamp, Difficulty: g.Difficulty, Coinbase: g.Coinbase, Config: &cfg}
+	genesis := &root.RootGenesis{Timestamp: *g.Timestamp, Difficulty: g.Difficulty, Coinbase: g.Coinbase, Config: &cfg}
 	if err := genesis.Validate(); err != nil {
 		return nil, err
 	}
 	return genesis, nil
-}
-
-// Validate checks the root consensus rules and the fixed R0 difficulty.
-func (g *RootGenesis) Validate() error {
-	if g == nil || g.Config == nil {
-		return errors.New("missing root genesis")
-	}
-	if g.Difficulty == nil || g.Difficulty.Sign() <= 0 || g.Difficulty.BitLen() > 256 {
-		return errors.New("Difficulty must be a positive uint256")
-	}
-	if err := g.Config.ConsensusType.Check(); err != nil {
-		return err
-	}
-	if err := g.Config.Check(); err != nil {
-		return err
-	}
-	if g.Difficulty.Cmp(g.Config.PoSW.MinimumDifficulty) < 0 {
-		return errors.New("Difficulty is below MinimumDifficulty")
-	}
-	return nil
-}
-
-// Validate checks the root genesis and that every shard genesis input matches
-// its chain ID position and the root's network rules. LoadRoot already checks
-// each shard while loading; this also covers a RootConfig built by hand.
-func (c *RootConfig) Validate() error {
-	if c == nil || c.Genesis == nil {
-		return errors.New("missing root genesis")
-	}
-	if err := c.Genesis.Validate(); err != nil {
-		return err
-	}
-	rules := c.Genesis.Config
-	if len(c.Shards) != len(rules.ChainIDs) {
-		return errors.New("shard genesis count differs from configured chain IDs")
-	}
-	for i, sc := range c.Shards {
-		shard, id := sc.Genesis, rules.ChainIDs[i]
-		if shard == nil || shard.Config == nil || shard.Config.ChainID == nil || shard.Config.ChainID.Cmp(id) != 0 || shard.Config.QuarkChain == nil {
-			return fmt.Errorf("missing shard genesis for chain %s", id)
-		}
-		if !shard.Config.QuarkChain.EqualNetworkRules(rules) {
-			return fmt.Errorf("shard %s network rules differ from root", id)
-		}
-		if err := checkShardGenesis(shard); err != nil {
-			return fmt.Errorf("shard %s genesis: %w", id, err)
-		}
-	}
-	return nil
-}
-
-func checkShardGenesis(g *core.Genesis) error {
-	if err := g.ValidateQuarkChain(); err != nil {
-		return err
-	}
-	return g.Config.CheckConfigForkOrder()
 }
 
 // LoadRoot loads a root TOML and resolves its shard TOML references relative
@@ -163,22 +122,26 @@ func LoadRoot(file string) (*RootConfig, error) {
 	if spec.Root.NetworkID == 0 {
 		return nil, fmt.Errorf("%s: Root.NetworkID must be positive", file)
 	}
-	if err := checkRootNode(&spec.Node); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
-	}
 	if len(spec.Root.ShardConfigs) == 0 {
 		return nil, fmt.Errorf("%s: Root.ShardConfigs must list at least one shard", file)
 	}
 	cfg := &RootConfig{Node: spec.Node, NetworkID: spec.Root.NetworkID}
 	var shared *params.QuarkChainConfig
 	indices := make(map[string]int)
-	endpoints := make(map[string]bool)
+	endpoints := make(map[string]string)
+	if host, port := spec.Node.PrivateHost, spec.Node.PrivatePort; host != "" || port != 0 {
+		// The root uses this endpoint as a bind address.
+		if err := checkPrivateEndpoint(host, port, true); err != nil {
+			return nil, fmt.Errorf("%s: root private endpoint: %w", file, err)
+		}
+		endpoints[net.JoinHostPort(canonicalHost(host), strconv.Itoa(port))] = file
+	}
 	for _, ref := range spec.Root.ShardConfigs {
 		path := ref
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(filepath.Dir(file), path)
 		}
-		shard, err := loadRootShard(path, cfg.NetworkID)
+		shard, err := loadRootShard(path, cfg.NetworkID, shared)
 		if err != nil {
 			return nil, fmt.Errorf("%s: shard %q: %w", file, ref, err)
 		}
@@ -190,18 +153,16 @@ func LoadRoot(file string) (*RootConfig, error) {
 			for i, id := range q.ChainIDs {
 				indices[id.String()] = i
 			}
-		} else if !shared.EqualNetworkRules(q) {
-			return nil, fmt.Errorf("%s: ChainIDs, RewardTaxRate and MaxBlocksPerRootBlock must agree across shards", path)
 		}
 		i := indices[slave.ChainID.String()] // ValidateQuarkChain checks local membership.
 		if cfg.Shards[i].Genesis != nil {
 			return nil, fmt.Errorf("%s: duplicate shard chain ID %v", path, slave.ChainID)
 		}
 		addr := net.JoinHostPort(canonicalHost(slave.Host), strconv.Itoa(int(slave.Port)))
-		if endpoints[addr] {
-			return nil, fmt.Errorf("%s: duplicate shard private endpoint %s", path, addr)
+		if owner, ok := endpoints[addr]; ok {
+			return nil, fmt.Errorf("%s: duplicate private endpoint %s also configured in %s", path, addr, owner)
 		}
-		endpoints[addr] = true
+		endpoints[addr] = path
 		cfg.Shards[i] = shard
 	}
 	for i, shard := range cfg.Shards {
@@ -219,7 +180,7 @@ func LoadRoot(file string) (*RootConfig, error) {
 	return cfg, nil
 }
 
-func loadRootShard(path string, networkID uint64) (ShardConfig, error) {
+func loadRootShard(path string, networkID uint64, shared *params.QuarkChainConfig) (ShardConfig, error) {
 	// Decode native geth TOML, including unrelated runtime sections so a shard
 	// can use the same file for standalone startup.
 	var spec struct {
@@ -235,10 +196,7 @@ func loadRootShard(path string, networkID uint64) (ShardConfig, error) {
 		return ShardConfig{}, errors.New("local fork overrides are not allowed; configure forks in Genesis")
 	}
 	g := spec.Eth.Genesis
-	if g == nil || g.Config == nil || g.Config.QuarkChain == nil {
-		return ShardConfig{}, errors.New("Eth.Genesis.Config.QuarkChain is required")
-	}
-	if err := checkShardGenesis(g); err != nil {
+	if err := root.ValidateShardGenesis(g, shared); err != nil {
 		return ShardConfig{}, err
 	}
 	// As in eth.New, an unset/zero NetworkId selects the EVM chain ID.
@@ -249,9 +207,44 @@ func loadRootShard(path string, networkID uint64) (ShardConfig, error) {
 	if id != networkID {
 		return ShardConfig{}, fmt.Errorf("shard network ID %d differs from root NetworkID %d", id, networkID)
 	}
-	if err := checkPrivateEndpoint(spec.Node.PrivateHost, spec.Node.PrivatePort); err != nil {
+	if err := checkPrivateEndpoint(spec.Node.PrivateHost, spec.Node.PrivatePort, false); err != nil {
 		return ShardConfig{}, err
 	}
 	slave := clusternet.SlaveInfo{Host: spec.Node.PrivateHost, Port: uint16(spec.Node.PrivatePort), ChainID: g.Config.ChainID}
 	return ShardConfig{Genesis: g, Slave: slave}, nil
+}
+
+func load(file string, cfg interface{}) error {
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := tomlSettings.NewDecoder(f).Decode(cfg); err != nil {
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	return nil
+}
+
+// canonicalHost normalizes IP literals and hostname case without resolving DNS.
+func canonicalHost(host string) string {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.Unmap().String()
+	}
+	return strings.ToLower(host)
+}
+
+func checkPrivateEndpoint(host string, port int, allowWildcard bool) error {
+	ip, err := netip.ParseAddr(host)
+	if host == "" || strings.ContainsAny(host, " \t\r\n/[]") ||
+		(strings.Contains(host, ":") && err != nil) {
+		return fmt.Errorf("PrivateHost must be a host without brackets or a port: %q", host)
+	}
+	if !allowWildcard && err == nil && ip.Unmap().IsUnspecified() {
+		return fmt.Errorf("PrivateHost must be a concrete host: %q", host)
+	}
+	if port < 1 || port > math.MaxUint16 {
+		return errors.New("PrivatePort must be between 1 and 65535")
+	}
+	return nil
 }
