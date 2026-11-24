@@ -52,9 +52,6 @@ func load(file string, cfg interface{}) error {
 }
 
 func checkRootNode(cfg *node.Config) error {
-	if cfg.PrivateHost != "" || cfg.PrivatePort != 0 {
-		return errors.New("only shards can configure PrivateHost or PrivatePort")
-	}
 	if cfg.DBEngine != "" && cfg.DBEngine != "pebble" && cfg.DBEngine != "leveldb" {
 		return fmt.Errorf("invalid Node.DBEngine %q", cfg.DBEngine)
 	}
@@ -65,7 +62,12 @@ func checkRootNode(cfg *node.Config) error {
 			return fmt.Errorf("%s must not be negative", name)
 		}
 	}
-	for name, port := range map[string]int{"Node.HTTPPort": cfg.HTTPPort, "Node.WSPort": cfg.WSPort, "Node.AuthPort": cfg.AuthPort} {
+	for name, port := range map[string]int{
+		"Node.HTTPPort":    cfg.HTTPPort,
+		"Node.WSPort":      cfg.WSPort,
+		"Node.AuthPort":    cfg.AuthPort,
+		"Node.PrivatePort": cfg.PrivatePort,
+	} {
 		if port < 0 || port > math.MaxUint16 {
 			return fmt.Errorf("%s must be between 0 and 65535", name)
 		}

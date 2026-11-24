@@ -240,8 +240,8 @@ by geth. `Root.ShardConfigs` paths resolve relative to the root TOML. Each shard
 supplies its own genesis allocation. All shards must agree on the network ID,
 ordered `ChainIDs`, `RewardTaxRate` and `MaxBlocksPerRootBlock`. R0 includes one
 full shard genesis header per chain in `ChainIDs` order. `Root.Genesis.Coinbase`
-sets the R0 header recipient independently of `Node.CoinbaseAddress`, the local
-mining recipient.
+defaults to the zero address in the R0 header. `Node.CoinbaseAddress` configures
+the local mining recipient.
 
 Load the file with `config.LoadRoot(path)` and pass the result to
 `root.BuildRootGenesis(cfg)` to derive R0 offline.
