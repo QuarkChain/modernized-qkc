@@ -20,7 +20,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 )
 
 // Config holds immutable connection configuration.

@@ -23,7 +23,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/ethereum/go-ethereum/qkc/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 )
 
 // frameWriteTimeout bounds each WriteFrame call (encode + flush), following

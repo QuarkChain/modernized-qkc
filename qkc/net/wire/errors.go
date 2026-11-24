@@ -19,7 +19,7 @@ package wire
 import (
 	"errors"
 
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 )
 
 // ErrInvalidClusterFrame identifies a frame rejected before any bytes are written.
