@@ -228,8 +228,6 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 		return err
 	}
 	c.rootTip = rootHeader
-	// TODO(SlaveService): Call Init with the master's root checkpoint
-	// before enabling mining or allowing block imports from P2P sync.
 	return nil
 }
 
@@ -294,8 +292,6 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	if block.NumberU64() == 0 {
 		return consensus.ErrInvalidNumber
 	}
-
-	// TODO 1. check chain id here 2. check future block in engine.VerifyBlockHeader
 
 	if c.chain.HasBlock(block.Hash(), block.NumberU64()) {
 		// A previous import may have stored the block but failed in SetCanonical.
@@ -483,9 +479,6 @@ func (c *ShardChain) shouldUpdateHead(header *types.Header, prevRoot, rootTip *q
 // Unlike shard blocks, root blocks are chosen by total difficulty: "Switch to
 // the root block with higher total diff". On a tie, the root tip stays.
 func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
-	// TODO(recovery): Extract a lock-held import helper so Init can import the
-	// supplied root block after restoring its locally stored direct parent;
-	// do not reacquire c.mu or leave rootTip initialized after a failed Init.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.insertRootBlock(root, c.rootTip)
@@ -797,10 +790,6 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 // shard at it. Each shard restores that root locally or imports it from its
 // stored direct parent. Root construction resumes only after all shards initialize
 // successfully, so they agree with master on the root tip.
-//
-// TODO(master): Integrate this query into root construction. Serialize root
-// delivery, header collection and root construction to keep the candidate parent
-// fixed and each shard's root tip aligned with it.
 func (c *ShardChain) GetUnconfirmedHeaderList() ([]*types.Header, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
