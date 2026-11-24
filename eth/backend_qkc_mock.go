@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package shard
+package eth
 
 import (
 	"context"
@@ -22,26 +22,45 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/holiman/uint256"
 )
 
-// MockClusterClient only logs delivery calls; it neither opens connections nor
-// initializes the shard. Replace it when the real SlaveService is integrated.
+// mockClusterClient logs delivery calls for standalone tools and tests. It
+// neither opens connections nor initializes the shard.
 // TODO(mock): Add mock xshard deposits and root blocks here, forwarding them to
 // Shard.AddXshardTxList and Shard.Init/AddRootBlock through the bound reference.
-type MockClusterClient struct {
-	Shard *Shard // Bound by Ethereum before any requests are handled.
+type mockClusterClient struct {
+	Shard *shard.Shard // Bound by Start before any requests are handled.
 }
 
-var _ ClusterClient = (*MockClusterClient)(nil)
+var _ clusterClient = (*mockClusterClient)(nil)
 
-func (*MockClusterClient) BroadcastXShardTxList(_ context.Context, chainID *big.Int, hash common.Hash, deposits []*types.DepositTx) error {
+func (c *mockClusterClient) Start(backend slavenet.ShardBackend) error {
+	c.Shard, _ = backend.(*shard.Shard)
+	return nil
+}
+
+func (*mockClusterClient) Stop() error { return nil }
+
+func (*mockClusterClient) BroadcastXShardTxList(_ context.Context, chainID *big.Int, hash common.Hash, deposits []*types.DepositTx) error {
 	log.Info("Mock cross-shard delivery", "chain", chainID, "block", hash, "deposits", len(deposits))
 	return nil
 }
 
-func (*MockClusterClient) SendShardBlockHeaderToMaster(_ context.Context, header *types.Header, amount *uint256.Int) error {
+func (*mockClusterClient) SendShardBlockHeaderToMaster(_ context.Context, header *types.Header, amount *uint256.Int) error {
 	log.Info("Mock shard header report", "block", header.Hash(), "coinbaseAmount", amount)
 	return nil
+}
+
+// NewQKCBackendWithMockClient creates a backend for standalone tools and tests,
+// using a mock cluster client for QKC chains and the ordinary backend otherwise.
+func NewQKCBackendWithMockClient(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+	return newBackend(stack, config, func(slavenet.ServiceConfig) (clusterClient, error) {
+		return &mockClusterClient{}, nil
+	})
 }

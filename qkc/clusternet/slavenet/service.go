@@ -36,11 +36,9 @@ import (
 // ShardBackend supplies concurrent-safe business operations borrowed by Service.
 // Init errors close the master connection. Other methods may return
 // *clusternet.RemoteError as a protocol rejection; all other errors close the connection.
+// Initialization must finish before mining and block imports.
 type ShardBackend interface {
-	// The owner observes successful initialization through the backend before
-	// starting local business activity.
 	Init(*qkctypes.RootBlock) error
-	// The result reports whether the root became the tip; Service ignores it.
 	AddRootBlock(*qkctypes.RootBlock) (bool, error)
 	GetRootChainStakes(common.Address, common.Hash) (*uint256.Int, common.Address, error)
 	GetUnconfirmedHeaderList() ([]*types.Header, error)

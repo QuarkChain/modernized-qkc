@@ -495,6 +495,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 // while c.rootTip remains nil until both the shard head and root writes succeed.
 func (c *ShardChain) insertRootBlock(root *qkctypes.RootBlock, rootTip *qkctypes.RootBlockHeader) (bool, error) {
 	if rootTip == nil {
+		log.Error("Cannot import root block before shard initialization", "chain", c.chain.Config().ChainID, "err", ErrRootChainUninitialized)
 		return false, ErrRootChainUninitialized
 	}
 	// Step 1: known roots still participate in fork choice when replayed above a
@@ -506,6 +507,7 @@ func (c *ShardChain) insertRootBlock(root *qkctypes.RootBlock, rootTip *qkctypes
 	// Step 2: validate the root and find its latest confirmed shard block.
 	confirmed, err := c.validateRootBlock(root)
 	if err != nil {
+		log.Error("Failed to validate root block", "chain", c.chain.Config().ChainID, "root", root.Hash(), "number", root.Number(), "parent", root.ParentHash(), "rootTip", rootTip.Hash(), "err", err)
 		return false, err
 	}
 	// Step 3: reconcile the shard head before storing the root.
