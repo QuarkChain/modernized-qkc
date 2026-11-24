@@ -22,7 +22,7 @@ import (
 	"math/big"
 	"net"
 
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // ClusterSerializers returns an independent request/response registry shared by

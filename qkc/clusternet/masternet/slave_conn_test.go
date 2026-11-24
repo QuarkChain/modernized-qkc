@@ -14,8 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
 	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
