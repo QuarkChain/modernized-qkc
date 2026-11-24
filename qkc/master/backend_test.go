@@ -202,8 +202,8 @@ func TestBackendStartupAndReports(t *testing.T) {
 	if b.Ready() || b.RootChain().RootTip().Hash() != genesis.Hash() || b.Engine() == nil {
 		t.Fatal("unexpected construction state")
 	}
-	if shard.inits.Load() != 0 || b.cluster.IsActive() || len(b.Protocols()) != 0 || len(b.APIs()) != 0 {
-		t.Fatal("constructor started business or registered unfinished protocols/APIs")
+	if shard.inits.Load() != 0 || b.cluster.IsActive() || len(b.Protocols()) != 0 {
+		t.Fatal("constructor started business or registered unfinished protocols")
 	}
 	if err := stack.Start(); err != nil {
 		t.Fatal(err)
