@@ -34,7 +34,7 @@ import (
 )
 
 // MasterBackend supplies concurrent-safe business operations borrowed by Service.
-// Business rejections use *clusternet.RemoteError; other handler errors close the connection.
+// Business rejections use *wire.RemoteError; other handler errors close the connection.
 type MasterBackend interface {
 	AddShardBlockHeader(sourceChainID *big.Int, header *types.Header, coinbaseAmount *uint256.Int) error
 }

@@ -30,9 +30,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/net/clusternet/conn"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet/masternet"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )

@@ -29,8 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/net/clusternet/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
@@ -40,7 +39,7 @@ import (
 // implemented by the business layer. Implementations must be safe for
 // concurrent calls.
 //
-// A *clusternet.RemoteError reports a business rejection. Other errors signal a
+// A *wire.RemoteError reports a business rejection. Other errors signal a
 // handler failure and close the connection via BaseConn.
 type XshardRequestHandler interface {
 	AddXshardTxList(shardBlockHash common.Hash, deposits []*types.DepositTx) error
@@ -107,7 +106,7 @@ func (x *XshardConn) RemoteChainID() *big.Int {
 }
 
 // SendAddXshardTxList sends deposits from one source block to the remote slave.
-// A nonzero ErrorCode is returned as *clusternet.RemoteError; transport and context
+// A nonzero ErrorCode is returned as *wire.RemoteError; transport and context
 // errors are returned unchanged.
 func (x *XshardConn) SendAddXshardTxList(ctx context.Context, shardBlockHash common.Hash, deposits []*types.DepositTx) error {
 	if x.remoteChainID == nil {
@@ -135,7 +134,7 @@ func (x *XshardConn) SendAddXshardTxList(ctx context.Context, shardBlockHash com
 		return fmt.Errorf("unexpected response %T", resp)
 	}
 	if r.ErrorCode != 0 {
-		return &clusternet.RemoteError{Code: r.ErrorCode}
+		return &wire.RemoteError{Code: r.ErrorCode}
 	}
 
 	return nil

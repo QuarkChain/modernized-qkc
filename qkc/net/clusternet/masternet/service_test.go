@@ -34,8 +34,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/net/clusternet/conn"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -278,17 +278,17 @@ func TestServiceBusinessRejection(t *testing.T) {
 	cfg.Shutdown = func() { calls.Add(1) }
 	s := newServiceForTest(t, cfg)
 	backend := &serviceBackend{report: func(*big.Int, *types.Header, *uint256.Int) error {
-		return &clusternet.RemoteError{Code: 7}
+		return &wire.RemoteError{Code: 7}
 	}}
 	if err := startAndWait(t, s, backend); err != nil {
 		t.Fatal(err)
 	}
 	ctx := slaveTestContext(t)
 	shards[0].mu.Lock()
-	shards[0].rootErr = &clusternet.RemoteError{Code: 9}
-	shards[0].headersErr = &clusternet.RemoteError{Code: 8}
+	shards[0].rootErr = &wire.RemoteError{Code: 9}
+	shards[0].headersErr = &wire.RemoteError{Code: 8}
 	shards[0].mu.Unlock()
-	var remoteErr *clusternet.RemoteError
+	var remoteErr *wire.RemoteError
 	if err := s.BroadcastRootBlock(ctx, testRoot(2)); !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
 		t.Fatalf("broadcast rejection: %v", err)
 	}

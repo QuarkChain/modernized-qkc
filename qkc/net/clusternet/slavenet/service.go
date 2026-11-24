@@ -35,7 +35,7 @@ import (
 
 // ShardBackend supplies concurrent-safe business operations borrowed by Service.
 // Init errors close the master connection. Other methods may return
-// *clusternet.RemoteError as a protocol rejection; all other errors close the connection.
+// *wire.RemoteError as a protocol rejection; all other errors close the connection.
 // Initialization must finish before mining and block imports.
 type ShardBackend interface {
 	Init(*qkctypes.RootBlock) error
