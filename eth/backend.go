@@ -20,10 +20,13 @@ package eth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"net"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -60,6 +63,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/dnsdisc"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -90,6 +94,15 @@ const (
 // Deprecated: use ethconfig.Config instead.
 type Config = ethconfig.Config
 
+// clusterClient combines shard delivery with the lifecycle owned by Ethereum.
+type clusterClient interface {
+	shard.ClusterClient
+	// Start binds the backend and starts communication without waiting for Init.
+	Start(slavenet.ShardBackend) error
+	// Stop closes connections and drains handlers before shard resources close.
+	Stop() error
+}
+
 // Ethereum implements the Ethereum full node service.
 type Ethereum struct {
 	// core protocol objects
@@ -102,7 +115,7 @@ type Ethereum struct {
 
 	shard         *shard.Shard
 	powMiner      *shard.PoWMiner
-	clusterClient shard.ClusterClient
+	clusterClient clusterClient
 
 	miningRPCs       sync.WaitGroup
 	miningRPCStopped bool // protected by lock
@@ -145,6 +158,14 @@ type Ethereum struct {
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
 // whose lifecycle will be managed by the provided node.
 func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+	return newBackend(stack, config, func(cfg slavenet.ServiceConfig) (clusterClient, error) {
+		return slavenet.NewService(cfg)
+	})
+}
+
+// newBackend selects the cluster client before binding it to the shard. The
+// factory is used only for QKC chains, including those loaded from the database.
+func newBackend(stack *node.Node, config *ethconfig.Config, newClient func(slavenet.ServiceConfig) (clusterClient, error)) (*Ethereum, error) {
 	// Ensure configuration values are compatible and sane
 	if !config.SyncMode.IsValid() {
 		return nil, fmt.Errorf("invalid sync mode %d", config.SyncMode)
@@ -394,15 +415,33 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// Only QKC chains use root/shard coordination. Non-QKC configurations remain
 	// usable by the original geth tests without attaching shard-only validation.
 	if eth.isQKC() {
-		// TODO(SlaveService): Replace the mock with a real ClusterClient implementation.
-		client := &shard.MockClusterClient{}
-		eth.clusterClient = client
+		// Leave a missing host empty so NewService rejects it instead of
+		// accepting a wildcard listener address.
+		var listenAddr string
+		if stack.Config().PrivateHost != "" {
+			listenAddr = net.JoinHostPort(stack.Config().PrivateHost, strconv.Itoa(stack.Config().PrivatePort))
+		}
+		eth.clusterClient, err = newClient(slavenet.ServiceConfig{
+			ListenAddr: listenAddr, LocalChainID: chainConfig.ChainID,
+			ConfiguredChainIDs: chainConfig.QuarkChain.ChainIDs,
+			// Closing the node stops this service and drains its handlers. Never
+			// wait for that from a handler or a connection-failure callback.
+			Shutdown: func() {
+				go func() {
+					if err := stack.Close(); err != nil && !errors.Is(err, node.ErrNodeStopped) {
+						log.Error("Failed to shut down shard node", "err", err)
+					}
+				}()
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create slave service: %w", err)
+		}
 		shardChain := shard.NewShardChain(chainDb, eth.blockchain, eth.miner)
 		eth.shard, err = shard.New(shardChain, eth.clusterClient)
 		if err != nil {
 			return nil, err
 		}
-		client.Shard = eth.shard
 		eth.powMiner = shard.NewPoWMiner(eth.shard, shard.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
 	}
 
@@ -543,6 +582,12 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+	if s.isQKC() {
+		if err := s.clusterClient.Start(s.shard); err != nil {
+			// Node does not call Stop on a lifecycle whose Start failed.
+			return errors.Join(fmt.Errorf("start slave service: %w", err), s.Stop())
+		}
+	}
 	return nil
 }
 
@@ -661,12 +706,11 @@ func (s *Ethereum) Stop() error {
 		s.lock.Lock()
 		s.miningRPCStopped = true
 		s.lock.Unlock()
+		// Closing connections releases pending delivery RPCs before we wait
+		// for mining or handlers. Their shared chain and DB remain available.
+		s.clusterClient.Stop()
 		s.miningRPCs.Wait()
 	}
-	// TODO(SlaveService): When replacing the QKC mock, update this shutdown order
-	// with the service integration: reject new requests, cancel and wait for
-	// request handlers and mining, then close cluster connections before the
-	// chain resources and database below.
 	s.discmix.Close()
 	if !s.isQKC() {
 		s.dropper.Stop()
