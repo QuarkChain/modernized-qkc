@@ -40,6 +40,8 @@ const rootDatabaseName = "rootchaindata"
 // Chain must match the existing root database and remain immutable after New,
 // as must Cluster's endpoint slices and chain IDs. Backend supplies Cluster's
 // ConfiguredChainIDs and Shutdown from Chain and its own lifecycle respectively.
+//
+// TODO(config): Update Config once the configuration is finalized.
 type Config struct {
 	Chain    *params.QuarkChainConfig
 	Cluster  masternet.ServiceConfig
@@ -121,6 +123,7 @@ func New(stack *node.Node, cfg *Config) (_ *Backend, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// TODO(genesis): Call SetupRootGenesisBlock here once it is checked in.
 	b.chain, err = root.New(ctx, cfg.Chain, b.cluster, b.db, b.engine)
 	if err != nil {
 		return nil, fmt.Errorf("recover root chain (initialized root database required): %w", err)
