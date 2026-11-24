@@ -2,9 +2,11 @@
 [Node]
 DataDir = "./qkc-data/master"
 PrivateHost = "127.0.0.1"
-PrivatePort = 38491
+PrivatePort = 18491
 IPCPath = "qkc-master.ipc"
 CoinbaseAddress = "0x1111111111111111111111111111111111111111"
+HTTPHost = "127.0.0.1"
+HTTPPort = 18391
 
 [Node.P2P]
 ListenAddr = ":30303"

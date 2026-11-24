@@ -60,10 +60,10 @@ func TestLoadRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Node.PrivateHost != "127.0.0.1" || cfg.Node.PrivatePort != 38491 {
+	if cfg.Node.PrivateHost != "127.0.0.1" || cfg.Node.PrivatePort != 18491 {
 		t.Fatalf("unexpected root private JSON-RPC endpoint %s:%d", cfg.Node.PrivateHost, cfg.Node.PrivatePort)
 	}
-	if endpoint := cfg.Node.HTTPEndpoint(); endpoint != "" {
+	if endpoint := cfg.Node.HTTPEndpoint(); endpoint != "127.0.0.1:18391" {
 		t.Fatalf("unexpected root HTTP endpoint %q", endpoint)
 	}
 	if cfg.NetworkID != 2 || cfg.Node.CoinbaseAddress == (common.Address{}) || cfg.Genesis.Coinbase != (common.Address{}) {
@@ -99,7 +99,7 @@ func TestLoadRootPrivateEndpoint(t *testing.T) {
 	for _, host := range []string{"0.0.0.0", "::", ""} {
 		path := writeRootDeployment(t, "root.toml", func(s string) string {
 			if host == "" {
-				return strings.Replace(s, "PrivateHost = \"127.0.0.1\"\nPrivatePort = 38491\n", "", 1)
+				return strings.Replace(s, "PrivateHost = \"127.0.0.1\"\nPrivatePort = 18491\n", "", 1)
 			}
 			return strings.Replace(s, "PrivateHost = \"127.0.0.1\"", "PrivateHost = "+strconv.Quote(host), 1)
 		})
@@ -118,9 +118,9 @@ func TestInvalidRootDeployment(t *testing.T) {
 	}{
 		{"zero root network", root, "NetworkID = 2", "NetworkID = 0", "NetworkID must be positive"},
 		{"invalid root private host", root, `PrivateHost = "127.0.0.1"`, `PrivateHost = "a b"`, "root private endpoint: PrivateHost"},
-		{"invalid root private RPC port", root, "PrivatePort = 38491", "PrivatePort = 65536", "root private endpoint: PrivatePort"},
-		{"missing root private RPC port", root, "PrivatePort = 38491", "", "root private endpoint: PrivatePort"},
-		{"duplicate root and shard endpoint", root, "PrivatePort = 38491", "PrivatePort = 38000", "duplicate private endpoint 127.0.0.1:38000"},
+		{"invalid root private RPC port", root, "PrivatePort = 18491", "PrivatePort = 65536", "root private endpoint: PrivatePort"},
+		{"missing root private RPC port", root, "PrivatePort = 18491", "", "root private endpoint: PrivatePort"},
+		{"duplicate root and shard endpoint", root, "PrivatePort = 18491", "PrivatePort = 38000", "duplicate private endpoint 127.0.0.1:38000"},
 		{"missing shard file", root, shard, "missing.toml", "missing.toml"},
 		{"missing member", root, `, "shard-100002.toml"`, "", "missing shard config for chain ID 100002"},
 		{"duplicate member", root, shard, "shard-100001.toml", "duplicate shard chain ID"},
