@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -71,7 +72,21 @@ func New(chain *ShardChain, client ClusterClient) (*Shard, error) {
 // parent, then import the supplied root. Missing required recovery data returns
 // an error; master does not rewind its persisted tip.
 func (s *Shard) Init(root *qkctypes.RootBlock) error {
-	return s.chain.Init(root)
+	err := s.chain.Init(root)
+	if errors.Is(err, ErrRootChainAlreadyInitialized) && root != nil && root.Hash() == s.RootTip() {
+		// Acknowledge repeated PINGs only when master agrees with the current
+		// root tip, without resetting the shard's checkpoint.
+		log.Warn("Shard already initialized; acknowledging repeated PING")
+		return nil
+	}
+	if err != nil {
+		var rootHash common.Hash
+		if root != nil {
+			rootHash = root.Hash()
+		}
+		log.Error("Failed to initialize shard", "chain", s.chain.chain.Config().ChainID, "root", rootHash, "err", err)
+	}
+	return err
 }
 
 // CreateBlockToMine builds an unsealed candidate on the shard head, paying
@@ -204,18 +219,22 @@ func (s *Shard) AddShardBlock(ctx context.Context, block *types.Block) error {
 	// traffic into cross-shard broadcasts and master reports.
 	committed, err := rawdb.IsShardBlockCommitted(s.chain.db, block.Hash())
 	if err != nil {
+		log.Error("Failed to read shard block commit marker", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
 		return fmt.Errorf("read block %x commit marker: %w", block.Hash(), err)
 	}
 	if committed {
 		return nil
 	}
 	if err := s.chain.InsertShardBlock(block); err != nil {
+		// Log import failures here; ShardChain only returns errors to avoid duplicate logs.
+		log.Error("Failed to import shard block", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "number", block.NumberU64(), "err", err)
 		return err
 	}
 	// Resolve local reporting data before sending RPCs, so calculation failures
 	// do not repeat cross-shard delivery on every retry.
 	coinbaseAmount, err := s.chain.chain.GetCoinbaseAmount(block.Hash())
 	if err != nil {
+		log.Error("Failed to calculate shard block coinbase amount", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
 		return err
 	}
 	// Genesis follows a separate bootstrap path:
@@ -228,12 +247,19 @@ func (s *Shard) AddShardBlock(ctx context.Context, block *types.Block) error {
 	//     state persistence. Genesis has no delivery to retry; core.Genesis.Commit
 	//     persists it separately, and InsertShardBlock rejects height zero.
 	if err := s.BroadcastXShardTxList(ctx, block.Hash()); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			log.Error("Failed to broadcast cross-shard deposits", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
+		}
 		return err
 	}
 	if err := s.clusterClient.SendShardBlockHeaderToMaster(ctx, block.Header(), coinbaseAmount); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			log.Error("Failed to report shard block to master", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
+		}
 		return fmt.Errorf("report block %x to master: %w", block.Hash(), err)
 	}
 	if err := rawdb.WriteShardBlockCommit(s.chain.db, block.Hash()); err != nil {
+		log.Error("Failed to commit shard block delivery", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
 		return fmt.Errorf("commit block %x delivery: %w", block.Hash(), err)
 	}
 	return nil
@@ -267,6 +293,7 @@ func (s *Shard) GetRootChainStakes(address common.Address, shardBlockHash common
 // The remote shard validates the list; repeated deliveries overwrite the same key.
 func (s *Shard) AddXshardTxList(shardBlockHash common.Hash, deposits []*types.DepositTx) error {
 	if err := rawdb.WriteXShardDepositsWithError(s.chain.db, shardBlockHash, deposits); err != nil {
+		log.Error("Failed to store cross-shard deposits", "chain", s.chain.chain.Config().ChainID, "block", shardBlockHash, "deposits", len(deposits), "err", err)
 		return fmt.Errorf("store block %x cross-shard deposits: %w", shardBlockHash, err)
 	}
 	return nil

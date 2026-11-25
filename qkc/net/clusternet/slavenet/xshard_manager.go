@@ -26,8 +26,8 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
 )
 
 // XshardConnManager manages the local slave's cross-shard connections to other slaves,

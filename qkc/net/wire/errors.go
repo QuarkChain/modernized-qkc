@@ -14,9 +14,15 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package clusternet
+package wire
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrInvalidClusterFrame identifies a frame rejected before any bytes are written.
+var ErrInvalidClusterFrame = errors.New("invalid cluster frame")
 
 // RemoteError reports a nonzero business error code returned by a remote peer.
 // Callers receive it as an error so that a rejected request is never mistaken
@@ -28,4 +34,17 @@ type RemoteError struct {
 
 func (e *RemoteError) Error() string {
 	return fmt.Sprintf("remote error code 0x%x", e.Code)
+}
+
+// ErrorCode converts a business rejection to its wire ErrorCode. Other errors
+// are returned unchanged for the connection layer to treat as handler failures.
+func ErrorCode(err error) (uint32, error) {
+	if err == nil {
+		return 0, nil
+	}
+	var remoteErr *RemoteError
+	if errors.As(err, &remoteErr) {
+		return remoteErr.Code, nil
+	}
+	return 0, err
 }
