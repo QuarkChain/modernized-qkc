@@ -11,10 +11,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
@@ -150,7 +150,7 @@ func TestSlaveConnRPC(t *testing.T) {
 			}
 			source.SetInt64(0)
 			receivedHeader <- header
-			return &clusternet.RemoteError{Code: 9}
+			return &wire.RemoteError{Code: 9}
 		}}})
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +206,7 @@ func TestSlaveConnRPC(t *testing.T) {
 		t.Fatal("incorrect unconfirmed headers")
 	}
 	err = mc.SendAddShardBlockHeader(ctx, testHeader(), uint256.NewInt(0x10203))
-	var remoteErr *clusternet.RemoteError
+	var remoteErr *wire.RemoteError
 	if !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
 		t.Fatalf("expected rejection 9, got %v", err)
 	}
@@ -302,7 +302,7 @@ func TestSlaveConnRemoteErrorsKeepConnection(t *testing.T) {
 					t.Fatal("business failure returned a success response")
 				}
 			}
-			var remoteErr *clusternet.RemoteError
+			var remoteErr *wire.RemoteError
 			if !errors.As(err, &remoteErr) || remoteErr.Code != code {
 				t.Fatalf("expected remote error code %d, got %v", code, err)
 			}

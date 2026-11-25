@@ -35,7 +35,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	"github.com/holiman/uint256"
 )
 

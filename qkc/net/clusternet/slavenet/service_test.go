@@ -35,9 +35,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -152,7 +152,7 @@ func initializeService(t *testing.T, remote *conn.BaseConn) []byte {
 }
 
 func TestServiceClusterRoundTrip(t *testing.T) {
-	aBackend := &serviceBackend{rootErr: &clusternet.RemoteError{Code: 9}}
+	aBackend := &serviceBackend{rootErr: &wire.RemoteError{Code: 9}}
 	bBackend := &serviceBackend{deposits: make(chan common.Hash, 1)}
 	shutdown := make(chan struct{})
 	a, b := newTestService(t, 1, aBackend, func() { close(shutdown) }), newTestService(t, 2, bBackend, noopShutdown)
@@ -194,7 +194,7 @@ func TestServiceClusterRoundTrip(t *testing.T) {
 	}
 
 	err := a.SendShardBlockHeaderToMaster(ctx, &types.Header{Number: big.NewInt(1), Difficulty: big.NewInt(1)}, uint256.NewInt(7))
-	var remoteErr *clusternet.RemoteError
+	var remoteErr *wire.RemoteError
 	if !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
 		t.Fatalf("master rejection lost: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestServiceStartListenFailure(t *testing.T) {
 }
 
 func TestServiceInitializationErrorClosesConnection(t *testing.T) {
-	for _, initErr := range []error{errors.New("checkpoint unavailable"), &clusternet.RemoteError{Code: 9}} {
+	for _, initErr := range []error{errors.New("checkpoint unavailable"), &wire.RemoteError{Code: 9}} {
 		t.Run(initErr.Error(), func(t *testing.T) {
 			backend := &serviceBackend{initErr: initErr}
 			shutdown := make(chan struct{}, 1)
@@ -725,7 +725,7 @@ func TestServiceWithShard(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var remoteErr *clusternet.RemoteError
+	var remoteErr *wire.RemoteError
 	if err := s.SendShardBlockHeaderToMaster(ctx, backend.CurrentBlock(), nil); !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
 		t.Fatalf("real shard header report: %v", err)
 	}

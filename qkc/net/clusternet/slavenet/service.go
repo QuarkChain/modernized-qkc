@@ -28,14 +28,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
 
 // ShardBackend supplies concurrent-safe business operations borrowed by Service.
 // Init errors close the master connection. Other methods may return
-// *clusternet.RemoteError as a protocol rejection; all other errors close the connection.
+// *wire.RemoteError as a protocol rejection; all other errors close the connection.
 // Initialization must finish before mining and block imports.
 type ShardBackend interface {
 	Init(*qkctypes.RootBlock) error
