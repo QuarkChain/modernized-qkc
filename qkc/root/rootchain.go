@@ -46,10 +46,11 @@ const (
 )
 
 var (
-	ErrRootDataMissing = errors.New("missing root chain data")
-	ErrNotImplemented  = errors.New("root chain: function not implemented")
-	errChainStopped    = errors.New("root chain is stopped")
-	errChainNotReady   = errors.New("root chain is not initialized")
+	ErrRootDataMissing     = errors.New("missing root chain data")
+	ErrNotImplemented      = errors.New("root chain: function not implemented")
+	errChainNotInitialized = errors.New("root chain is not initialized")
+	errChainStopped        = errors.New("root chain is stopped")
+	errChainNotReady       = errors.New("root chain is not ready")
 )
 
 // RootChain manages root-chain data and recovery using a caller-provided database,
@@ -65,6 +66,7 @@ type RootChain struct {
 	client     ClusterClient
 	db         ethdb.Database
 	engine     posw.RootEngine
+	builder    *RootBlockBuilder
 
 	// Blocks are immutable and keyed by hash, so side branches share this cache.
 	blockCache *lru.Cache[common.Hash, *types.RootBlock]
@@ -122,6 +124,10 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 		blockCache: lru.NewCache[common.Hash, *types.RootBlock](blockCacheLimit),
 	}
 	if err := c.checkConfirmations(tip); err != nil {
+		return nil, err
+	}
+	c.builder, err = NewRootBlockBuilder(config, c, engine, client)
+	if err != nil {
 		return nil, err
 	}
 	c.blockCache.Add(hash, tip)
@@ -244,7 +250,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 		return err
 	}
 	if !c.initialized.Load() {
-		return errChainNotReady
+		return errChainNotInitialized
 	}
 	// Reject stale blocks before loading, verifying or broadcasting them, even
 	// if already stored. Compare heights first to avoid unsigned underflow.
@@ -418,6 +424,25 @@ func (c *RootChain) Ready() bool {
 // The returned header is read-only; callers must copy it before modification.
 func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
+}
+
+// CreateBlockToMine builds an unsigned, unsealed candidate on the initialized root tip.
+// Parent selection waits for in-flight chain writes, including root delivery.
+// TODO(sync): Skip candidate construction while the root synchronizer is running.
+func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.RootBlock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	parent, err := c.GetRootTipWithLock()
+	if err != nil || !c.Ready() {
+		return nil, errChainNotReady
+	}
+	// A pending shard RPC must stop on either request cancellation or shutdown.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(c.backendCtx, cancel)
+	defer stop()
+	return c.builder.BuildBlock(ctx, RootBlockArgs{Parent: parent, Coinbase: coinbase})
 }
 
 // GetRootTipWithLock waits for chain writes, including Init and root delivery,
