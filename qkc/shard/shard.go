@@ -30,13 +30,14 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
 )
 
-var _ MinerBackend = (*Shard)(nil)
+var _ mining.MinerBackend = (*Shard)(nil)
 
 // Shard imports blocks, sends cross-shard lists and reports headers to master.
 // ShardChain handles chain rules, root confirmations, and head selection.

@@ -28,13 +28,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
 
 // MasterBackend supplies concurrent-safe business operations borrowed by Service.
-// Business rejections use *clusternet.RemoteError; other handler errors close the connection.
+// Business rejections use *wire.RemoteError; other handler errors close the connection.
 type MasterBackend interface {
 	AddShardBlockHeader(sourceChainID *big.Int, header *types.Header, coinbaseAmount *uint256.Int) error
 }

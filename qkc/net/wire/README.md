@@ -17,7 +17,7 @@ hand.
 4. From the repository root, generate the SSZ codecs:
 
    ```sh
-   go generate ./qkc/clusternet/wire
+   go generate ./qkc/net/wire
    ```
 
    This generates `messages_ssz.go` using methodical-ssz and formats
@@ -25,10 +25,10 @@ hand.
    Every struct declared in `messages.go` is included in generation.
 
 5. Add registry, SSZ round-trip, malformed-input, and golden-encoding cases to
-   `messages_test.go`, then run `go test ./qkc/clusternet/wire`.
+   `messages_test.go`, then run `go test ./qkc/net/wire`.
 6. Commit `messages_ssz.go` together with the schema and test changes.
 
-Run `go generate ./qkc/clusternet/wire` after changing `messages.go`. `go run build/ci.go check_generate` reports a stale
+Run `go generate ./qkc/net/wire` after changing `messages.go`. `go run build/ci.go check_generate` reports a stale
 `messages_ssz.go`.
 
 ## Field rules

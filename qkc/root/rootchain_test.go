@@ -31,7 +31,8 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -931,7 +932,7 @@ func TestRootChainStakeQuery(t *testing.T) {
 	if !errors.Is(rpcCtx.Err(), context.Canceled) {
 		t.Fatal("stake query context leaked after returning")
 	}
-	failure := &clusternet.RemoteError{Code: 7}
+	failure := &wire.RemoteError{Code: 7}
 	for _, stage := range []string{"zero", "missing response", "missing stakes", "rpc error"} {
 		f.client.onStakes = func(context.Context, *big.Int, common.Address, common.Hash) (*clusternet.RootChainStakesResult, error) {
 			switch stage {
@@ -954,7 +955,7 @@ func TestRootChainStakeQuery(t *testing.T) {
 			t.Fatal("missing or failed stake response accepted", stage, amount, err)
 		}
 		if stage == "rpc error" {
-			var remote *clusternet.RemoteError
+			var remote *wire.RemoteError
 			if !errors.As(err, &remote) || remote.Code != failure.Code {
 				t.Fatal("remote error code lost after wrapping", err)
 			}
