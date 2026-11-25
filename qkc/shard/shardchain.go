@@ -294,9 +294,10 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	if block.NumberU64() == 0 {
 		return consensus.ErrInvalidNumber
 	}
-
-	// TODO 1. check chain id here 2. check future block in engine.VerifyBlockHeader
-
+	rootTip := c.rootTip
+	if rootTip == nil {
+		return ErrRootChainUninitialized
+	}
 	if c.chain.HasBlock(block.Hash(), block.NumberU64()) {
 		// A previous import may have stored the block but failed in SetCanonical.
 		// The root reference was checked before storage. Retrying the head update
@@ -304,10 +305,6 @@ func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 		// root tip, and call SetCanonical if selected. This rare case is not
 		// handled here yet.
 		return nil
-	}
-	rootTip := c.rootTip
-	if rootTip == nil {
-		return ErrRootChainUninitialized
 	}
 	parent := c.chain.GetHeader(block.ParentHash(), block.NumberU64()-1)
 	if parent == nil {
