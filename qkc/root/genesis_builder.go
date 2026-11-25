@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -74,7 +75,8 @@ func ValidateShardGenesis(shard *core.Genesis, rules *params.QuarkChainConfig) e
 	return nil
 }
 
-// BuildRootGenesis derives R0 offline from shard geneses in ChainIDs order.
+// BuildRootGenesis takes shard geneses in configured ChainIDs order and includes
+// their headers in R0 in ascending numeric chain ID order.
 func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.RootBlock, error) {
 	if err := seed.Validate(); err != nil {
 		return nil, err
@@ -83,7 +85,6 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 	if len(shards) != len(rules.ChainIDs) {
 		return nil, errors.New("shard genesis count differs from configured chain IDs")
 	}
-	headers := make(qkctypes.ShardBlockHeaders, len(shards))
 	for i, shard := range shards {
 		id := rules.ChainIDs[i]
 		if err := ValidateShardGenesis(shard, rules); err != nil {
@@ -95,9 +96,16 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 		if shard.Timestamp > seed.Timestamp {
 			return nil, fmt.Errorf("shard %s genesis timestamp %d is later than root genesis timestamp %d", id, shard.Timestamp, seed.Timestamp)
 		}
+	}
+	sorted := slices.Clone(shards)
+	slices.SortFunc(sorted, func(a, b *core.Genesis) int {
+		return a.Config.ChainID.Cmp(b.Config.ChainID)
+	})
+	headers := make(qkctypes.ShardBlockHeaders, len(sorted))
+	for i, shard := range sorted {
 		header := shard.ToBlock().Header()
 		if err := header.SanityCheckQKC(); err != nil {
-			return nil, fmt.Errorf("shard %s genesis: %w", id, err)
+			return nil, fmt.Errorf("shard %s genesis: %w", shard.Config.ChainID, err)
 		}
 		headers[i] = header
 	}
