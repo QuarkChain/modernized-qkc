@@ -92,6 +92,9 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 		if shard.Config.ChainID.Cmp(id) != 0 {
 			return nil, fmt.Errorf("expected shard genesis for chain %s at index %d, got chain %s", id, i, shard.Config.ChainID)
 		}
+		if shard.Timestamp > seed.Timestamp {
+			return nil, fmt.Errorf("shard %s genesis timestamp %d is later than root genesis timestamp %d", id, shard.Timestamp, seed.Timestamp)
+		}
 		header := shard.ToBlock().Header()
 		if err := header.SanityCheckQKC(); err != nil {
 			return nil, fmt.Errorf("shard %s genesis: %w", id, err)
