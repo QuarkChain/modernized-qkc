@@ -17,8 +17,8 @@ build/bin/geth --config qkc/config/devnet/shard-100002.toml
 
 | Configuration | Chain ID | HTTP endpoint | Data directory |
 | --- | --- | --- | --- |
-| [shard-100001.toml](devnet/shard-100001.toml) | 100001 | `127.0.0.1:18545` | `./qkc-data/shard-100001` |
-| [shard-100002.toml](devnet/shard-100002.toml) | 100002 | `127.0.0.1:18546` | `./qkc-data/shard-100002` |
+| [shard-100001.toml](devnet/shard-100001.toml) | 100001 | `127.0.0.1:18545` | `./qkc-data/devnet/shard-100001` |
+| [shard-100002.toml](devnet/shard-100002.toml) | 100002 | `127.0.0.1:18546` | `./qkc-data/devnet/shard-100002` |
 
 Each shard also has its own IPC filename. Runtime data under `qkc-data/` is ignored
 by Git. With this binary on `PATH`, a configuration copied to `shard.toml` starts with
