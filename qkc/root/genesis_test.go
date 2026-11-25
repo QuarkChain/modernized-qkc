@@ -33,9 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-func newRootGenesisEnv(t *testing.T) (*rootEnv, *RootGenesis, []*core.Genesis) {
-	t.Helper()
-	chainIDs := []int64{10001, 10002}
+func newRootGenesisInputs(chainIDs ...int64) (*RootGenesis, []*core.Genesis) {
 	config := params.NewTestQuarkChainConfig(chainIDs[0], chainIDs...).QuarkChain
 	config.ConsensusType = params.ConsensusEthash
 	seed := &RootGenesis{Config: config, Timestamp: 1, Difficulty: big.NewInt(100)}
@@ -54,6 +52,13 @@ func newRootGenesisEnv(t *testing.T) (*rootEnv, *RootGenesis, []*core.Genesis) {
 			}).Encode(),
 		})
 	}
+	return seed, shards
+}
+
+func newRootGenesisEnv(t *testing.T) (*rootEnv, *RootGenesis, []*core.Genesis) {
+	t.Helper()
+	seed, shards := newRootGenesisInputs(10001, 10002)
+	config := seed.Config
 	db := &rootDB{Database: rawdb.NewMemoryDatabase()}
 	t.Cleanup(func() { db.Close() })
 	_, hash, err := SetupRootGenesisBlock(db, seed, shards)
@@ -64,7 +69,7 @@ func newRootGenesisEnv(t *testing.T) (*rootEnv, *RootGenesis, []*core.Genesis) {
 	if genesis == nil {
 		t.Fatal("missing initialized genesis block")
 	}
-	confirmed := make(map[string]common.Hash, len(chainIDs))
+	confirmed := make(map[string]common.Hash, len(shards))
 	for i, id := range config.ChainIDs {
 		confirmed[id.String()] = genesis.ShardBlockHeaders()[i].Hash()
 	}
@@ -77,6 +82,35 @@ func newRootGenesisEnv(t *testing.T) (*rootEnv, *RootGenesis, []*core.Genesis) {
 		t: t, config: config, db: db, client: new(rootClient), engine: engine,
 		backendCtx: t.Context(), genesis: genesis, confirmed: confirmed,
 	}, seed, shards
+}
+
+func TestRootGenesisSetupChainIDOrder(t *testing.T) {
+	seed, shards := newRootGenesisInputs(10002, 10001)
+	genesis, err := BuildRootGenesis(seed, shards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+	for _, input := range []*RootGenesis{seed, nil} {
+		config, hash, err := SetupRootGenesisBlock(db, input, shards)
+		if err != nil || hash != genesis.Hash() {
+			t.Fatalf("setup returned genesis %x, want %x, error %v", hash, genesis.Hash(), err)
+		}
+		if ids := config.ChainIDs; len(ids) != 2 || ids[0].Int64() != 10002 || ids[1].Int64() != 10001 {
+			t.Fatalf("chain IDs %v, want [10002 10001]", ids)
+		}
+	}
+	confirmed, err := qkcrawdb.ReadRootConfirmedShardBlocks(db, genesis.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shard := range shards {
+		id := shard.Config.ChainID.String()
+		if got, want := confirmed[id], shard.ToBlock().Hash(); got != want {
+			t.Errorf("chain %s confirmation = %x, want %x", id, got, want)
+		}
+	}
 }
 
 func TestRootGenesisSetupPreservesAdvancedHead(t *testing.T) {

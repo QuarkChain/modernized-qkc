@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -151,8 +153,7 @@ func commitRootGenesis(db ethdb.Database, genesis *types.RootBlock, config *para
 }
 
 // genesisConfirmations derives the initial snapshot from exactly one G0 per
-// configured member. ChainIDs order determines both the root reward shard and
-// the order of headers committed by R0.
+// configured member. R0 commits shard headers in ascending numeric chain ID order.
 func genesisConfirmations(genesis *types.RootBlock, config *params.QuarkChainConfig) (map[string]common.Hash, error) {
 	h := genesis.Header()
 	if err := h.SanityCheck(); err != nil {
@@ -171,9 +172,11 @@ func genesisConfirmations(genesis *types.RootBlock, config *params.QuarkChainCon
 	if len(headers) != len(config.ChainIDs) {
 		return nil, fmt.Errorf("root genesis confirms %d shards, want %d", len(headers), len(config.ChainIDs))
 	}
+	chainIDs := slices.Clone(config.ChainIDs)
+	slices.SortFunc(chainIDs, (*big.Int).Cmp)
 	confirmed := make(map[string]common.Hash, len(headers))
 	for i, g0 := range headers {
-		id := config.ChainIDs[i]
+		id := chainIDs[i]
 		if g0 == nil || g0.Number == nil || g0.Number.Sign() != 0 || g0.ParentHash != (common.Hash{}) {
 			return nil, fmt.Errorf("expected shard genesis header for chain %s at position %d", id, i)
 		}
