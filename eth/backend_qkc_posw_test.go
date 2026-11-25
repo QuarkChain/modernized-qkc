@@ -29,13 +29,13 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
-	"github.com/ethereum/go-ethereum/qkc/shard"
 )
 
-type nonceSearchFunc func(context.Context, *shard.MiningWork) (types.BlockNonce, common.Hash, bool)
+type nonceSearchFunc func(context.Context, *mining.MiningWork) (types.BlockNonce, common.Hash, bool)
 
-func (f nonceSearchFunc) Search(ctx context.Context, work *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
+func (f nonceSearchFunc) Search(ctx context.Context, work *mining.MiningWork) (types.BlockNonce, common.Hash, bool) {
 	return f(ctx, work)
 }
 
@@ -75,7 +75,7 @@ func TestQKCBackendPoSWMining(t *testing.T) {
 		t.Logf("Initialized real Ethash PoSW: coinbase=%s WindowSize=%d StakePerBlock=10 QKC DiffDivider=%d", coinbase, staking.WindowSize, staking.DiffDivider)
 
 		fullDifficultyBig := big.NewInt(fullDifficulty)
-		search := func(ctx context.Context, work *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
+		search := func(ctx context.Context, work *mining.MiningWork) (types.BlockNonce, common.Hash, bool) {
 			// Work can be timestamped at parent.Time+1, ahead of the test clock.
 			select {
 			case <-time.After(time.Until(time.Unix(int64(work.Time), 0))):
@@ -109,8 +109,8 @@ func TestQKCBackendPoSWMining(t *testing.T) {
 			heads := make(chan core.ChainHeadEvent, 1)
 			sub := chain.SubscribeChainHeadEvent(heads)
 			defer sub.Unsubscribe()
-			works := make(chan *shard.MiningWork)
-			backend.powMiner = shard.NewPoWMiner(backend.Shard(), shard.PoWMinerConfig{Coinbase: address, Search: nonceSearchFunc(func(ctx context.Context, work *shard.MiningWork) (types.BlockNonce, common.Hash, bool) {
+			works := make(chan *mining.MiningWork)
+			backend.powMiner = mining.NewPoWMiner(backend.Shard(), mining.PoWMinerConfig{Coinbase: address, Search: nonceSearchFunc(func(ctx context.Context, work *mining.MiningWork) (types.BlockNonce, common.Hash, bool) {
 				// The test receives once, releasing exactly one search. The next search
 				// blocks here until StopLocalMining cancels it, keeping stake changes
 				// and assertions between blocks while exercising the real mining loop.
@@ -126,7 +126,7 @@ func TestQKCBackendPoSWMining(t *testing.T) {
 			if err := m.StartLocalMining(); err != nil {
 				t.Fatal(err)
 			}
-			var work *shard.MiningWork
+			var work *mining.MiningWork
 			select {
 			case work = <-works:
 			case <-time.After(time.Minute):
