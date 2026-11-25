@@ -88,7 +88,7 @@ func newFakeFrameTransport() *fakeFrameTransport {
 	}
 }
 
-func (t *fakeFrameTransport) ReadFrame() (*wire.ClusterFrame, error) {
+func (t *fakeFrameTransport) ReadFrame() (wire.Frame, error) {
 	select {
 	case frame := <-t.frames:
 		return frame, nil
@@ -97,7 +97,11 @@ func (t *fakeFrameTransport) ReadFrame() (*wire.ClusterFrame, error) {
 	}
 }
 
-func (t *fakeFrameTransport) WriteFrame(frame *wire.ClusterFrame) error {
+func (t *fakeFrameTransport) WriteFrame(value wire.Frame) error {
+	frame, ok := value.(*wire.ClusterFrame)
+	if !ok || frame == nil {
+		return fmt.Errorf("%w: expected cluster frame, got %T", wire.ErrInvalidFrame, value)
+	}
 	if t.writePanic {
 		panic("fake transport write panic")
 	}
@@ -170,11 +174,11 @@ func newStaticReaderTransport(r io.Reader) *staticReaderTransport {
 	return &staticReaderTransport{reader: r, closed: make(chan struct{})}
 }
 
-func (t *staticReaderTransport) ReadFrame() (*wire.ClusterFrame, error) {
+func (t *staticReaderTransport) ReadFrame() (wire.Frame, error) {
 	return wire.ReadClusterFrame(t.reader, wire.MaxFramePayloadLen)
 }
 
-func (t *staticReaderTransport) WriteFrame(*wire.ClusterFrame) error { return nil }
+func (t *staticReaderTransport) WriteFrame(wire.Frame) error { return nil }
 
 func (t *staticReaderTransport) Close() error {
 	t.closeOnce.Do(func() { close(t.closed) })
@@ -586,8 +590,8 @@ func TestBaseConn_ClosedConnectionDropsBufferedFrame(t *testing.T) {
 				return &wire.PongResponse{}, nil
 			},
 		},
-		Forwarder: func(f *wire.ClusterFrame) bool {
-			if f.Opcode == byte(wire.ClusterOpPing) {
+		Forwarder: func(f wire.Frame) bool {
+			if f.GetOpcode() == byte(wire.ClusterOpPing) {
 				forwarded <- struct{}{}
 			}
 			return false
@@ -1015,7 +1019,7 @@ func TestBaseConn_InvalidRPCFrameKeepsConnection(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), &stubSSZRequest{payload: tc.payload})
-			if !errors.Is(err, wire.ErrInvalidClusterFrame) {
+			if !errors.Is(err, wire.ErrInvalidFrame) {
 				t.Fatalf("invalid RPC frame error = %v, want validation error", err)
 			}
 			if !conn.IsActive() || conn.pendingLen() != 0 {
@@ -1036,9 +1040,10 @@ func TestBaseConn_InvalidRPCFrameKeepsConnection(t *testing.T) {
 func TestBaseConn_InvalidFrameKeepsConnection(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		frame *wire.ClusterFrame
+		frame wire.Frame
 	}{
 		{name: "nil frame"},
+		{name: "typed nil frame", frame: (*wire.ClusterFrame)(nil)},
 		{name: "unsupported peer ID", frame: &wire.ClusterFrame{ClusterPeerID: 7}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1050,7 +1055,7 @@ func TestBaseConn_InvalidFrameKeepsConnection(t *testing.T) {
 			conn := newConn(newPipeTransport(t, local))
 			conn.Start()
 			defer conn.Close()
-			if err := conn.WriteFrame(tc.frame); !errors.Is(err, wire.ErrInvalidClusterFrame) {
+			if err := conn.WriteFrame(tc.frame); !errors.Is(err, wire.ErrInvalidFrame) {
 				t.Fatalf("invalid frame error = %v, want validation error", err)
 			}
 			if !conn.IsActive() {
@@ -1090,7 +1095,7 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = conn.SendRPC(ctx, byte(wire.ClusterOpPing), &stubSSZRequest{payload: make([]byte, wire.MaxFramePayloadLen+1)})
-	if !errors.Is(err, wire.ErrInvalidClusterFrame) || conn.pendingLen() != 1 {
+	if !errors.Is(err, wire.ErrInvalidFrame) || conn.pendingLen() != 1 {
 		t.Fatalf("invalid RPC: error=%v pending=%d", err, conn.pendingLen())
 	}
 	payload, err := (&wire.PongResponse{ChainID: uint256.Int{1}}).MarshalSSZ()
@@ -1107,7 +1112,7 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 
 func TestBaseConn_InvalidResponseClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	tr.writeErr = wire.ErrInvalidClusterFrame
+	tr.writeErr = wire.ErrInvalidFrame
 	conn := newPingServerConn(tr)
 	conn.Start()
 	defer conn.Close()
@@ -2205,14 +2210,14 @@ func TestForwarder_RoutesFrame(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tr := newFakeFrameTransport()
-			forwarded := make(chan *wire.ClusterFrame, 1)
+			forwarded := make(chan wire.Frame, 1)
 			conn := NewBaseConn(Config{
 				Transport:   tr,
 				Serializers: pingSerializers,
 				Handlers: map[byte]TypedHandler{
 					byte(wire.ClusterOpPing): pongHandler(),
 				},
-				Forwarder: func(f *wire.ClusterFrame) bool {
+				Forwarder: func(f wire.Frame) bool {
 					forwarded <- f
 					return tt.consumed
 				},
@@ -2225,8 +2230,8 @@ func TestForwarder_RoutesFrame(t *testing.T) {
 
 			select {
 			case f := <-forwarded:
-				if f.RPCID != 1 {
-					t.Fatalf("expected rpc_id=1, got %d", f.RPCID)
+				if f.GetRPCID() != 1 {
+					t.Fatalf("expected rpc_id=1, got %d", f.GetRPCID())
 				}
 			case <-time.After(time.Second):
 				t.Fatal("forwarder did not receive frame")
@@ -2265,7 +2270,7 @@ func TestForwarder_CloseRequest(t *testing.T) {
 		Handlers: map[byte]TypedHandler{
 			byte(wire.ClusterOpPing): pongHandler(),
 		},
-		Forwarder: func(f *wire.ClusterFrame) bool {
+		Forwarder: func(f wire.Frame) bool {
 			// Close is non-blocking and safe to call from the reader
 			// goroutine; return true so the closing frame is not dispatched.
 			conn.Close()
@@ -2319,7 +2324,7 @@ func TestForwarder_PanicIsolatesConnection(t *testing.T) {
 		Handlers: map[byte]TypedHandler{
 			byte(wire.ClusterOpPing): pongHandler(),
 		},
-		Forwarder: func(f *wire.ClusterFrame) bool {
+		Forwarder: func(f wire.Frame) bool {
 			panic("forwarder boom")
 		},
 		Logger: log.New(),
@@ -2543,7 +2548,7 @@ func newPeerIDConnPair(t *testing.T, cfg Config) (*BaseConn, net.Conn) {
 	}
 
 	cfg.Transport = NewTCPTransport(peer,
-		func(r io.Reader) (*wire.ClusterFrame, error) {
+		func(r io.Reader) (wire.Frame, error) {
 			return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
 		},
 		wire.WriteClusterFrameWithPeerID)
@@ -2634,7 +2639,7 @@ func TestSimulation_FullLifecycle(t *testing.T) {
 	})
 	client := NewBaseConn(Config{
 		Transport: NewTCPTransport(raw,
-			func(r io.Reader) (*wire.ClusterFrame, error) {
+			func(r io.Reader) (wire.Frame, error) {
 				return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
 			},
 			wire.WriteClusterFrameWithPeerID),
@@ -2762,7 +2767,7 @@ func mustSerialize(t *testing.T, v wire.SSZMessage) []byte {
 func newPipeTransport(t *testing.T, c net.Conn) FrameTransport {
 	t.Helper()
 	return NewTCPTransport(c,
-		func(r io.Reader) (*wire.ClusterFrame, error) {
+		func(r io.Reader) (wire.Frame, error) {
 			return wire.ReadClusterFrame(r, wire.MaxFramePayloadLen)
 		},
 		wire.WriteClusterFrame)

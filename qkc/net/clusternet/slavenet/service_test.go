@@ -109,7 +109,7 @@ func serviceMaster(t *testing.T, s *Service, handler conn.TypedHandler) *conn.Ba
 		}
 	}
 	remote := conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(nc, func(r io.Reader) (*wire.ClusterFrame, error) {
+		Transport: conn.NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
 			return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
 		}, wire.WriteClusterFrameWithPeerID),
 		Serializers: map[byte]*conn.OpSerializer{
