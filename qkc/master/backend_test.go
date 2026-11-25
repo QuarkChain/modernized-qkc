@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/node"
@@ -107,7 +108,7 @@ func newTestConfig(t *testing.T, shard *testShard) (*Config, *slavenet.Service) 
 // must recover an existing head rather than inventing genesis or confirmations.
 func seedRoot(t *testing.T, stack *node.Node, cfg *Config) *qkctypes.RootBlock {
 	t.Helper()
-	db, err := stack.OpenDatabaseWithOptions(rootDatabaseName, cfg.Database)
+	db, err := stack.OpenDatabaseWithOptions(stack.Config().DataDir, cfg.Database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +240,8 @@ func TestBackendStartupAndReports(t *testing.T) {
 	}
 }
 
-// TestBackendNodeCloseBeforeStart checks that node closes either database engine
-// without starting shard initialization or invoking Backend.Stop.
+// TestBackendNodeCloseBeforeStart checks that either database engine uses DataDir
+// directly and node closes it without initialization or invoking Backend.Stop.
 func TestBackendNodeCloseBeforeStart(t *testing.T) {
 	for _, engine := range []string{"pebble", "leveldb"} {
 		t.Run(engine, func(t *testing.T) {
@@ -249,6 +250,9 @@ func TestBackendNodeCloseBeforeStart(t *testing.T) {
 			cfg, _ := newTestConfig(t, shard)
 			seedRoot(t, stack, cfg)
 			b := newTestBackend(t, stack, cfg)
+			if got := rawdb.PreexistingDatabase(stack.Config().DataDir); got != engine {
+				t.Fatalf("database not stored directly in DataDir: got %q, want %q", got, engine)
+			}
 			if err := stack.Close(); err != nil {
 				t.Fatal(err)
 			}

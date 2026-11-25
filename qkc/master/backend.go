@@ -34,8 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
-const rootDatabaseName = "rootchaindata"
-
 // Config is temporary and will be revised when configuration is consolidated.
 // Chain must match the existing root database and remain immutable after New,
 // as must Cluster's endpoint slices and chain IDs. Backend supplies Cluster's
@@ -117,9 +115,11 @@ func New(stack *node.Node, cfg *Config) (_ *Backend, err error) {
 	}
 	dbOptions := cfg.Database
 	if dbOptions.MetricsNamespace == "" {
-		dbOptions.MetricsNamespace = "qkc/db/rootchaindata/"
+		dbOptions.MetricsNamespace = "qkc/db/master/"
 	}
-	b.db, err = stack.OpenDatabaseWithOptions(rootDatabaseName, dbOptions)
+	// Node resolves DataDir to an absolute path. Use it directly as the root DB
+	// directory, without appending an instance name or another database directory.
+	b.db, err = stack.OpenDatabaseWithOptions(stack.Config().DataDir, dbOptions)
 	if err != nil {
 		return nil, err
 	}
