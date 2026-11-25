@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -36,12 +37,16 @@ import (
 // and verifies that consensus can query the reader while insertion holds its lock.
 type insertEngine struct {
 	posw.RootEngine
-	calls int
-	err   error
+	calls    int
+	err      error
+	onVerify func()
 }
 
 func (e *insertEngine) VerifyBlock(chain posw.RootChainReader, block *types.RootBlock) error {
 	e.calls++
+	if e.onVerify != nil {
+		e.onVerify()
+	}
 	if e.err != nil {
 		return e.err
 	}
@@ -58,6 +63,38 @@ func newInsertEnv(t *testing.T) (*rootEnv, *insertEngine) {
 		t.Fatal(err)
 	}
 	return f, e
+}
+
+func TestRootInsertMinedBlockRejectsStaleParent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, engine := newInsertEnv(t)
+		first, other := f.block(f.genesis, 1), f.block(f.genesis, 2)
+		entered, release := make(chan struct{}), make(chan struct{})
+		engine.onVerify = func() {
+			engine.onVerify = nil
+			close(entered)
+			<-release
+		}
+		firstResult, otherResult := make(chan error, 1), make(chan error, 1)
+		go func() { firstResult <- f.chain.InsertMinedBlock(first) }()
+		<-entered
+		go func() { otherResult <- f.chain.InsertMinedBlock(other) }()
+		synctest.Wait()
+		close(release)
+		firstErr, otherErr := <-firstResult, <-otherResult
+		if firstErr != nil || !errors.Is(otherErr, mining.ErrStaleWork) {
+			t.Fatalf("concurrent mined children of the same parent: %v, %v", firstErr, otherErr)
+		}
+		if engine.calls != 1 || len(f.client.broadcasts) != 1 || qkcrawdb.HasRootBlock(f.db, other.Hash()) {
+			t.Fatal("stale mined block reached validation, storage or broadcast")
+		}
+		if err := f.chain.InsertBlock(other); err != nil {
+			t.Fatalf("normal import of the same side block: %v", err)
+		}
+		if f.chain.RootTip().Hash() != first.Hash() || !qkcrawdb.HasRootBlock(f.db, other.Hash()) {
+			t.Fatal("normal import did not retain the equal-TD side block")
+		}
+	})
 }
 
 func TestRootInsertForkChoiceAndConfirmations(t *testing.T) {

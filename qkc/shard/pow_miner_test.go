@@ -186,11 +186,19 @@ type failingShard struct {
 	err error
 }
 
-func (s *failingShard) InsertMinedBlock(block *types.Block) error {
-	if s.err != nil {
-		return s.err
+func (s *failingShard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
+	candidate, err := s.Shard.BuildMiningWork(ctx, coinbase)
+	if err != nil {
+		return nil, err
 	}
-	return s.Shard.InsertMinedBlock(block)
+	submit := candidate.Submit
+	candidate.Submit = func(nonce types.BlockNonce, mixHash common.Hash) error {
+		if s.err != nil {
+			return s.err
+		}
+		return submit(nonce, mixHash)
+	}
+	return candidate, nil
 }
 
 func TestPoWMinerSubmitWorkInsertFailure(t *testing.T) {

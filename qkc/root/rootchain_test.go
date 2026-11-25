@@ -31,6 +31,7 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -319,6 +320,77 @@ func TestRootCreateBlockToMine(t *testing.T) {
 	if chain.RootTip().Hash() != parent.Hash() || qkcrawdb.HasRootBlock(f.db, block.Hash()) || len(f.client.broadcasts) != 0 {
 		t.Fatal("candidate construction advanced the tip, stored or broadcast the block")
 	}
+}
+
+func TestRootPoWMiner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newRootEnv(t)
+		chain := f.chain
+		t.Cleanup(chain.Close)
+		miner := mining.NewPoWMiner(chain, mining.PoWMinerConfig{})
+		coinbase := common.Address{42}
+		if _, err := miner.GetWork(t.Context(), coinbase); !errors.Is(err, errChainNotReady) {
+			t.Fatalf("work before initialization: %v", err)
+		}
+		if err := chain.Init(); err != nil {
+			t.Fatal(err)
+		}
+		getWork := func() *mining.MiningWork {
+			work, err := miner.GetWork(t.Context(), coinbase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return work
+		}
+		first := getWork()
+		if same := getWork(); same.SealHash != first.SealHash || len(f.client.calls) != 2 {
+			t.Fatal("root work was rebuilt before expiry")
+		}
+		time.Sleep(mining.DefaultWorkRefresh)
+		refreshed := getWork()
+		if refreshed.SealHash == first.SealHash || refreshed.Number != first.Number {
+			t.Fatal("root work did not refresh on the same parent")
+		}
+		search := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
+		defer search.Close()
+		nonce, mix, ok := search.SearchNonce(t.Context(), first.Number, first.SealHash, first.Difficulty, 0)
+		if !ok {
+			t.Fatal("Ethash search failed")
+		}
+		invalidMix := mix
+		invalidMix[0] ^= 1
+		if err := miner.SubmitWork(first.SealHash, nonce, invalidMix); err == nil || len(f.client.broadcasts) != 0 {
+			t.Fatalf("bad seal submitted: %v, broadcasts %v", err, f.client.broadcasts)
+		}
+		heads := make(chan struct{}, 1)
+		sub := chain.SubscribeMiningHead(heads)
+		defer sub.Unsubscribe()
+		if err := miner.SubmitWork(first.SealHash, nonce, mix); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-heads:
+		default:
+			t.Fatal("canonical root change was not published")
+		}
+		tip := chain.RootTip()
+		if tip.SealHash() != first.SealHash || uint64(tip.Number) != first.Number || tip.Time != first.Time || tip.ParentHash != f.genesis.Hash() || tip.Coinbase != coinbase || tip.Difficulty.ToBig().Cmp(first.Difficulty) != 0 {
+			t.Fatal("canonical root does not match served work")
+		}
+		if tip.Nonce != nonce.Uint64() || tip.MixDigest != mix || len(f.client.broadcasts) != 1 || f.client.broadcasts[0] != tip.Hash() || !qkcrawdb.HasRootBlock(f.db, tip.Hash()) {
+			t.Fatal("sealed root was not persisted and broadcast")
+		}
+		if err := miner.SubmitWork(refreshed.SealHash, nonce, mix); !errors.Is(err, mining.ErrStaleWork) {
+			t.Fatalf("work on old parent: %v", err)
+		}
+		if next := getWork(); next.Number != first.Number+1 {
+			t.Fatalf("work after root import: %+v", next)
+		}
+		f.cancel()
+		if _, err := miner.GetWork(t.Context(), coinbase); !errors.Is(err, errChainNotReady) {
+			t.Fatalf("cached work after shutdown: %v", err)
+		}
+	})
 }
 
 func TestRootCreateBlockToMineWaitsForDelivery(t *testing.T) {

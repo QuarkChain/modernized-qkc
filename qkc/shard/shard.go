@@ -111,6 +111,69 @@ func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) 
 	return block, diff, nil
 }
 
+// BuildMiningWork packages a shard candidate and its adjusted seal difficulty.
+func (s *Shard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
+	block, difficulty, err := s.CreateBlockToMine(ctx, coinbase)
+	if err != nil {
+		return nil, err
+	}
+	header := block.Header()
+	sealHash, err := header.QKCSealHash()
+	if err != nil {
+		return nil, err
+	}
+	extra, err := header.QKCExtra()
+	if err != nil {
+		return nil, err
+	}
+	return &mining.Candidate{
+		MiningWork: mining.MiningWork{SealHash: sealHash, Number: block.NumberU64(), Difficulty: difficulty, Time: block.Time()},
+		Parent:     block.ParentHash(),
+		Root:       extra.PrevRootBlock,
+		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
+			sealedHeader, sealedExtra := types.CopyHeader(header), *extra
+			sealedExtra.Nonce, sealedExtra.MixHash = nonce, mixHash
+			sealedHeader.Extra = sealedExtra.Encode()
+			return s.InsertMinedBlock(block.WithSeal(sealedHeader))
+		},
+	}, nil
+}
+
+// MiningHead returns the shard head and its current root checkpoint.
+func (s *Shard) MiningHead() (common.Hash, common.Hash, error) {
+	s.chain.mu.Lock()
+	defer s.chain.mu.Unlock()
+	if s.chain.rootTip == nil {
+		return common.Hash{}, common.Hash{}, ErrRootChainUninitialized
+	}
+	return s.CurrentBlock().Hash(), s.chain.rootTip.Hash(), nil
+}
+
+// SubscribeMiningHead forwards changes to the shard head as wakeups.
+func (s *Shard) SubscribeMiningHead(ch chan<- struct{}) event.Subscription {
+	heads := make(chan core.ChainHeadEvent, 1)
+	sub := s.SubscribeChainHeadEvent(heads)
+	if sub == nil {
+		return nil
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case <-heads:
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	})
+}
+
 // InsertMinedBlock imports and propagates a sealed candidate through the same
 // path as a block received from the network.
 func (s *Shard) InsertMinedBlock(block *types.Block) error {

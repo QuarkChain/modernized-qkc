@@ -29,8 +29,10 @@ import (
 	"github.com/ethereum/go-ethereum/common/lru"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -76,7 +78,9 @@ type RootChain struct {
 	closeOnce sync.Once
 
 	// Published headers are immutable; updates replace the tip pointer.
-	tip atomic.Pointer[types.RootBlockHeader]
+	tip       atomic.Pointer[types.RootBlockHeader]
+	headFeed  event.FeedOf[struct{}]
+	headScope event.SubscriptionScope
 
 	// Initialization stays recorded when delivery fails or Close begins.
 	initialized atomic.Bool
@@ -240,6 +244,15 @@ func (c *RootChain) Init() error {
 // disable Init and insertion, and return an error. The client handles connection
 // failures and requests master shutdown for cluster recovery.
 func (c *RootChain) InsertBlock(block *types.RootBlock) error {
+	return c.insertBlock(block, false)
+}
+
+// InsertMinedBlock imports a block only if it still extends the canonical tip.
+func (c *RootChain) InsertMinedBlock(block *types.RootBlock) error {
+	return c.insertBlock(block, true)
+}
+
+func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 	if block == nil || block.Number() == 0 {
 		return errors.New("missing or genesis root block")
 	}
@@ -256,10 +269,14 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	if !c.initialized.Load() {
 		return errChainNotInitialized
 	}
+	tip := c.tip.Load()
+	if mined && block.ParentHash() != tip.Hash() {
+		return mining.ErrStaleWork
+	}
 	// Reject stale blocks before loading, verifying or broadcasting them, even
 	// if already stored. Compare heights first to avoid unsigned underflow.
-	if tip := c.tip.Load().Number; tip > block.Number() && tip-block.Number() > maxStaleRootBlockHeightDiff {
-		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip, maxStaleRootBlockHeightDiff)
+	if tip.Number > block.Number() && tip.Number-block.Number() > maxStaleRootBlockHeightDiff {
+		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip.Number, maxStaleRootBlockHeightDiff)
 	}
 	hash := block.Hash()
 	stored, err := c.GetRootBlock(hash)
@@ -303,7 +320,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	header := block.Header()
 	// Stored blocks can belong to side branches. Re-evaluate fork choice and
 	// promote a block only when its TD strictly exceeds the current runtime tip.
-	updateTip := header.TotalDifficulty.Cmp(&c.tip.Load().TotalDifficulty) > 0
+	updateTip := header.TotalDifficulty.Cmp(&tip.TotalDifficulty) > 0
 	if updateTip {
 		if err := c.rewriteCanonical(batch, header); err != nil {
 			return err
@@ -324,6 +341,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	c.blockCache.Add(hash, block)
 	if updateTip {
 		c.tip.Store(header)
+		c.headFeed.Send(struct{}{})
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
@@ -337,6 +355,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.
 		c.stopping.Store(true)
+		c.headScope.Close()
 		return fmt.Errorf("broadcast root block: %w", err)
 	}
 	return nil
@@ -413,6 +432,7 @@ func (c *RootChain) rewriteCanonical(batch ethdb.KeyValueWriter, header *types.R
 func (c *RootChain) Close() {
 	c.closeOnce.Do(func() {
 		c.stopping.Store(true)
+		c.headScope.Close()
 		c.chainmu.Close()
 	})
 }
