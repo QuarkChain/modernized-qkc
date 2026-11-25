@@ -253,7 +253,7 @@ concrete hosts for dialing. Each configured private endpoint must be distinct.
 ## Initialize a local root database
 
 Open the dedicated root database and call
-`root.InitializeRootDatabase(db, cfg.Genesis, cfg.ShardGeneses())`. On first use,
+`root.SetupRootGenesisBlock(db, cfg.Genesis, cfg.ShardGeneses())`. On first use,
 it writes R0, its canonical mapping, head, shard confirmations and root rules in
 one batch. On restart, it verifies R0 and the initial confirmations and returns
 the effective rules and R0 hash. If the database has a head, it must also have

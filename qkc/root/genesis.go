@@ -30,10 +30,11 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// InitializeRootDatabase installs or verifies R0 for shards in ChainIDs order.
+// SetupRootGenesisBlock writes or verifies the root genesis block (R0).
+// Pass shard genesis specifications in configured ChainIDs order.
 // A nil seed uses the stored root rules and verifies them against the shards.
 // Call with exclusive access to the database before starting the chain.
-func InitializeRootDatabase(db ethdb.Database, seed *RootGenesis, shards []*core.Genesis) (*params.QuarkChainConfig, common.Hash, error) {
+func SetupRootGenesisBlock(db ethdb.Database, seed *RootGenesis, shards []*core.Genesis) (*params.QuarkChainConfig, common.Hash, error) {
 	if db == nil {
 		return nil, common.Hash{}, errors.New("missing root database")
 	}
@@ -52,6 +53,8 @@ func InitializeRootDatabase(db ethdb.Database, seed *RootGenesis, shards []*core
 		}
 		supplied := genesis.Hash()
 		if hash == (common.Hash{}) {
+			// First startup writes the genesis records in one batch.
+			// An existing head makes a missing height-zero index an error.
 			if err := commitRootGenesis(db, genesis, seed.Config); err != nil {
 				return nil, common.Hash{}, err
 			}
@@ -66,6 +69,8 @@ func InitializeRootDatabase(db ethdb.Database, seed *RootGenesis, shards []*core
 		return nil, hash, err
 	}
 	if seed != nil {
+		// With a supplied seed, a matching R0 hash still requires matching
+		// consensus rules and tracking data.
 		if !stored.Equal(seed.Config) {
 			return nil, hash, errors.New("root consensus configuration differs from the stored configuration")
 		}
@@ -73,6 +78,8 @@ func InitializeRootDatabase(db ethdb.Database, seed *RootGenesis, shards []*core
 			return nil, hash, errors.New("root genesis tracking data differs from stored block")
 		}
 	} else {
+		// For a nil seed, rebuild the shard headers under the stored rules
+		// and compare their commitment with R0.
 		headers, err := buildShardGenesisHeaders(stored, shards)
 		if err != nil {
 			return nil, hash, err

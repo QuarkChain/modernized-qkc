@@ -46,7 +46,7 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := rawdb.NewDatabase(disk)
-	_, hash, err := root.InitializeRootDatabase(db, seed, shards)
+	_, hash, err := root.SetupRootGenesisBlock(db, seed, shards)
 	if closeErr := db.Close(); closeErr != nil {
 		t.Fatal(closeErr)
 	}
@@ -64,7 +64,7 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 	}
 	db = rawdb.NewDatabase(disk)
 	defer db.Close()
-	rules, recovered, err := root.InitializeRootDatabase(db, nil, shards)
+	rules, recovered, err := root.SetupRootGenesisBlock(db, nil, shards)
 	if err != nil || recovered != hash || !rules.Equal(seed.Config) {
 		t.Fatalf("reopening with shard configs only: hash %s, rules %+v, err %v", recovered, rules, err)
 	}
@@ -110,7 +110,7 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		address := common.Address{1}
 		alloc[address] = types.Account{Balance: big.NewInt(1)}
 		defer delete(alloc, address)
-		if _, _, err := root.InitializeRootDatabase(db, nil, shards); err == nil {
+		if _, _, err := root.SetupRootGenesisBlock(db, nil, shards); err == nil {
 			t.Fatal("accepted shard genesis with a different state root")
 		}
 	})
@@ -118,7 +118,7 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		for _, shard := range shards {
 			shard.Config.QuarkChain.MaxBlocksPerRootBlock++
 		}
-		if _, _, err := root.InitializeRootDatabase(db, nil, shards); err == nil {
+		if _, _, err := root.SetupRootGenesisBlock(db, nil, shards); err == nil {
 			t.Fatal("accepted different network rules with the same shard genesis headers")
 		}
 	})
