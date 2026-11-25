@@ -44,7 +44,7 @@ func TestDevnetRootGenesisHash(t *testing.T) {
 	}
 }
 
-func TestBuildRootGenesisNetworkOrder(t *testing.T) {
+func TestBuildRootGenesisChainIDOrder(t *testing.T) {
 	var first common.Hash
 	for i := 0; i < 2; i++ {
 		cfg, err := config.LoadRoot(filepath.Join("..", "config", "devnet", "root.toml"))
@@ -63,13 +63,14 @@ func TestBuildRootGenesisNetworkOrder(t *testing.T) {
 		for _, shard := range shards {
 			shard.Config.QuarkChain.ChainIDs = ids
 		}
+		wantHeaders := []common.Hash{shards[1].ToBlock().Hash(), shards[0].ToBlock().Hash()}
 		genesis, err := root.BuildRootGenesis(cfg.Genesis, shards)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for j, h := range genesis.ShardBlockHeaders() {
-			if want := shards[j].ToBlock().Hash(); h.Hash() != want {
-				t.Fatalf("G0 at index %d: got %s want %s", j, h.Hash(), want)
+		for j, want := range wantHeaders {
+			if got := genesis.ShardBlockHeaders()[j].Hash(); got != want {
+				t.Fatalf("G0 at index %d: got %s want %s", j, got, want)
 			}
 		}
 		if i == 0 {
@@ -90,6 +91,9 @@ func TestBuildRootGenesisInvalid(t *testing.T) {
 		{"difficulty below minimum", "below MinimumDifficulty", func(c *config.RootConfig) { c.Genesis.Difficulty = big.NewInt(1023) }},
 		{"shard count", "shard genesis count", func(c *config.RootConfig) { c.Shards = c.Shards[:1] }},
 		{"shard order", "expected shard genesis for chain", func(c *config.RootConfig) { slices.Reverse(c.Shards) }},
+		{"late shard genesis", "shard 100002 genesis timestamp 1 is later than root genesis timestamp 0", func(c *config.RootConfig) {
+			c.Shards[1].Genesis.Timestamp = c.Genesis.Timestamp + 1
+		}},
 		{"network rules", "network rules differ", func(c *config.RootConfig) { c.Shards[1].Genesis.Config.QuarkChain.MaxBlocksPerRootBlock++ }},
 		{"invalid shard genesis", "invalid gas limit", func(c *config.RootConfig) { c.Shards[0].Genesis.GasLimit = 10000 }},
 	} {

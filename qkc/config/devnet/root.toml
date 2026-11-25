@@ -15,7 +15,7 @@ NoDiscovery = true
 
 [Root]
 NetworkID = 2
-# Paths resolve relative to this file. ChainIDs in the shard configs sets the R0 order.
+# Paths resolve relative to this file. R0 orders shard headers by increasing chain ID.
 ShardConfigs = ["shard-100001.toml", "shard-100002.toml"]
 
 [Root.Genesis]
