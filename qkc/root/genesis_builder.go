@@ -86,7 +86,7 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 	if err := seed.Validate(); err != nil {
 		return nil, err
 	}
-	headers, err := buildShardGenesisHeaders(seed.Config, shards)
+	headers, err := buildShardGenesisHeaders(seed.Config, seed.Timestamp, shards)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 	}, headers, nil), nil
 }
 
-func buildShardGenesisHeaders(rules *params.QuarkChainConfig, shards []*core.Genesis) (qkctypes.ShardBlockHeaders, error) {
+func buildShardGenesisHeaders(rules *params.QuarkChainConfig, rootTimestamp uint64, shards []*core.Genesis) (qkctypes.ShardBlockHeaders, error) {
 	if len(shards) != len(rules.ChainIDs) {
 		return nil, errors.New("shard genesis count differs from configured chain IDs")
 	}
@@ -109,8 +109,8 @@ func buildShardGenesisHeaders(rules *params.QuarkChainConfig, shards []*core.Gen
 		if shard.Config.ChainID.Cmp(id) != 0 {
 			return nil, fmt.Errorf("expected shard genesis for chain %s at index %d, got chain %s", id, i, shard.Config.ChainID)
 		}
-		if shard.Timestamp > seed.Timestamp {
-			return nil, fmt.Errorf("shard %s genesis timestamp %d is later than root genesis timestamp %d", id, shard.Timestamp, seed.Timestamp)
+		if shard.Timestamp > rootTimestamp {
+			return nil, fmt.Errorf("shard %s genesis timestamp %d is later than root genesis timestamp %d", id, shard.Timestamp, rootTimestamp)
 		}
 	}
 	sorted := slices.Clone(shards)

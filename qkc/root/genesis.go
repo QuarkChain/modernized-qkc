@@ -80,7 +80,7 @@ func SetupRootGenesisBlock(db ethdb.Database, seed *RootGenesis, shards []*core.
 	} else {
 		// For a nil seed, rebuild the shard headers under the stored rules
 		// and compare their commitment with R0.
-		headers, err := buildShardGenesisHeaders(stored, shards)
+		headers, err := buildShardGenesisHeaders(stored, r0.Time(), shards)
 		if err != nil {
 			return nil, hash, err
 		}
