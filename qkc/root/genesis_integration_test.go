@@ -57,23 +57,16 @@ func TestDevnetRootGenesisRecovery(t *testing.T) {
 		t.Fatalf("devnet genesis hash %s, want %s", hash, want)
 	}
 
-	// The database alone must be enough to recover the local chain and its rules.
+	// Recover the local chain and its rules without the root genesis section.
 	disk, err = pebble.New(dir, 0, 0, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db = rawdb.NewDatabase(disk)
 	defer db.Close()
-	rules, recovered, err := root.SetupRootGenesisBlock(db, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovered != hash || !rules.Equal(seed.Config) {
-		t.Fatalf("recovered hash %s and rules %+v, want %s and %+v", recovered, rules, hash, seed.Config)
-	}
-	loaded, restored, err := root.InitializeRootDatabase(db, nil, shards)
-	if err != nil || restored != hash || !loaded.Equal(rules) {
-		t.Fatalf("reopening with shard configs only: hash %s, rules %+v, err %v", restored, loaded, err)
+	rules, recovered, err := root.InitializeRootDatabase(db, nil, shards)
+	if err != nil || recovered != hash || !rules.Equal(seed.Config) {
+		t.Fatalf("reopening with shard configs only: hash %s, rules %+v, err %v", recovered, rules, err)
 	}
 	engine, err := posw.NewSimulate(rules)
 	if err != nil {

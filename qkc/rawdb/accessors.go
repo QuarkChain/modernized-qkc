@@ -108,6 +108,11 @@ func readRootHash(db ethdb.KeyValueReader, key []byte) (common.Hash, error) {
 	return common.Hash(data), nil
 }
 
+// HasRootHeadBlockHash reports whether the database has a root head record.
+func HasRootHeadBlockHash(db ethdb.KeyValueReader) (bool, error) {
+	return db.Has(rootHeadBlockKey)
+}
+
 // ReadRootHeadBlockHash retrieves the persisted canonical root head.
 func ReadRootHeadBlockHash(db ethdb.KeyValueReader) (common.Hash, error) {
 	return readRootHash(db, rootHeadBlockKey)

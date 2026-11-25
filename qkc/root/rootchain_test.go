@@ -26,6 +26,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -157,6 +158,8 @@ type rootEnv struct {
 	client     *rootClient
 	engine     posw.RootEngine
 	chain      *RootChain
+	seed       *RootGenesis
+	shards     []*core.Genesis
 	genesis    *types.RootBlock
 	confirmed  map[string]common.Hash
 }
@@ -164,12 +167,14 @@ type rootEnv struct {
 // Initialize the database with a root genesis that confirms every member.
 func newRootEnv(t *testing.T) *rootEnv {
 	t.Helper()
+	chainIDs := []int64{10001, 10002}
 	f := &rootEnv{
-		t: t, config: params.NewTestQuarkChainConfig(10001, 10001, 10002).QuarkChain,
+		t: t, config: params.NewTestQuarkChainConfig(chainIDs[0], chainIDs...).QuarkChain,
 		db: &rootDB{Database: rawdb.NewMemoryDatabase()}, client: new(rootClient),
 		confirmed: make(map[string]common.Hash),
 	}
 	t.Cleanup(func() { f.db.Close() })
+	f.config.ConsensusType = params.ConsensusEthash
 	engine, err := posw.New(f.config)
 	if err != nil {
 		t.Fatal(err)
@@ -178,21 +183,31 @@ func newRootEnv(t *testing.T) *rootEnv {
 	t.Cleanup(func() { engine.Close() })
 	f.backendCtx, f.cancel = context.WithCancel(context.Background())
 	t.Cleanup(f.cancel)
-	var headers types.ShardBlockHeaders
-	for _, id := range f.config.ChainIDs {
-		header := &coretypes.Header{
-			Number: new(big.Int), Difficulty: new(big.Int), Time: 1, MixDigest: common.Hash{1}, GasLimit: 1_000_000,
-			UncleHash: coretypes.EmptyUncleHash, TxHash: coretypes.EmptyTxsHash, ReceiptHash: coretypes.EmptyReceiptsHash,
-			Extra: (&coretypes.QKCExtra{ChainID: id, Cursor: coretypes.XShardCursor{RootBlockHeight: 1}, XShardGasLimit: 1_000_000 / params.XShardGasLimitDivisor}).Encode(),
-		}
-		headers = append(headers, header)
-		f.confirmed[id.String()] = header.Hash()
+	f.seed = &RootGenesis{Config: f.config, Timestamp: 1, Difficulty: big.NewInt(100)}
+	const gasLimit = 1_000_000
+	for _, id := range chainIDs {
+		config := params.NewTestQuarkChainConfig(id, chainIDs...)
+		f.shards = append(f.shards, &core.Genesis{
+			Config: config, Timestamp: 1, GasLimit: gasLimit, Difficulty: new(big.Int),
+			Mixhash: common.BigToHash(config.QuarkChain.PoSW.MinimumDifficulty),
+			Alloc:   core.PoSWStakingContractAllocs(config),
+			ExtraData: (&coretypes.QKCExtra{
+				ChainID:        config.ChainID,
+				Cursor:         coretypes.XShardCursor{RootBlockHeight: 1},
+				XShardGasLimit: gasLimit / params.XShardGasLimitDivisor,
+			}).Encode(),
+		})
 	}
-	f.genesis = types.NewRootBlock(&types.RootBlockHeader{
-		Time: 1, Difficulty: *uint256.NewInt(100), TotalDifficulty: *uint256.NewInt(100),
-	}, headers, nil)
-	if _, _, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err != nil {
+	_, hash, err := InitializeRootDatabase(f.db, f.seed, f.shards)
+	if err != nil {
 		t.Fatal(err)
+	}
+	f.genesis = qkcrawdb.ReadRootBlock(f.db, hash)
+	if f.genesis == nil {
+		t.Fatal("missing initialized genesis block")
+	}
+	for i, id := range f.config.ChainIDs {
+		f.confirmed[id.String()] = f.genesis.ShardBlockHeaders()[i].Hash()
 	}
 	f.chain = f.open()
 	return f

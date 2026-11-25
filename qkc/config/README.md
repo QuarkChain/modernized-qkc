@@ -255,10 +255,13 @@ concrete hosts for dialing. Each configured private endpoint must be distinct.
 Open the dedicated root database and call
 `root.InitializeRootDatabase(db, cfg.Genesis, cfg.ShardGeneses())`. On first use,
 it writes R0, its canonical mapping, head, shard confirmations and root rules in
-one batch.
-On restart it checks the stored genesis and head and returns the effective rules
-and R0 hash. An initialized database also accepts a TOML with the entire
-`[Root.Genesis]` section and its subtables omitted. The referenced shard TOMLs
-must still agree with the persisted rules and G0 headers. Pass the returned
-rules to the root consensus engine and `root.New`. Initialization is local and
-can run before a cluster connection exists.
+one batch. On restart, it verifies R0 and the initial confirmations and returns
+the effective rules and R0 hash. If the database has a head, it must also have
+a canonical R0 mapping.
+
+An initialized database also accepts a TOML with the entire `[Root.Genesis]`
+section and its subtables omitted. The referenced shard TOMLs must still agree
+with the persisted rules and G0 headers. Use the returned rules to create the
+root consensus engine and call `root.New`, which validates and restores the
+persisted head. Initialization is local and can run before a cluster connection
+exists.

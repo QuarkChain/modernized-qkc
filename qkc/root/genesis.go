@@ -32,113 +32,96 @@ import (
 
 // InitializeRootDatabase installs or verifies R0 for shards in ChainIDs order.
 // A nil seed uses the stored root rules and verifies them against the shards.
+// Call with exclusive access to the database before starting the chain.
 func InitializeRootDatabase(db ethdb.Database, seed *RootGenesis, shards []*core.Genesis) (*params.QuarkChainConfig, common.Hash, error) {
-	if seed != nil {
-		genesis, err := BuildRootGenesis(seed, shards)
-		if err != nil {
-			return nil, common.Hash{}, err
-		}
-		return SetupRootGenesisBlock(db, genesis, seed.Config)
-	}
-	rules, hash, err := SetupRootGenesisBlock(db, nil, nil)
-	if err != nil {
-		return nil, hash, err
-	}
-	header := rawdb.ReadRootBlockHeader(db, hash)
-	if header == nil {
-		return nil, hash, fmt.Errorf("cannot read stored root genesis %s", hash)
-	}
-	restored := &RootGenesis{
-		Timestamp: header.Time, Difficulty: header.Difficulty.ToBig(),
-		Coinbase: header.Coinbase, Config: rules,
-	}
-	genesis, err := BuildRootGenesis(restored, shards)
-	if err != nil {
-		return nil, hash, err
-	}
-	if header.ShardHeaderHash != genesis.ShardHeaderHash() {
-		return nil, hash, errors.New("configured shard genesis headers differ from stored root genesis")
-	}
-	return rules, hash, nil
-}
-
-// SetupRootGenesisBlock writes genesis in one batch when canonical(0) is absent,
-// or checks the existing genesis and consensus rules without rewinding the head.
-// An initialized database can supply both values when genesis and config are
-// nil. A supplied genesis requires its config. Call with exclusive access to
-// the database before starting the chain.
-func SetupRootGenesisBlock(db ethdb.Database, genesis *types.RootBlock, config *params.QuarkChainConfig) (*params.QuarkChainConfig, common.Hash, error) {
 	if db == nil {
 		return nil, common.Hash{}, errors.New("missing root database")
-	}
-	var want map[string]common.Hash
-	if config != nil || genesis != nil {
-		if err := config.Check(); err != nil {
-			return nil, common.Hash{}, fmt.Errorf("root consensus configuration: %w", err)
-		}
-		if genesis != nil {
-			var err error
-			want, err = genesisConfirmations(genesis, config)
-			if err != nil {
-				return nil, common.Hash{}, err
-			}
-		}
 	}
 	hash, err := rawdb.ReadRootGenesisHash(db)
 	if err != nil {
 		return nil, common.Hash{}, fmt.Errorf("read canonical root genesis: %w", err)
 	}
-	if hash == (common.Hash{}) {
-		if genesis == nil {
-			return nil, common.Hash{}, errors.New("root genesis is required to initialize the database")
-		}
-		if err := commitRootGenesis(db, genesis, config, want); err != nil {
+	if hash == (common.Hash{}) && seed == nil {
+		return nil, common.Hash{}, errors.New("root genesis is required to initialize the database")
+	}
+	var genesis *types.RootBlock
+	if seed != nil {
+		genesis, err = BuildRootGenesis(seed, shards)
+		if err != nil {
 			return nil, common.Hash{}, err
 		}
-		return config, genesis.Hash(), nil
-	}
-	if genesis != nil && genesis.Hash() != hash {
-		return nil, hash, fmt.Errorf("root genesis mismatch: stored %x, supplied %x", hash, genesis.Hash())
-	}
-	stored, err := rawdb.ReadRootChainConfig(db)
-	if err != nil {
-		return nil, hash, fmt.Errorf("read root consensus configuration: %w", err)
-	}
-	if err := stored.Check(); err != nil {
-		return nil, hash, fmt.Errorf("stored root consensus configuration: %w", err)
-	}
-	if config != nil && !stored.Equal(config) {
-		return nil, hash, errors.New("root consensus configuration differs from the stored configuration")
-	}
-	tip, err := readRootHead(db, stored)
-	if err != nil {
-		return nil, hash, err
-	}
-	r0 := tip
-	if tip.Hash() != hash {
-		r0 = rawdb.ReadRootBlock(db, hash)
-		if r0 == nil || r0.Hash() != hash {
-			return nil, hash, fmt.Errorf("missing or inconsistent root genesis block %x", hash)
+		supplied := genesis.Hash()
+		if hash == (common.Hash{}) {
+			if err := commitRootGenesis(db, genesis, seed.Config); err != nil {
+				return nil, common.Hash{}, err
+			}
+			return seed.Config, supplied, nil
+		}
+		if supplied != hash {
+			return nil, hash, &core.GenesisMismatchError{Stored: hash, New: supplied}
 		}
 	}
-	confirmed, err := genesisConfirmations(r0, stored)
+	r0, stored, err := readStoredRootGenesis(db, hash)
 	if err != nil {
 		return nil, hash, err
 	}
-	if genesis != nil && !bytes.Equal(genesis.TrackingData(), r0.TrackingData()) {
-		return nil, hash, errors.New("root genesis tracking data differs from stored block")
-	}
-	snapshot, err := rawdb.ReadRootConfirmedShardBlocks(db, hash)
-	if err != nil {
-		return nil, hash, fmt.Errorf("read root genesis confirmations: %w", err)
-	}
-	if !maps.Equal(confirmed, snapshot) {
-		return nil, hash, errors.New("stored root genesis confirmations differ from the genesis shard headers")
+	if seed != nil {
+		if !stored.Equal(seed.Config) {
+			return nil, hash, errors.New("root consensus configuration differs from the stored configuration")
+		}
+		if !bytes.Equal(genesis.TrackingData(), r0.TrackingData()) {
+			return nil, hash, errors.New("root genesis tracking data differs from stored block")
+		}
+	} else {
+		headers, err := buildShardGenesisHeaders(stored, shards)
+		if err != nil {
+			return nil, hash, err
+		}
+		if types.CalcShardHeaderHash(headers) != r0.ShardHeaderHash() {
+			return nil, hash, errors.New("configured shard genesis headers differ from stored root genesis")
+		}
 	}
 	return stored, hash, nil
 }
 
-func commitRootGenesis(db ethdb.Database, genesis *types.RootBlock, config *params.QuarkChainConfig, confirmed map[string]common.Hash) error {
+func readStoredRootGenesis(db ethdb.KeyValueReader, hash common.Hash) (*types.RootBlock, *params.QuarkChainConfig, error) {
+	config, err := rawdb.ReadRootChainConfig(db)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read root consensus configuration: %w", err)
+	}
+	if err := checkRootConsensusConfig(config); err != nil {
+		return nil, nil, fmt.Errorf("stored root consensus configuration: %w", err)
+	}
+	r0 := rawdb.ReadRootBlock(db, hash)
+	if r0 == nil || r0.Hash() != hash {
+		return nil, nil, fmt.Errorf("missing or inconsistent root genesis block %x", hash)
+	}
+	confirmed, err := genesisConfirmations(r0, config)
+	if err != nil {
+		return nil, nil, err
+	}
+	snapshot, err := rawdb.ReadRootConfirmedShardBlocks(db, hash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read root genesis confirmations: %w", err)
+	}
+	if !maps.Equal(confirmed, snapshot) {
+		return nil, nil, errors.New("stored root genesis confirmations differ from the genesis shard headers")
+	}
+	return r0, config, nil
+}
+
+func commitRootGenesis(db ethdb.Database, genesis *types.RootBlock, config *params.QuarkChainConfig) error {
+	hasHead, err := rawdb.HasRootHeadBlockHash(db)
+	if err != nil {
+		return fmt.Errorf("check for existing root head: %w", err)
+	}
+	if hasHead {
+		return errors.New("root database has a head but no canonical genesis")
+	}
+	confirmed, err := genesisConfirmations(genesis, config)
+	if err != nil {
+		return err
+	}
 	batch := db.NewBatch()
 	defer batch.Close()
 	hash := genesis.Hash()
@@ -157,10 +140,7 @@ func commitRootGenesis(db ethdb.Database, genesis *types.RootBlock, config *para
 	if err := rawdb.WriteRootChainConfig(batch, config); err != nil {
 		return err
 	}
-	if err := batch.Write(); err != nil {
-		return err
-	}
-	return db.SyncKeyValue()
+	return batch.Write()
 }
 
 // genesisConfirmations derives the initial snapshot from exactly one G0 per

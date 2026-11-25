@@ -19,12 +19,13 @@ package root
 import (
 	"errors"
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/ethdb"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
@@ -33,8 +34,8 @@ func TestRootGenesisSetupPreservesAdvancedHead(t *testing.T) {
 	f := newRootEnv(t)
 	r1 := f.block(f.genesis, 1)
 	f.store(r1, true)
-	for _, seed := range []*types.RootBlock{f.genesis, nil} {
-		config, hash, err := SetupRootGenesisBlock(f.db, seed, f.config)
+	for _, seed := range []*RootGenesis{f.seed, nil} {
+		config, hash, err := InitializeRootDatabase(f.db, seed, f.shards)
 		if err != nil || hash != f.genesis.Hash() || !config.Equal(f.config) {
 			t.Fatalf("setup returned config %v, genesis %x, error %v", config, hash, err)
 		}
@@ -44,18 +45,41 @@ func TestRootGenesisSetupPreservesAdvancedHead(t *testing.T) {
 	}
 	// An adjustment rule is not committed by R0, but still determines the chain.
 	f.config.PoSW.AdjustmentFactor++
-	if _, _, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err == nil {
+	if _, _, err := InitializeRootDatabase(f.db, f.seed, f.shards); err == nil {
 		t.Fatal("accepted incompatible PoSW configuration")
 	}
 	f.config.PoSW.AdjustmentFactor--
-	header := f.genesis.Header()
-	header.Time++
-	different := types.NewRootBlock(header, f.genesis.ShardBlockHeaders(), nil)
-	if _, _, err := SetupRootGenesisBlock(f.db, different, f.config); err == nil {
-		t.Fatal("accepted a different R0")
+	different := *f.seed
+	different.Timestamp++
+	supplied, err := BuildRootGenesis(&different, f.shards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mismatch *core.GenesisMismatchError
+	if _, hash, err := InitializeRootDatabase(f.db, &different, f.shards); !errors.As(err, &mismatch) ||
+		hash != f.genesis.Hash() || mismatch.Stored != hash || mismatch.New != supplied.Hash() {
+		t.Fatalf("expected genesis mismatch for %x and %x, got hash %x, error %v", f.genesis.Hash(), supplied.Hash(), hash, err)
 	}
 	if got := f.open().RootTip().Hash(); got != r1.Hash() {
 		t.Fatalf("rejected setup changed tip to %x", got)
+	}
+}
+
+func TestRootGenesisSetupMissingCanonicalGenesis(t *testing.T) {
+	f := newRootEnv(t)
+	r1 := f.block(f.genesis, 1)
+	f.store(r1, true)
+	if err := qkcrawdb.DeleteRootCanonicalHash(f.db, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := InitializeRootDatabase(f.db, f.seed, f.shards); err == nil {
+		t.Fatal("accepted missing canonical genesis with an existing root head")
+	}
+	if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != r1.Hash() {
+		t.Fatalf("root head = %x, want %x, error %v", hash, r1.Hash(), err)
+	}
+	if hash, err := qkcrawdb.ReadRootGenesisHash(f.db); err != nil || hash != (common.Hash{}) {
+		t.Fatalf("rejected setup recreated canonical genesis %x, error %v", hash, err)
 	}
 }
 
@@ -70,32 +94,29 @@ func TestRootGenesisSetupMissingRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	it.Release()
-	// Missing canonical(0) selects initialization. Other missing records in an
-	// initialized database must fail without repairs.
-	for key := range records {
+	for key, value := range records {
 		if err := f.db.Delete([]byte(key)); err != nil {
 			t.Fatal(err)
 		}
-		hash, err := qkcrawdb.ReadRootGenesisHash(f.db)
+		hasHead, err := qkcrawdb.HasRootHeadBlockHash(f.db)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if hash == (common.Hash{}) {
-			if _, hash, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err != nil || hash != f.genesis.Hash() {
-				t.Fatalf("initialization without canonical genesis returned %x, error %v", hash, err)
+		_, _, err = InitializeRootDatabase(f.db, f.seed, f.shards)
+		if !hasHead {
+			// New validates the head after genesis verification.
+			if err != nil {
+				t.Fatalf("genesis verification depends on the root head: %v", err)
 			}
-			if hash, err := qkcrawdb.ReadRootGenesisHash(f.db); err != nil || hash != f.genesis.Hash() {
-				t.Fatalf("canonical genesis after initialization = %x, error %v", hash, err)
-			}
-			continue
+			_, err = New(f.backendCtx, f.config, f.client, f.db, f.engine)
 		}
-		if _, _, err := SetupRootGenesisBlock(f.db, f.genesis, f.config); err == nil {
+		if err == nil {
 			t.Fatalf("accepted missing record %x", key)
 		}
 		if has, err := f.db.Has([]byte(key)); err != nil || has {
 			t.Fatalf("missing record %x recreated: %t, %v", key, has, err)
 		}
-		if err := f.db.Put([]byte(key), records[key]); err != nil {
+		if err := f.db.Put([]byte(key), value); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -106,19 +127,39 @@ func TestRootGenesisSetupMissingRecords(t *testing.T) {
 	if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, f.genesis.Hash(), stale); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := SetupRootGenesisBlock(f.db, nil, nil); err == nil {
+	if _, _, err := InitializeRootDatabase(f.db, nil, f.shards); err == nil {
 		t.Fatal("accepted stale R0 confirmations")
 	}
 	if err := qkcrawdb.WriteRootConfirmedShardBlocks(f.db, f.genesis.Hash(), f.confirmed); err != nil {
 		t.Fatal(err)
 	}
 	qkcrawdb.WriteRootBlock(f.db, f.genesis.WithBody(nil, nil))
-	if _, _, err := SetupRootGenesisBlock(f.db, nil, nil); err == nil {
+	if _, _, err := InitializeRootDatabase(f.db, nil, f.shards); err == nil {
 		t.Fatal("accepted invalid stored R0 body")
 	}
 }
 
-func TestRootGenesisSetupRejectsInvalidSeed(t *testing.T) {
+func TestRootGenesisSetupRequiresConsensusType(t *testing.T) {
+	f := newRootEnv(t)
+	config := *f.config
+	config.ConsensusType = ""
+	seed := *f.seed
+	seed.Config = &config
+
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+	if _, _, err := InitializeRootDatabase(db, &seed, f.shards); err == nil || !strings.Contains(err.Error(), "invalid ConsensusType") {
+		t.Fatalf("initialization with no consensus type: %v", err)
+	}
+	if err := qkcrawdb.WriteRootChainConfig(f.db, &config); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := InitializeRootDatabase(f.db, nil, f.shards); err == nil || !strings.Contains(err.Error(), "invalid ConsensusType") {
+		t.Fatalf("recovery with no stored consensus type: %v", err)
+	}
+}
+
+func TestCommitRootGenesisRejectsMalformedBlock(t *testing.T) {
 	f := newRootEnv(t)
 	g0 := coretypes.CopyHeader(f.genesis.ShardBlockHeaders()[0])
 	extra, err := g0.QKCExtra()
@@ -138,7 +179,7 @@ func TestRootGenesisSetupRejectsInvalidSeed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			db := rawdb.NewMemoryDatabase()
 			defer db.Close()
-			if _, _, err := SetupRootGenesisBlock(db, seed, f.config); err == nil {
+			if err := commitRootGenesis(db, seed, f.config); err == nil {
 				t.Fatal("accepted malformed root genesis")
 			}
 			if hash, err := qkcrawdb.ReadRootGenesisHash(db); err != nil || hash != (common.Hash{}) {
@@ -148,39 +189,24 @@ func TestRootGenesisSetupRejectsInvalidSeed(t *testing.T) {
 	}
 }
 
-type genesisWriteFailure struct {
-	ethdb.Database
-	err error
-}
-
-func (db *genesisWriteFailure) NewBatch() ethdb.Batch {
-	return &failedGenesisBatch{Batch: db.Database.NewBatch(), err: db.err}
-}
-
-type failedGenesisBatch struct {
-	ethdb.Batch
-	err error
-}
-
-func (b *failedGenesisBatch) Write() error { return b.err }
-
 func TestRootGenesisSetupAtomic(t *testing.T) {
 	f := newRootEnv(t)
-	db := rawdb.NewMemoryDatabase()
+	db := &rootDB{Database: rawdb.NewMemoryDatabase()}
 	defer db.Close()
-	if _, _, err := SetupRootGenesisBlock(db, nil, nil); err == nil {
+	if _, _, err := InitializeRootDatabase(db, nil, f.shards); err == nil {
 		t.Fatal("accepted empty database without genesis")
 	}
-	failure := &genesisWriteFailure{db, errors.New("batch write failed")}
-	if _, _, err := SetupRootGenesisBlock(failure, f.genesis, f.config); !errors.Is(err, failure.err) {
-		t.Fatalf("setup error %v, want %v", err, failure.err)
+	db.batchErr = errors.New("batch write failed")
+	if _, _, err := InitializeRootDatabase(db, f.seed, f.shards); !errors.Is(err, db.batchErr) {
+		t.Fatalf("setup error %v, want %v", err, db.batchErr)
 	}
 	it := db.NewIterator(nil, nil)
 	defer it.Release()
 	if it.Next() {
 		t.Fatalf("failed batch left record %x", it.Key())
 	}
-	if _, _, err := SetupRootGenesisBlock(db, f.genesis, f.config); err != nil {
+	db.batchErr = nil
+	if _, _, err := InitializeRootDatabase(db, f.seed, f.shards); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 }
