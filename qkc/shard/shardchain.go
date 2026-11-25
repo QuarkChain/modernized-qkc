@@ -517,11 +517,10 @@ func (c *ShardChain) insertRootBlock(root *qkctypes.RootBlock, rootTip *qkctypes
 	rawdb.WriteRootBlock(batch, root)
 	rawdb.WriteLastConfirmedBlockHash(batch, root.Hash(), confirmed.Hash())
 	if err := batch.Write(); err != nil {
-		// TODO: Handle the edge case where the shard head switches successfully but
-		// the root batch fails. For now, log and return the error. Subsequent root
-		// imports, including re-importing the failed root, may restore consistency.
-		// If normal imports cannot resume, restart the service and recover through
-		// Init using a valid root checkpoint already stored locally.
+		// The shard head may have switched even though the root batch failed.
+		// Re-importing the root can restore consistency once writes succeed.
+		// Otherwise, restart and recover through Init using the master's root
+		// checkpoint and its locally stored direct parent.
 		log.Error("Failed to store root block", "root", root.Hash(), "rootTip", rootTip.Hash(), "confirmed", confirmed.Hash(), "previousHead", previousHead, "head", c.chain.CurrentBlock().Hash(), "err", err)
 		return false, fmt.Errorf("store root block %x: %w", root.Hash(), err)
 	}
