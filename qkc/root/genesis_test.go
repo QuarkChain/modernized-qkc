@@ -161,8 +161,8 @@ func TestRootGenesisSetupMissingCanonicalGenesis(t *testing.T) {
 	if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != r1.Hash() {
 		t.Fatalf("root head = %x, want %x, error %v", hash, r1.Hash(), err)
 	}
-	if hash, err := qkcrawdb.ReadRootGenesisHash(f.db); err != nil || hash != (common.Hash{}) {
-		t.Fatalf("rejected setup recreated canonical genesis %x, error %v", hash, err)
+	if hash := qkcrawdb.ReadRootCanonicalHash(f.db, 0); hash != (common.Hash{}) {
+		t.Fatalf("rejected setup recreated canonical genesis %x", hash)
 	}
 }
 
@@ -265,8 +265,8 @@ func TestCommitRootGenesisRejectsMalformedBlock(t *testing.T) {
 			if err := commitRootGenesis(db, seed, f.config); err == nil {
 				t.Fatal("accepted malformed root genesis")
 			}
-			if hash, err := qkcrawdb.ReadRootGenesisHash(db); err != nil || hash != (common.Hash{}) {
-				t.Fatalf("rejected seed left canonical genesis %x, error %v", hash, err)
+			if hash := qkcrawdb.ReadRootCanonicalHash(db, 0); hash != (common.Hash{}) {
+				t.Fatalf("rejected seed left canonical genesis %x", hash)
 			}
 		})
 	}

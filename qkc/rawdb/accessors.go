@@ -97,17 +97,6 @@ func WriteRootBlockWithError(db ethdb.KeyValueWriter, block *types.RootBlock) er
 	return db.Put(rootBlockKey(block.Hash()), data)
 }
 
-func readRootHash(db ethdb.KeyValueReader, key []byte) (common.Hash, error) {
-	data, err := db.Get(key)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	if len(data) != common.HashLength {
-		return common.Hash{}, fmt.Errorf("invalid root hash length %d", len(data))
-	}
-	return common.Hash(data), nil
-}
-
 // HasRootHeadBlockHash reports whether the database has a root head record.
 func HasRootHeadBlockHash(db ethdb.KeyValueReader) (bool, error) {
 	return db.Has(rootHeadBlockKey)
@@ -115,7 +104,8 @@ func HasRootHeadBlockHash(db ethdb.KeyValueReader) (bool, error) {
 
 // ReadRootHeadBlockHash retrieves the persisted canonical root head.
 func ReadRootHeadBlockHash(db ethdb.KeyValueReader) (common.Hash, error) {
-	return readRootHash(db, rootHeadBlockKey)
+	data, err := db.Get(rootHeadBlockKey)
+	return common.BytesToHash(data), err
 }
 
 // WriteRootHeadBlockHash stores the persisted canonical root head.
@@ -127,28 +117,13 @@ func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
 // Like core/rawdb.ReadCanonicalHash, it does not expose Get errors. A zero hash
 // therefore does not distinguish an absent index from a failed read.
 func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint32) common.Hash {
-	hash, _ := readRootHash(db, rootCanonicalKey(number))
-	return hash
+	data, _ := db.Get(rootCanonicalKey(number))
+	return common.BytesToHash(data)
 }
 
 // WriteRootCanonicalHash stores the hash assigned to a canonical root height.
 func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint32) error {
 	return db.Put(rootCanonicalKey(number), hash.Bytes())
-}
-
-// ReadRootGenesisHash reads canonical height zero. A zero hash with no error
-// means only that this key is absent; other root records may still exist.
-func ReadRootGenesisHash(db ethdb.KeyValueReader) (common.Hash, error) {
-	key := rootCanonicalKey(0)
-	has, err := db.Has(key)
-	if err != nil || !has {
-		return common.Hash{}, err
-	}
-	hash, err := readRootHash(db, key)
-	if err == nil && hash == (common.Hash{}) {
-		return common.Hash{}, fmt.Errorf("invalid zero canonical root genesis hash")
-	}
-	return hash, err
 }
 
 // ReadRootChainConfig reads the consensus rules associated with the root database.

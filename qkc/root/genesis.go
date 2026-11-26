@@ -40,15 +40,13 @@ func SetupRootGenesisBlock(db ethdb.Database, seed *RootGenesis, shards []*core.
 	if db == nil {
 		return nil, common.Hash{}, errors.New("missing root database")
 	}
-	hash, err := rawdb.ReadRootGenesisHash(db)
-	if err != nil {
-		return nil, common.Hash{}, fmt.Errorf("read canonical root genesis: %w", err)
-	}
+	hash := rawdb.ReadRootCanonicalHash(db, 0)
 	if hash == (common.Hash{}) && seed == nil {
 		return nil, common.Hash{}, errors.New("root genesis is required to initialize the database")
 	}
 	var genesis *types.RootBlock
 	if seed != nil {
+		var err error
 		genesis, err = BuildRootGenesis(seed, shards)
 		if err != nil {
 			return nil, common.Hash{}, err
