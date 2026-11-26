@@ -393,6 +393,30 @@ func TestRootPoWMiner(t *testing.T) {
 	})
 }
 
+func TestRootPoWMinerHeadChangeDuringBuild(t *testing.T) {
+	f, _ := newInsertEnv(t)
+	t.Cleanup(f.chain.Close)
+	miner := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{})
+	coinbase := common.Address{42}
+
+	// Advance the tip while the builder collects shard headers for the old parent.
+	f.client.onHeaders = func(context.Context) error {
+		f.client.onHeaders = nil
+		return f.chain.InsertBlock(f.block(f.genesis, 1))
+	}
+	first, err := miner.GetWork(t.Context(), coinbase)
+	if err != nil || first.Number != 1 {
+		t.Fatalf("work built on genesis: got %+v, %v", first, err)
+	}
+	next, err := miner.GetWork(t.Context(), coinbase)
+	if err != nil || next.Number != 2 {
+		t.Fatalf("work on the new head: got %+v, %v", next, err)
+	}
+	if err := miner.SubmitWork(first.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
+		t.Fatalf("submitting work built on the old head: got %v, want ErrStaleWork", err)
+	}
+}
+
 func TestRootCreateBlockToMineWaitsForDelivery(t *testing.T) {
 	for _, test := range []struct {
 		name        string

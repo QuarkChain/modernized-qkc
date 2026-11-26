@@ -168,13 +168,7 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if err != nil {
 		return nil, err
 	}
-	head, root, err := m.backend.MiningHead()
-	if err != nil {
-		return nil, err
-	}
-	if candidate.Parent != head || candidate.Root != root {
-		return nil, ErrStaleWork
-	}
+	// The next request checks for head or root tip changes during this build.
 	w := &servedWork{Candidate: candidate, expires: time.Now().Add(m.config.WorkRefresh)}
 	m.mu.Lock()
 	m.works.Add(w.SealHash, w)
