@@ -34,9 +34,9 @@ import (
 // MinerBackend supplies chain-specific work and tracks the mining head.
 type MinerBackend interface {
 	BuildMiningWork(ctx context.Context, coinbase common.Address) (*Candidate, error)
-	// MiningHead returns the canonical head and the root tip referenced by new
-	// shard blocks. The latter is zero for root mining.
-	MiningHead() (head, root common.Hash, err error)
+	// MiningHead returns the canonical head and a backend-defined cache anchor
+	// in one snapshot. Backends that use only the head return a zero anchor.
+	MiningHead() (head, anchor common.Hash, err error)
 	SubscribeMiningHead(ch chan<- struct{}) event.Subscription
 }
 
@@ -74,10 +74,13 @@ type MiningWork struct {
 
 // Candidate binds work to the original block. Submit seals a copy and imports
 // it through the chain's normal validation path. It may be called concurrently.
+// Submit must check Parent against the canonical head atomically with import.
+// If they differ, it returns ErrStaleWork before storing or propagating the block.
 type Candidate struct {
 	MiningWork
-	Parent, Root common.Hash
-	Submit       func(types.BlockNonce, common.Hash) error
+	Parent common.Hash
+	Anchor common.Hash // Cache anchor for this candidate, zero when unused.
+	Submit func(types.BlockNonce, common.Hash) error
 }
 
 // NonceSearch finds seals for local mining.
@@ -96,7 +99,7 @@ type PoWMinerConfig struct {
 
 // PoWMiner serves work to remote miners and mines locally, following
 // pyquarkchain's Miner. Work is built on demand, current per coinbase until it
-// expires or the head or referenced root tip changes. Served candidates stay
+// expires or the head or anchor changes. Served candidates stay
 // acceptable while their parent is the head, including candidates superseded by
 // newer work. Seals are applied to the served candidate, which the backend
 // imports.
@@ -133,9 +136,8 @@ func NewPoWMiner(backend MinerBackend, config PoWMinerConfig) *PoWMiner {
 	}
 }
 
-// GetWork returns the current work for coinbase, building it on the head
-// if coinbase has none, its work has expired, or the head or referenced root tip has
-// changed since it was built.
+// GetWork reuses unexpired work for coinbase while its parent and anchor match
+// the backend's head and anchor. Otherwise it builds a new candidate.
 func (m *PoWMiner) GetWork(ctx context.Context, coinbase common.Address) (*MiningWork, error) {
 	w, err := m.getWork(ctx, coinbase)
 	if err != nil {
@@ -168,7 +170,7 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if err != nil {
 		return nil, err
 	}
-	// The next request checks for head or root tip changes during this build.
+	// The next request checks for head or anchor changes during this build.
 	w := &servedWork{Candidate: candidate, expires: time.Now().Add(m.config.WorkRefresh)}
 	m.mu.Lock()
 	m.works.Add(w.SealHash, w)
@@ -177,19 +179,16 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	return w, nil
 }
 
-// currentWork returns the unexpired work for coinbase on the shard head and root
-// tip, if any. Unlike pyquarkchain, a root tip change also rebuilds the work: a
-// root reorg can orphan the root block it references without moving the shard
-// head, after which the candidate cannot become the head.
+// currentWork returns unexpired work for coinbase that matches the head and anchor.
 func (m *PoWMiner) currentWork(coinbase common.Address) (*servedWork, error) {
-	head, root, err := m.backend.MiningHead()
+	head, anchor, err := m.backend.MiningHead()
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w, ok := m.current.Get(coinbase)
-	if !ok || w.Parent != head || w.Root != root || !time.Now().Before(w.expires) || !m.works.Contains(w.SealHash) {
+	if !ok || w.Parent != head || w.Anchor != anchor || !time.Now().Before(w.expires) || !m.works.Contains(w.SealHash) {
 		return nil, nil
 	}
 	return w, nil
@@ -212,6 +211,7 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	if !ok {
 		return ErrUnknownWork
 	}
+	// Skip sealing known-stale work. Submit checks the parent again at import.
 	if w.Parent != head {
 		err = ErrStaleWork
 	} else {

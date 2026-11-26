@@ -143,6 +143,25 @@ func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 	})
 }
 
+func TestPoWMinerSubmitWorkAfterRootAdvance(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
+		coinbase := common.Address{0xaa}
+		first := getWork(t, m, coinbase)
+		root := env.sc.RootTip()
+		env.insertRoot(root.CreateBlockToAppend(nil, uint256.NewInt(1), nil, nil, nil), true)
+		if next := getWork(t, m, coinbase); next.SealHash == first.SealHash {
+			t.Fatal("root advance did not refresh work")
+		}
+		// The original root is still canonical and the shard parent is still the head.
+		head := submitWork(t, env, m, first)
+		extra, err := head.QKCExtra()
+		if err != nil || extra.PrevRootBlock != root.Hash() {
+			t.Fatalf("accepted work lost its original root reference: %v", err)
+		}
+	})
+}
+
 func TestPoWMinerSubmitWork(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})

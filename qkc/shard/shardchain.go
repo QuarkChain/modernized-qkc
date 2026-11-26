@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
@@ -241,6 +242,16 @@ func (c *ShardChain) RootTip() *qkctypes.RootBlockHeader {
 	return c.rootTip
 }
 
+// headAndRootTip reads the canonical shard head and root tip in one snapshot.
+func (c *ShardChain) headAndRootTip() (head, rootTip common.Hash, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rootTip == nil {
+		return common.Hash{}, common.Hash{}, ErrRootChainUninitialized
+	}
+	return c.chain.CurrentBlock().Hash(), c.rootTip.Hash(), nil
+}
+
 // validateGenesisRoot verifies the body commitment and this shard's sole
 // genesis header. Other shards' genesis hashes and heights are their own
 // responsibility; this shard only decodes their chain IDs to skip them.
@@ -289,7 +300,34 @@ func (c *ShardChain) validateGenesisRoot(root *qkctypes.RootBlock) (*types.Heade
 func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.insertShardBlock(block)
+}
 
+// importForDelivery imports a shard block and reports whether its delivery
+// was already committed. Mined blocks must extend the head at import time.
+func (c *ShardChain) importForDelivery(block *types.Block, mined bool) (committed bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if mined && block.ParentHash() != c.chain.CurrentBlock().Hash() {
+		return false, mining.ErrStaleWork
+	}
+	committed, err = rawdb.IsShardBlockCommitted(c.db, block.Hash())
+	if err != nil {
+		log.Error("Failed to read shard block commit marker", "chain", c.chain.Config().ChainID, "block", block.Hash(), "err", err)
+		return false, fmt.Errorf("read block %x commit marker: %w", block.Hash(), err)
+	}
+	if committed {
+		return true, nil
+	}
+	if err := c.insertShardBlock(block); err != nil {
+		log.Error("Failed to import shard block", "chain", c.chain.Config().ChainID, "block", block.Hash(), "number", block.NumberU64(), "err", err)
+		return false, err
+	}
+	return false, nil
+}
+
+// insertShardBlock requires c.mu.
+func (c *ShardChain) insertShardBlock(block *types.Block) error {
 	// Shard genesis is already committed before Init; it is not imported here.
 	if block.NumberU64() == 0 {
 		return consensus.ErrInvalidNumber

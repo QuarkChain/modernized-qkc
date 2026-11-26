@@ -30,14 +30,11 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
-	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
 )
-
-var _ mining.MinerBackend = (*Shard)(nil)
 
 // Shard imports blocks, sends cross-shard lists and reports headers to master.
 // ShardChain handles chain rules, root confirmations, and head selection.
@@ -111,75 +108,12 @@ func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) 
 	return block, diff, nil
 }
 
-// BuildMiningWork packages a shard candidate and its adjusted seal difficulty.
-func (s *Shard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
-	block, difficulty, err := s.CreateBlockToMine(ctx, coinbase)
-	if err != nil {
-		return nil, err
-	}
-	header := block.Header()
-	sealHash, err := header.QKCSealHash()
-	if err != nil {
-		return nil, err
-	}
-	extra, err := header.QKCExtra()
-	if err != nil {
-		return nil, err
-	}
-	return &mining.Candidate{
-		MiningWork: mining.MiningWork{SealHash: sealHash, Number: block.NumberU64(), Difficulty: difficulty, Time: block.Time()},
-		Parent:     block.ParentHash(),
-		Root:       extra.PrevRootBlock,
-		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
-			sealedHeader, sealedExtra := types.CopyHeader(header), *extra
-			sealedExtra.Nonce, sealedExtra.MixHash = nonce, mixHash
-			sealedHeader.Extra = sealedExtra.Encode()
-			return s.InsertMinedBlock(block.WithSeal(sealedHeader))
-		},
-	}, nil
-}
-
-// MiningHead returns the shard head and its current root checkpoint.
-func (s *Shard) MiningHead() (common.Hash, common.Hash, error) {
-	s.chain.mu.Lock()
-	defer s.chain.mu.Unlock()
-	if s.chain.rootTip == nil {
-		return common.Hash{}, common.Hash{}, ErrRootChainUninitialized
-	}
-	return s.CurrentBlock().Hash(), s.chain.rootTip.Hash(), nil
-}
-
-// SubscribeMiningHead forwards changes to the shard head as wakeups.
-func (s *Shard) SubscribeMiningHead(ch chan<- struct{}) event.Subscription {
-	heads := make(chan core.ChainHeadEvent, 1)
-	sub := s.SubscribeChainHeadEvent(heads)
-	if sub == nil {
-		return nil
-	}
-	return event.NewSubscription(func(quit <-chan struct{}) error {
-		defer sub.Unsubscribe()
-		for {
-			select {
-			case <-heads:
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
-			case err := <-sub.Err():
-				return err
-			case <-quit:
-				return nil
-			}
-		}
-	})
-}
-
-// InsertMinedBlock imports and propagates a sealed candidate through the same
-// path as a block received from the network.
+// InsertMinedBlock imports and propagates a sealed candidate if it still
+// extends the canonical shard head.
 func (s *Shard) InsertMinedBlock(block *types.Block) error {
 	ctx, cancel := context.WithTimeout(context.Background(), minedBlockDeliveryTimeout)
 	defer cancel()
-	return s.AddShardBlock(ctx, block)
+	return s.addShardBlock(ctx, block, true)
 }
 
 // SubscribeChainHeadEvent registers a subscription for shard head changes.
@@ -272,25 +206,18 @@ func (s *Shard) BroadcastXShardTxList(ctx context.Context, blockHash common.Hash
 // unconfirmed range in a background loop, including failed mined blocks and
 // single-cluster setups where root-sync recovery cannot trigger a retry.
 func (s *Shard) AddShardBlock(ctx context.Context, block *types.Block) error {
+	return s.addShardBlock(ctx, block, false)
+}
+
+func (s *Shard) addShardBlock(ctx context.Context, block *types.Block, mined bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if block == nil {
 		return errors.New("nil shard block")
 	}
-	// Skip completed deliveries so replaying old blocks cannot repeatedly amplify
-	// traffic into cross-shard broadcasts and master reports.
-	committed, err := rawdb.IsShardBlockCommitted(s.chain.db, block.Hash())
-	if err != nil {
-		log.Error("Failed to read shard block commit marker", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
-		return fmt.Errorf("read block %x commit marker: %w", block.Hash(), err)
-	}
-	if committed {
-		return nil
-	}
-	if err := s.chain.InsertShardBlock(block); err != nil {
-		// Log import failures here; ShardChain only returns errors to avoid duplicate logs.
-		log.Error("Failed to import shard block", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "number", block.NumberU64(), "err", err)
+	committed, err := s.chain.importForDelivery(block, mined)
+	if err != nil || committed {
 		return err
 	}
 	// Resolve local reporting data before sending RPCs, so calculation failures
