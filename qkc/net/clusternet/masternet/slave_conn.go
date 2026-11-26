@@ -11,16 +11,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
 // SlaveRequestHandler serves requests received from slaves. Calls may run
-// concurrently. Return *clusternet.RemoteError for business rejections; other errors
+// concurrently. Return *wire.RemoteError for business rejections; other errors
 // close the connection. sourceChainID is an independent copy of the configured
 // remote chain ID. The owner completes PING identity verification, slave
 // interconnection, and cluster initialization before starting business activity;
@@ -155,7 +155,7 @@ func (sc *SlaveConn) SendConnectToSlaves(ctx context.Context, slaves []clusterne
 }
 
 // SendAddRootBlock encodes and sends a root block. A nonzero remote
-// ErrorCode is returned as *clusternet.RemoteError; transport and context errors are
+// ErrorCode is returned as *wire.RemoteError; transport and context errors are
 // returned unchanged.
 func (sc *SlaveConn) SendAddRootBlock(ctx context.Context, root *qkctypes.RootBlock) error {
 	if root == nil {
@@ -175,13 +175,13 @@ func (sc *SlaveConn) SendAddRootBlock(ctx context.Context, root *qkctypes.RootBl
 		return fmt.Errorf("unexpected add root block response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return &clusternet.RemoteError{Code: result.ErrorCode}
+		return &wire.RemoteError{Code: result.ErrorCode}
 	}
 	return nil
 }
 
 // SendGetRootChainStakes returns the slave's staking response. A nonzero remote
-// ErrorCode is returned as *clusternet.RemoteError; transport and context errors are
+// ErrorCode is returned as *wire.RemoteError; transport and context errors are
 // returned unchanged. Business values are decoded before returning.
 func (sc *SlaveConn) SendGetRootChainStakes(ctx context.Context, address common.Address, shardBlockHash common.Hash) (*clusternet.RootChainStakesResult, error) {
 	req := &wire.GetRootChainStakesRequest{Address: address, ShardBlockHash: shardBlockHash}
@@ -194,7 +194,7 @@ func (sc *SlaveConn) SendGetRootChainStakes(ctx context.Context, address common.
 		return nil, fmt.Errorf("unexpected get root chain stakes response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return nil, &clusternet.RemoteError{Code: result.ErrorCode}
+		return nil, &wire.RemoteError{Code: result.ErrorCode}
 	}
 	return &clusternet.RootChainStakesResult{Stakes: result.Stakes.Clone(), Signer: result.Signer}, nil
 }
@@ -210,7 +210,7 @@ func (sc *SlaveConn) SendGetUnconfirmedHeaders(ctx context.Context) ([]*types.He
 		return nil, fmt.Errorf("unexpected get unconfirmed headers response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return nil, &clusternet.RemoteError{Code: result.ErrorCode}
+		return nil, &wire.RemoteError{Code: result.ErrorCode}
 	}
 	headers := make([]*types.Header, len(result.HeaderList))
 	for i, encoded := range result.HeaderList {

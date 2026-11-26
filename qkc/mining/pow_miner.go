@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-package shard
+// Package mining serves proof-of-work candidates and runs local nonce searches.
+package mining
 
 import (
 	"context"

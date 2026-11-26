@@ -27,9 +27,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
@@ -50,10 +50,10 @@ func (h *masterTestHandler) AddRootBlock(req *types.RootBlock) error {
 	if h.addErr != nil {
 		return h.addErr
 	}
-	return &clusternet.RemoteError{Code: 7}
+	return &wire.RemoteError{Code: 7}
 }
 func (h *masterTestHandler) GetRootChainStakes(common.Address, common.Hash) (*clusternet.RootChainStakesResult, error) {
-	return nil, &clusternet.RemoteError{Code: 8}
+	return nil, &wire.RemoteError{Code: 8}
 }
 func (h *masterTestHandler) GetUnconfirmedHeaders() ([]*coretypes.Header, error) {
 	return []*coretypes.Header{{Difficulty: big.NewInt(1), Number: big.NewInt(1)}}, nil
@@ -157,7 +157,7 @@ func TestMasterConnRPC(t *testing.T) {
 		t.Fatalf("decode unconfirmed header: %v, %v", &decodedHeader, err)
 	}
 	err = mc.SendAddShardBlockHeader(ctx, &coretypes.Header{Difficulty: big.NewInt(1), Number: big.NewInt(1)}, uint256.NewInt(0))
-	var remoteErr *clusternet.RemoteError
+	var remoteErr *wire.RemoteError
 	if !errors.As(err, &remoteErr) || remoteErr.Code != 9 {
 		t.Fatalf("expected remote error 9, got %v", err)
 	}

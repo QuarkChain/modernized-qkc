@@ -28,16 +28,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/conn"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/wire"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/conn"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
 // MasterRequestHandler serves requests received from the master. Calls may run
-// concurrently. Return *clusternet.RemoteError for business rejections; other errors
+// concurrently. Return *wire.RemoteError for business rejections; other errors
 // indicate handler failures and close the connection.
 type MasterRequestHandler interface {
 	CreateShards(rootTip *qkctypes.RootBlock) error
@@ -120,7 +120,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 }
 
 // SendAddShardBlockHeader reports a shard header and its coinbase reward to
-// the master. A nonzero business error code is returned as *clusternet.RemoteError.
+// the master. A nonzero business error code is returned as *wire.RemoteError.
 func (mc *MasterConn) SendAddShardBlockHeader(ctx context.Context, header *types.Header, coinbaseAmount *uint256.Int) error {
 	if header == nil {
 		return errors.New("shard block header must not be nil")
@@ -142,7 +142,7 @@ func (mc *MasterConn) SendAddShardBlockHeader(ctx context.Context, header *types
 		return fmt.Errorf("unexpected add shard block header response %T", resp)
 	}
 	if result.ErrorCode != 0 {
-		return &clusternet.RemoteError{Code: result.ErrorCode}
+		return &wire.RemoteError{Code: result.ErrorCode}
 	}
 	return nil
 }

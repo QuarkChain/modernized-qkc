@@ -1,6 +1,6 @@
 # Local root node. Runtime paths resolve from the working directory.
 [Node]
-DataDir = "./qkc-data/master"
+DataDir = "./qkc-data/devnet/master"
 PrivateHost = "127.0.0.1"
 PrivatePort = 18491
 IPCPath = "qkc-master.ipc"
