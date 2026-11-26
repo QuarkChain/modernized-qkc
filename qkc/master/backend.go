@@ -60,6 +60,8 @@ type Backend struct {
 	db      ethdb.Database
 	logger  log.Logger
 
+	APIBackend *APIBackend
+
 	initTasks    sync.WaitGroup
 	shutdownOnce sync.Once
 }
@@ -128,6 +130,7 @@ func New(stack *node.Node, cfg *Config) (_ *Backend, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("recover root chain (initialized root database required): %w", err)
 	}
+	b.APIBackend = &APIBackend{master: b}
 	stack.RegisterAPIs(b.APIs())
 	stack.RegisterProtocols(b.Protocols())
 	stack.RegisterLifecycle(b)
@@ -200,5 +203,10 @@ func (b *Backend) requestShutdown() {
 // coordinate their work with the backend lifecycle; they must not close them.
 func (b *Backend) RootChain() *root.RootChain  { return b.chain }
 func (b *Backend) Engine() poswroot.RootEngine { return b.engine }
-func (b *Backend) APIs() []rpc.API             { return nil }
-func (b *Backend) Protocols() []p2p.Protocol   { return nil }
+
+// APIs exposes the read-only master RPC service for node to register and host.
+// APIBackend's internal import and rewind methods are not registered.
+func (b *Backend) APIs() []rpc.API {
+	return []rpc.API{{Namespace: "master", Service: &API{backend: b.APIBackend}}}
+}
+func (b *Backend) Protocols() []p2p.Protocol { return nil }
