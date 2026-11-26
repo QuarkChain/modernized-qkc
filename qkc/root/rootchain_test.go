@@ -327,7 +327,7 @@ func TestRootPoWMiner(t *testing.T) {
 	if err := f.chain.Init(); err != nil {
 		t.Fatal(err)
 	}
-	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{})
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{})
 	coinbase := common.Address{42}
 	work, err := m.GetWork(t.Context(), coinbase)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestRootPoWMiner(t *testing.T) {
 
 func TestRootPoWMinerTipChange(t *testing.T) {
 	f, _ := newInsertEnv(t)
-	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
 	coinbase := common.Address{42}
 	old, err := m.GetWork(t.Context(), coinbase)
 	if err != nil {
@@ -393,7 +393,7 @@ func TestRootPoWMinerLocalHeadChange(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f, _ := newInsertEnv(t)
 		search := new(waitingRootSearch)
-		m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{Search: search, WorkRefresh: time.Hour})
+		m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{Search: search, WorkRefresh: time.Hour})
 		if err := m.StartLocalMining(); err != nil {
 			t.Fatal(err)
 		}
@@ -426,7 +426,7 @@ func TestRootPoWMinerLocalHeadChange(t *testing.T) {
 
 func TestRootPoWMinerNotReady(t *testing.T) {
 	f := newRootEnv(t)
-	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
 	coinbase := common.Address{42}
 	if work, err := m.GetWork(t.Context(), coinbase); work != nil || !errors.Is(err, errChainNotReady) {
 		t.Fatalf("work before Init: got %+v, err %v", work, err)

@@ -17,6 +17,7 @@
 package eth
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"math/big"
@@ -180,10 +181,18 @@ type blockedMiningImport struct {
 	entered, release chan struct{}
 }
 
-func (b *blockedMiningImport) InsertMinedBlock(block *types.Block) error {
-	close(b.entered)
-	<-b.release
-	return b.MinerBackend.InsertMinedBlock(block)
+func (b *blockedMiningImport) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
+	candidate, err := b.MinerBackend.BuildMiningWork(ctx, coinbase)
+	if err != nil {
+		return nil, err
+	}
+	submit := candidate.Submit
+	candidate.Submit = func(nonce types.BlockNonce, mixHash common.Hash) error {
+		close(b.entered)
+		<-b.release
+		return submit(nonce, mixHash)
+	}
+	return candidate, nil
 }
 
 func TestMiningRPCShutdown(t *testing.T) {
