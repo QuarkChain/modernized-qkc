@@ -91,7 +91,7 @@ var _ posw.RootChainReader = (*RootChain)(nil)
 // It binds the supplied client and engine without taking ownership of them or
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // backendCtx controls RootChain's lifetime and is canceled only by the backend.
-// Genesis, canonical indices and cumulative confirmations must already be stored.
+// Call SetupRootGenesisBlock before New and use the returned configuration.
 func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
 	if backendCtx == nil || config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing backend context, root configuration, cluster client, database or engine")
@@ -99,10 +99,6 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	if err := backendCtx.Err(); err != nil {
 		return nil, err
 	}
-	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
-	// genesis. For an empty database, atomically store genesis, its cumulative shard
-	// confirmations, the canonical index and root head. For an initialized database,
-	// validate genesis without replacing the persisted head.
 	hash, err := rawdb.ReadRootHeadBlockHash(db)
 	if err != nil {
 		return nil, fmt.Errorf("read persisted root head: %w", err)

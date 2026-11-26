@@ -34,6 +34,7 @@ var (
 	shardBlockCoinbaseAmountPrefix = []byte("qkc_shard_coinbase") // shardBlockCoinbaseAmountPrefix + block hash -> validated after-tax shard income
 	rootCanonicalPrefix            = []byte("qkc_root_canonical") // rootCanonicalPrefix + height -> canonical root hash
 	rootConfirmedPrefix            = []byte("qkc_root_confirmed") // rootConfirmedPrefix + root hash -> cumulative shard confirmations
+	rootChainConfigKey             = []byte("qkc_root_config")    // root consensus rules
 	rootHeadBlockKey               = []byte("qkc_root_tip")       // persisted canonical root head
 )
 

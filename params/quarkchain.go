@@ -89,9 +89,21 @@ func (c *QuarkChainConfig) Equal(other *QuarkChainConfig) bool {
 	if c == nil || other == nil {
 		return c == other
 	}
+	return c.EqualNetworkRules(other) &&
+		c.ConsensusType == other.ConsensusType && c.PoSW.Equal(other.PoSW)
+}
+
+// EqualNetworkRules compares the ordered chain IDs, reward tax rate, and
+// confirmation limit that the root and all shards currently share.
+//
+// TODO: Revisit the MaxBlocksPerRootBlock comparison. In PyQuarkChain each
+// shard's limit is floor(root target block time / shard target block time)
+// plus EXTRA_SHARD_BLOCKS_IN_ROOT_BLOCK (default 3), so limits can differ.
+func (c *QuarkChainConfig) EqualNetworkRules(other *QuarkChainConfig) bool {
+	if c == nil || other == nil {
+		return c == other
+	}
 	return slices.EqualFunc(c.ChainIDs, other.ChainIDs, configBlockEqual) &&
-		c.ConsensusType == other.ConsensusType &&
-		c.PoSW.Equal(other.PoSW) &&
 		configRatEqual(c.RewardTaxRate, other.RewardTaxRate) &&
 		c.MaxBlocksPerRootBlock == other.MaxBlocksPerRootBlock
 }

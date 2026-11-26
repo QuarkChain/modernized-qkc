@@ -17,6 +17,7 @@
 package rawdb
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -26,6 +27,7 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
@@ -95,10 +97,25 @@ func WriteRootBlockWithError(db ethdb.KeyValueWriter, block *types.RootBlock) er
 	return db.Put(rootBlockKey(block.Hash()), data)
 }
 
+func readRootHash(db ethdb.KeyValueReader, key []byte) (common.Hash, error) {
+	data, err := db.Get(key)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(data) != common.HashLength {
+		return common.Hash{}, fmt.Errorf("invalid root hash length %d", len(data))
+	}
+	return common.Hash(data), nil
+}
+
+// HasRootHeadBlockHash reports whether the database has a root head record.
+func HasRootHeadBlockHash(db ethdb.KeyValueReader) (bool, error) {
+	return db.Has(rootHeadBlockKey)
+}
+
 // ReadRootHeadBlockHash retrieves the persisted canonical root head.
 func ReadRootHeadBlockHash(db ethdb.KeyValueReader) (common.Hash, error) {
-	data, err := db.Get(rootHeadBlockKey)
-	return common.BytesToHash(data), err
+	return readRootHash(db, rootHeadBlockKey)
 }
 
 // WriteRootHeadBlockHash stores the persisted canonical root head.
@@ -110,13 +127,50 @@ func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
 // Like core/rawdb.ReadCanonicalHash, it does not expose Get errors. A zero hash
 // therefore does not distinguish an absent index from a failed read.
 func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint32) common.Hash {
-	data, _ := db.Get(rootCanonicalKey(number))
-	return common.BytesToHash(data)
+	hash, _ := readRootHash(db, rootCanonicalKey(number))
+	return hash
 }
 
 // WriteRootCanonicalHash stores the hash assigned to a canonical root height.
 func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint32) error {
 	return db.Put(rootCanonicalKey(number), hash.Bytes())
+}
+
+// ReadRootGenesisHash reads canonical height zero. A zero hash with no error
+// means only that this key is absent; other root records may still exist.
+func ReadRootGenesisHash(db ethdb.KeyValueReader) (common.Hash, error) {
+	key := rootCanonicalKey(0)
+	has, err := db.Has(key)
+	if err != nil || !has {
+		return common.Hash{}, err
+	}
+	hash, err := readRootHash(db, key)
+	if err == nil && hash == (common.Hash{}) {
+		return common.Hash{}, fmt.Errorf("invalid zero canonical root genesis hash")
+	}
+	return hash, err
+}
+
+// ReadRootChainConfig reads the consensus rules associated with the root database.
+func ReadRootChainConfig(db ethdb.KeyValueReader) (*params.QuarkChainConfig, error) {
+	data, err := db.Get(rootChainConfigKey)
+	if err != nil {
+		return nil, err
+	}
+	var config params.QuarkChainConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+// WriteRootChainConfig stores consensus parameters that the R0 hash alone cannot identify.
+func WriteRootChainConfig(db ethdb.KeyValueWriter, config *params.QuarkChainConfig) error {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	return db.Put(rootChainConfigKey, data)
 }
 
 // DeleteRootCanonicalHash removes a canonical index, retaining the block itself.
