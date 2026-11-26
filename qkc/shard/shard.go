@@ -93,7 +93,11 @@ func (s *Shard) Init(root *qkctypes.RootBlock) error {
 // coinbase, and returns the adjusted difficulty its seal must meet.
 // It reuses the chain's bound builder. Like pyquarkchain, the timestamp follows
 // the parent even when its next second is ahead of the clock.
+// TODO(cluster): Also require master-reported readiness once the notification exists.
 func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, *big.Int, error) {
+	if s.chain.RootTip() == nil {
+		return nil, nil, ErrRootChainUninitialized
+	}
 	bc := s.chain.chain
 	parent := bc.CurrentBlock()
 	block, err := s.chain.BuildBlock(ctx, miner.QKCBlockArgs{
