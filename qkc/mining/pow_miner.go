@@ -30,10 +30,10 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// MinerBackend supplies candidate construction and block import for PoWMiner,
-// like goquarkchain's MinerAPI.
+// MinerBackend supplies shard candidates and imports sealed shard blocks.
 type MinerBackend interface {
 	// CreateBlockToMine builds an unsealed candidate on the shard head, paying
 	// coinbase, and returns the difficulty its seal must meet.
@@ -72,7 +72,7 @@ var (
 	ErrUnknownWork = errors.New("unknown mining work")
 
 	// ErrStaleWork is returned when submitting work whose parent is no longer
-	// the shard head.
+	// the canonical head.
 	ErrStaleWork = errors.New("stale mining work")
 )
 
@@ -98,20 +98,23 @@ type PoWMinerConfig struct {
 	Search      NonceSearch    // Local seal search; nil disables StartLocalMining
 }
 
-// PoWMiner serves shard work to remote miners and mines locally, following
+// PoWMiner serves work to remote miners and mines locally, following
 // pyquarkchain's Miner. Work is built on demand, current per coinbase until it
-// expires or the shard head or root tip changes. Served candidates stay
+// expires or the chain head or referenced root changes. Served candidates stay
 // acceptable while their parent is the head, including candidates superseded by
 // newer work. Seals are applied to the served candidate, which the backend
 // imports.
 type PoWMiner struct {
-	backend MinerBackend
-	config  PoWMinerConfig
+	config    PoWMinerConfig
+	buildWork func(context.Context, common.Address) (*servedWork, error)
+	head      func() common.Hash
+	rootTip   func() common.Hash // Shard candidates also reference a root.
+	subscribe func(chan<- core.ChainHeadEvent) event.Subscription
 
 	build   chan struct{}                             // Semaphore serializing candidate construction
 	mu      sync.Mutex                                // Protects works and current
-	works   lru.BasicLRU[common.Hash, *types.Block]   // Served candidates by seal hash
-	current lru.BasicLRU[common.Address, *servedWork] // Current work by coinbase
+	works   lru.BasicLRU[common.Hash, *servedWork]    // Served candidates by seal hash
+	current lru.BasicLRU[common.Address, common.Hash] // Current seal hash by coinbase
 
 	lifecycle sync.Mutex
 	stop      func() // Stops local mining; nil when it is not running
@@ -122,25 +125,75 @@ type servedWork struct {
 	parent  common.Hash
 	root    common.Hash
 	expires time.Time
+	submit  func(types.BlockNonce, common.Hash) error
 }
 
 // NewPoWMiner creates a miner on the shard layer backend. Local mining starts
 // with StartLocalMining.
 func NewPoWMiner(backend MinerBackend, config PoWMinerConfig) *PoWMiner {
+	m := newPoWMiner(config)
+	m.head = func() common.Hash { return backend.CurrentBlock().Hash() }
+	m.rootTip = backend.RootTip
+	m.subscribe = backend.SubscribeChainHeadEvent
+	m.buildWork = func(ctx context.Context, coinbase common.Address) (*servedWork, error) {
+		return buildShardWork(ctx, backend, coinbase)
+	}
+	return m
+}
+
+// RootBackend supplies unsigned root candidates and imports sealed root blocks.
+type RootBackend interface {
+	Ready() bool
+	RootTip() *qkctypes.RootBlockHeader
+	CreateBlockToMine(context.Context, common.Address) (*qkctypes.RootBlock, error)
+	InsertBlock(*qkctypes.RootBlock) error
+}
+
+// NewRootPoWMiner serves unsigned root work at the header's base difficulty.
+func NewRootPoWMiner(backend RootBackend, config PoWMinerConfig) *PoWMiner {
+	m := newPoWMiner(config)
+	m.head = func() common.Hash {
+		if !backend.Ready() {
+			return common.Hash{}
+		}
+		return backend.RootTip().Hash()
+	}
+	m.buildWork = func(ctx context.Context, coinbase common.Address) (*servedWork, error) {
+		block, err := backend.CreateBlockToMine(ctx, coinbase)
+		if err != nil {
+			return nil, err
+		}
+		header := block.Header()
+		return &servedWork{
+			MiningWork: MiningWork{
+				SealHash: header.SealHash(), Number: block.NumberU64(),
+				Difficulty: header.Difficulty.ToBig(), Time: header.Time,
+			},
+			parent: header.ParentHash,
+			submit: func(nonce types.BlockNonce, mix common.Hash) error {
+				return backend.InsertBlock(block.WithMiningResult(nonce.Uint64(), mix, nil))
+			},
+		}, nil
+	}
+	// TODO(mining): Wake local root searches when the head changes. They currently
+	// refresh at WorkRefresh, and submission checks the head before import.
+	return m
+}
+
+func newPoWMiner(config PoWMinerConfig) *PoWMiner {
 	if config.WorkRefresh <= 0 {
 		config.WorkRefresh = DefaultWorkRefresh
 	}
 	return &PoWMiner{
-		backend: backend,
 		config:  config,
 		build:   make(chan struct{}, 1),
-		works:   lru.NewBasicLRU[common.Hash, *types.Block](miningWorkCacheSize),
-		current: lru.NewBasicLRU[common.Address, *servedWork](miningWorkCacheSize),
+		works:   lru.NewBasicLRU[common.Hash, *servedWork](miningWorkCacheSize),
+		current: lru.NewBasicLRU[common.Address, common.Hash](miningWorkCacheSize),
 	}
 }
 
-// GetWork returns the current work for coinbase, building it on the shard head
-// if coinbase has none, its work has expired, or the shard head or root tip has
+// GetWork returns the current work for coinbase, building it on the chain head
+// if coinbase has none, its work has expired, or the head or referenced root has
 // changed since it was built.
 func (m *PoWMiner) GetWork(ctx context.Context, coinbase common.Address) (*MiningWork, error) {
 	w, err := m.getWork(ctx, coinbase)
@@ -167,7 +220,21 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if w := m.currentWork(coinbase); w != nil {
 		return w, nil
 	}
-	block, diff, err := m.backend.CreateBlockToMine(ctx, coinbase)
+	w, err := m.buildWork(ctx, coinbase)
+	if err != nil {
+		return nil, err
+	}
+	// TODO(mining): Recheck the head and referenced root if they change during construction.
+	w.expires = time.Now().Add(m.config.WorkRefresh)
+	m.mu.Lock()
+	m.works.Add(w.SealHash, w)
+	m.current.Add(coinbase, w.SealHash)
+	m.mu.Unlock()
+	return w, nil
+}
+
+func buildShardWork(ctx context.Context, backend MinerBackend, coinbase common.Address) (*servedWork, error) {
+	block, diff, err := backend.CreateBlockToMine(ctx, coinbase)
 	if err != nil {
 		return nil, err
 	}
@@ -180,50 +247,55 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if err != nil {
 		return nil, err
 	}
-	w := &servedWork{
+	return &servedWork{
 		MiningWork: MiningWork{
 			SealHash:   sealHash,
 			Number:     block.NumberU64(),
 			Difficulty: diff,
 			Time:       block.Time(),
 		},
-		parent:  block.ParentHash(),
-		root:    extra.PrevRootBlock,
-		expires: time.Now().Add(m.config.WorkRefresh),
-	}
-	m.mu.Lock()
-	m.works.Add(sealHash, block)
-	m.current.Add(coinbase, w)
-	m.mu.Unlock()
-	return w, nil
+		parent: block.ParentHash(),
+		root:   extra.PrevRootBlock,
+		submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
+			header, sealed := block.Header(), *extra
+			sealed.Nonce, sealed.MixHash = nonce, mixHash
+			header.Extra = sealed.Encode()
+			return backend.InsertMinedBlock(block.WithSeal(header))
+		},
+	}, nil
 }
 
-// currentWork returns the unexpired work for coinbase on the shard head and root
-// tip, if any. Unlike pyquarkchain, a root tip change also rebuilds the work: a
-// root reorg can orphan the root block it references without moving the shard
-// head, after which the candidate cannot become the head.
+// A root reorg can orphan the root referenced by shard work without moving the shard head.
 func (m *PoWMiner) currentWork(coinbase common.Address) *servedWork {
-	head, root := m.backend.CurrentBlock().Hash(), m.backend.RootTip()
+	head := m.head()
+	var root common.Hash
+	if m.rootTip != nil {
+		root = m.rootTip()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	w, ok := m.current.Get(coinbase)
-	if !ok || w.parent != head || w.root != root || !time.Now().Before(w.expires) || !m.works.Contains(w.SealHash) {
+	hash, ok := m.current.Get(coinbase)
+	if !ok {
+		return nil
+	}
+	w, ok := m.works.Peek(hash)
+	if !ok || w.parent != head || w.root != root || !time.Now().Before(w.expires) {
 		return nil
 	}
 	return w
 }
 
 // SubmitWork seals the served candidate with sealHash and imports it. A
-// candidate is accepted while its parent is the shard head, even after newer
+// candidate is accepted while its parent is the chain head, even after newer
 // work has been served, and is dropped once imported or stale.
 // TODO(sync): Retry delivery of uncommitted mined blocks independently of work:
 // if import succeeds but RPCs fail, the moved head makes resubmissions stale,
 // and the local mining loop logs the error and moves on.
 func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash) error {
-	head := m.backend.CurrentBlock().Hash()
+	head := m.head()
 	m.mu.Lock()
-	block, ok := m.works.Get(sealHash)
-	if ok && block.ParentHash() != head {
+	w, ok := m.works.Get(sealHash)
+	if ok && w.parent != head {
 		m.works.Remove(sealHash)
 		m.mu.Unlock()
 		return ErrStaleWork
@@ -232,17 +304,9 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	if !ok {
 		return ErrUnknownWork
 	}
-	header := block.Header()
-	extra, err := header.QKCExtra()
-	if err != nil {
-		return err
-	}
-	extra.Nonce, extra.MixHash = nonce, mixHash
-	header.Extra = extra.Encode()
-	// Like pyquarkchain, the seal is not verified here but by the import,
-	// before executing the block: ValidateBody calls the engine's VerifySeal
-	// once the parent state is available.
-	if err := m.backend.InsertMinedBlock(block.WithSeal(header)); err != nil {
+	// TODO(mining): Check the parent under the chain's import lock. Two submissions
+	// can pass the check above and both be stored and propagated.
+	if err := w.submit(nonce, mixHash); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -263,19 +327,14 @@ func (m *PoWMiner) StartLocalMining() error {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	heads := make(chan core.ChainHeadEvent, 1)
-	sub := m.backend.SubscribeChainHeadEvent(heads)
 	changed := make(chan struct{}, 1)
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		watchHeads(ctx, cancel, sub, heads, changed)
-	}()
-	go func() {
-		defer wg.Done()
-		m.mine(ctx, changed)
-	}()
+	if m.subscribe != nil {
+		heads := make(chan core.ChainHeadEvent, 1)
+		sub := m.subscribe(heads)
+		wg.Go(func() { watchHeads(ctx, cancel, sub, heads, changed) })
+	}
+	wg.Go(func() { m.mine(ctx, changed) })
 	m.stop = func() {
 		cancel()
 		wg.Wait()
@@ -321,7 +380,7 @@ func (m *PoWMiner) mine(ctx context.Context, changed <-chan struct{}) {
 		w, err := m.getWork(ctx, m.config.Coinbase)
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Warn("Failed to get shard mining work", "err", err)
+				log.Warn("Failed to get mining work", "err", err)
 			}
 			waitForMiningRetry(ctx)
 			continue
@@ -332,11 +391,11 @@ func (m *PoWMiner) mine(ctx context.Context, changed <-chan struct{}) {
 		}
 		switch err := m.SubmitWork(w.SealHash, nonce, mixHash); {
 		case err == nil:
-			log.Info("Mined shard block", "number", w.Number, "sealhash", w.SealHash)
+			log.Info("Mined block", "number", w.Number, "sealhash", w.SealHash)
 		case errors.Is(err, ErrStaleWork):
-			log.Debug("Discarded stale shard block", "number", w.Number, "sealhash", w.SealHash)
+			log.Debug("Discarded stale mined block", "number", w.Number, "sealhash", w.SealHash)
 		default:
-			log.Warn("Failed to import mined shard block", "number", w.Number, "err", err)
+			log.Warn("Failed to import mined block", "number", w.Number, "err", err)
 			waitForMiningRetry(ctx)
 		}
 	}
@@ -360,7 +419,7 @@ func (m *PoWMiner) search(ctx context.Context, w *servedWork, changed <-chan str
 			select {
 			case <-changed:
 				// Events may predate w, such as the import of its parent.
-				if m.backend.CurrentBlock().Hash() != w.parent {
+				if m.head() != w.parent {
 					cancel()
 					return
 				}

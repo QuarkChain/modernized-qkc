@@ -31,6 +31,7 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -318,6 +319,42 @@ func TestRootCreateBlockToMine(t *testing.T) {
 	}
 	if chain.RootTip().Hash() != parent.Hash() || qkcrawdb.HasRootBlock(f.db, block.Hash()) || len(f.client.broadcasts) != 0 {
 		t.Fatal("candidate construction advanced the tip, stored or broadcast the block")
+	}
+}
+
+func TestRootPoWMiner(t *testing.T) {
+	f := newRootEnv(t)
+	if err := f.chain.Init(); err != nil {
+		t.Fatal(err)
+	}
+	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{})
+	coinbase := common.Address{42}
+	work, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
+	defer search.Close()
+	nonce, mix, ok := search.SearchNonce(t.Context(), work.Number, work.SealHash, work.Difficulty, 1)
+	if !ok {
+		t.Fatal("Ethash search failed")
+	}
+	badMix := mix
+	badMix[0] ^= 1
+	if err := m.SubmitWork(work.SealHash, nonce, badMix); err == nil || len(f.client.broadcasts) != 0 {
+		t.Fatal("invalid seal was accepted or broadcast")
+	}
+	if err := m.SubmitWork(work.SealHash, nonce, mix); err != nil {
+		t.Fatal(err)
+	}
+	tip := f.chain.RootTip()
+	if tip.ParentHash != f.genesis.Hash() || tip.Coinbase != coinbase || tip.SealHash() != work.SealHash ||
+		uint64(tip.Number) != work.Number || tip.Time != work.Time || tip.Difficulty.ToBig().Cmp(work.Difficulty) != 0 ||
+		tip.Nonce != nonce.Uint64() || tip.MixDigest != mix || tip.Signature != ([65]byte{}) {
+		t.Fatal("root tip does not match the unsigned work and submitted seal")
+	}
+	if !qkcrawdb.HasRootBlock(f.db, tip.Hash()) || len(f.client.broadcasts) != 1 || f.client.broadcasts[0] != tip.Hash() {
+		t.Fatal("sealed root was not persisted and broadcast")
 	}
 }
 
