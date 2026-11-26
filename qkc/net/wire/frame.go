@@ -48,33 +48,33 @@ const (
 	maxClusterPayloadLen = math.MaxInt32 - frameHeader - clusterPeerIDSize - frameBodyHeader
 )
 
-// P2P frames are carried in geth's p2p.Msg:
+// QKC sends P2PFrame through geth's P2P protocol, which requires
+// a message code and a payload. Since P2PFrame already contains its
+// own opcode, QKC sets the message code to 0 and uses the encoded
+// P2PFrame as the message payload.
 //
-//	Code:    geth message code (uint64), separate from the QKC opcode
-//	Size:    byte length of the encoded P2PFrame
-//	Payload: encoded P2PFrame = [32B chain_id][1B opcode][8B rpc_id][payload]
+// Geth adds the protocol offset to the message code and encodes
+// the RLPx frame body as:
 //
-// geth's p2p/rlpx.Conn.Write puts the code before the message payload:
+//	without Snappy: [RLP(code)][P2PFrame]
+//	with Snappy:    [RLP(code)][Snappy(P2PFrame)]
 //
-//	without Snappy: [RLP(Msg.Code)][Msg.Payload]
-//	with Snappy:    [RLP(Msg.Code)][Snappy(Msg.Payload)]
-//
-// sessionState.writeFrame requires this combined length to fit in 24 bits:
-// at most (1 << 24) - 1 bytes. The transport header, padding, and MACs are
-// outside this length. The limits below reserve space for the geth code,
-// possible Snappy expansion, and finally the QKC frame header.
+// The combined size of the encoded code and payload must fit within
+// the RLPx 24-bit frame size limit. Therefore, the maximum P2PFrame
+// size must account for both the encoded code and possible Snappy
+// expansion.
 const (
 	// rlpxMaxFrameSize bounds the combined code and message bytes shown above.
 	rlpxMaxFrameSize = (1 << 24) - 1
-	// rlpxMaxCodeSize reserves at most 9 bytes for RLP(Msg.Code): a prefix
+	// rlpxMaxCodeSize reserves at most 9 bytes for RLP(code): a prefix
 	// followed by 8 value bytes. It does not include the QKC opcode.
 	rlpxMaxCodeSize = 9
 	// Snappy can expand data. Its encoded size is bounded by 32 + n + n/6
 	// for n input bytes; snappyOverhead is the fixed 32-byte term.
 	snappyOverhead = 32
 
-	// MaxP2PFrameSize bounds len(Msg.Payload) before compression, including
-	// the QKC header. For n bytes, both transport layouts must fit:
+	// MaxP2PFrameSize bounds the encoded P2PFrame length before compression,
+	// including the QKC header. For n bytes, both transport layouts must fit:
 	//
 	//	without Snappy: 9 + n <= rlpxMaxFrameSize
 	//	with Snappy:    9 + 32 + n + n/6 <= rlpxMaxFrameSize
@@ -82,11 +82,11 @@ const (
 	// The stricter Snappy bound gives the conservative 6/7 factor below.
 	MaxP2PFrameSize = (rlpxMaxFrameSize - rlpxMaxCodeSize - snappyOverhead) * 6 / 7
 
-	// P2PFrameHeaderSize is the 41-byte header inside Msg.Payload.
+	// P2PFrameHeaderSize is the 41-byte QKC frame header.
 	P2PFrameHeaderSize = chainIDSize + frameBodyHeader
 	// MaxP2PPayloadLen bounds P2PFrame.Payload after subtracting the QKC header.
 	// External P2P frames and future virtual peer connections share this limit.
-	// ClusterPeerID is internal routing metadata and is not sent in p2p.Msg.
+	// ClusterPeerID is internal routing metadata and is not sent in P2PFrame.
 	MaxP2PPayloadLen = MaxP2PFrameSize - P2PFrameHeaderSize
 )
 
