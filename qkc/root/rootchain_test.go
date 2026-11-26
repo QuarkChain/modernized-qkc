@@ -358,6 +358,51 @@ func TestRootPoWMiner(t *testing.T) {
 	}
 }
 
+func TestRootPoWMinerTipChange(t *testing.T) {
+	f, _ := newInsertEnv(t)
+	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
+	coinbase := common.Address{42}
+	old, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tip := f.block(f.genesis, 1)
+	if err := f.chain.InsertBlock(tip); err != nil {
+		t.Fatal(err)
+	}
+	// Request work while the old candidate is still cached for this coinbase.
+	if next, err := m.GetWork(t.Context(), coinbase); err != nil || next.Number != tip.NumberU64()+1 || next.SealHash == old.SealHash {
+		t.Fatalf("work after tip change: got %+v, err %v", next, err)
+	}
+	if err := m.SubmitWork(old.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
+		t.Fatalf("submit work on old tip: got %v, want ErrStaleWork", err)
+	}
+}
+
+func TestRootPoWMinerNotReady(t *testing.T) {
+	f := newRootEnv(t)
+	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
+	coinbase := common.Address{42}
+	if work, err := m.GetWork(t.Context(), coinbase); work != nil || !errors.Is(err, errChainNotReady) {
+		t.Fatalf("work before Init: got %+v, err %v", work, err)
+	}
+	if err := f.chain.Init(); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cancel the backend with the same tip and unexpired work in the cache.
+	f.cancel()
+	if work, err := m.GetWork(t.Context(), coinbase); work != nil || !errors.Is(err, errChainNotReady) {
+		t.Fatalf("cached work after shutdown: got %+v, err %v", work, err)
+	}
+	if err := m.SubmitWork(cached.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
+		t.Fatalf("submit work after shutdown: got %v, want ErrStaleWork", err)
+	}
+}
+
 func TestRootCreateBlockToMineWaitsForDelivery(t *testing.T) {
 	for _, test := range []struct {
 		name        string

@@ -171,6 +171,8 @@ func NewRootPoWMiner(backend RootBackend, config PoWMinerConfig) *PoWMiner {
 			},
 			parent: header.ParentHash,
 			submit: func(nonce types.BlockNonce, mix common.Hash) error {
+				// TODO(mining): Offer discounted work to eligible root PoSW miners and
+				// accept the staking signer's signature over the seal hash on submission.
 				return backend.InsertBlock(block.WithMiningResult(nonce.Uint64(), mix, nil))
 			},
 		}, nil
