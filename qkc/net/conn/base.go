@@ -459,9 +459,10 @@ func (c *BaseConn) handleFrameSafely(frame wire.Frame) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			c.log.Error("frame processing panic",
-				"frame", frame,
+				"opcode", frame.GetOpcode(), "rpcid", frame.GetRPCID(), "payload_len", len(frame.GetPayload()),
 				"panic", recovered, "stack", string(debug.Stack()))
-			c.shutdown(fmt.Errorf("frame processing panic: %v", recovered))
+			c.shutdown(fmt.Errorf("frame processing panic (opcode=0x%x rpc_id %d): %v",
+				frame.GetOpcode(), frame.GetRPCID(), recovered))
 		}
 	}()
 	c.handleFrame(frame)
