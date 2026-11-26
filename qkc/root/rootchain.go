@@ -462,12 +462,31 @@ func (c *RootChain) CreateBlockToMine(ctx context.Context, coinbase common.Addre
 	if err != nil || !c.Ready() {
 		return nil, errChainNotReady
 	}
-	// A pending shard RPC must stop on either request cancellation or shutdown.
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := c.miningContext(ctx)
 	defer cancel()
-	stop := context.AfterFunc(c.backendCtx, cancel)
-	defer stop()
 	return c.builder.BuildBlock(ctx, RootBlockArgs{Parent: parent, Coinbase: coinbase})
+}
+
+// MiningDiffDivider returns the root PoSW divisor available with an authorized
+// signature, or zero when the candidate has no such discount.
+func (c *RootChain) MiningDiffDivider(ctx context.Context, header *types.RootBlockHeader) (uint64, error) {
+	ctx, cancel := c.miningContext(ctx)
+	defer cancel()
+	info, err := posw.GetPoSWInfo(c.config, rootStakeReader{c, ctx}, header)
+	if err != nil || !info.EligibleForDiscount() {
+		return 0, err
+	}
+	return c.config.PoSW.DiffDivider, nil
+}
+
+// Mining requests can be canceled by the caller or by backend shutdown.
+func (c *RootChain) miningContext(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.backendCtx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // GetRootTipWithLock waits for chain writes, including Init and root delivery,
@@ -570,12 +589,22 @@ func (c *RootChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int,
 // substituting zero stakes or retrying here. Connection failures are managed by
 // the client. Wrapped context and remote errors remain identifiable with errors.Is/As.
 func (c *RootChain) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
-	ctx, cancel := context.WithTimeout(c.backendCtx, rpcTimeout)
+	return (rootStakeReader{c, c.backendCtx}).GetRootChainStakes(chainID, shardBlockHash, coinbase)
+}
+
+// rootStakeReader binds the staking RPC to the lifetime of the operation.
+type rootStakeReader struct {
+	*RootChain
+	ctx context.Context
+}
+
+func (r rootStakeReader) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, rpcTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, common.Address{}, err
 	}
-	result, err := c.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
+	result, err := r.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
 	if err != nil {
 		return nil, common.Address{}, fmt.Errorf("query root stakes for chain %v, shard block %x, coinbase %s: %w", chainID, shardBlockHash, coinbase, err)
 	}

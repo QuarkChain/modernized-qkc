@@ -80,8 +80,11 @@ var (
 type MiningWork struct {
 	SealHash   common.Hash // Hash of the candidate without its seal
 	Number     uint64      // Candidate block number
-	Difficulty *big.Int    // Difficulty the seal must meet
+	Difficulty *big.Int    // Root base difficulty or shard effective difficulty
 	Time       uint64      // Candidate timestamp
+	// A nonzero DiffDivider lets the staking signer mine root work at
+	// max(1, Difficulty / DiffDivider).
+	DiffDivider uint64
 }
 
 // NonceSearch finds seals for local mining.
@@ -125,7 +128,7 @@ type servedWork struct {
 	parent  common.Hash
 	root    common.Hash
 	expires time.Time
-	submit  func(types.BlockNonce, common.Hash) error
+	submit  func(types.BlockNonce, common.Hash, *[65]byte) error
 }
 
 // NewPoWMiner creates a miner on the shard layer backend. Local mining starts
@@ -146,10 +149,13 @@ type RootBackend interface {
 	CurrentBlock() *qkctypes.RootBlockHeader
 	SubscribeRootHeadEvent(chan<- common.Hash) event.Subscription
 	CreateBlockToMine(context.Context, common.Address) (*qkctypes.RootBlock, error)
+	// MiningDiffDivider quotes the conditional discount on the candidate's parent branch.
+	MiningDiffDivider(context.Context, *qkctypes.RootBlockHeader) (uint64, error)
 	InsertBlock(*qkctypes.RootBlock) error
 }
 
-// NewRootPoWMiner serves unsigned root work at the header's base difficulty.
+// NewRootPoWMiner serves root work at base difficulty, with an optional
+// PoSW divider for miners that can supply the staking signer's signature.
 func NewRootPoWMiner(backend RootBackend, config PoWMinerConfig) *PoWMiner {
 	m := newPoWMiner(config, backend.SubscribeRootHeadEvent)
 	m.head = func() common.Hash {
@@ -164,16 +170,18 @@ func NewRootPoWMiner(backend RootBackend, config PoWMinerConfig) *PoWMiner {
 			return nil, err
 		}
 		header := block.Header()
+		divider, err := backend.MiningDiffDivider(ctx, header)
+		if err != nil {
+			return nil, err
+		}
 		return &servedWork{
 			MiningWork: MiningWork{
-				SealHash: header.SealHash(), Number: block.NumberU64(),
-				Difficulty: header.Difficulty.ToBig(), Time: header.Time,
+				SealHash: header.SealHash(), Number: block.NumberU64(), Time: header.Time,
+				Difficulty: header.Difficulty.ToBig(), DiffDivider: divider,
 			},
 			parent: header.ParentHash,
-			submit: func(nonce types.BlockNonce, mix common.Hash) error {
-				// TODO(mining): Offer discounted work to eligible root PoSW miners and
-				// accept the staking signer's signature over the seal hash on submission.
-				return backend.InsertBlock(block.WithMiningResult(nonce.Uint64(), mix, nil))
+			submit: func(nonce types.BlockNonce, mix common.Hash, signature *[65]byte) error {
+				return backend.InsertBlock(block.WithMiningResult(nonce.Uint64(), mix, signature))
 			},
 		}, nil
 	}
@@ -257,7 +265,10 @@ func buildShardWork(ctx context.Context, backend MinerBackend, coinbase common.A
 		},
 		parent: block.ParentHash(),
 		root:   extra.PrevRootBlock,
-		submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
+		submit: func(nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error {
+			if signature != nil {
+				return errors.New("shard work does not accept a staking signature")
+			}
 			header, sealed := block.Header(), *extra
 			sealed.Nonce, sealed.MixHash = nonce, mixHash
 			header.Extra = sealed.Encode()
@@ -293,6 +304,12 @@ func (m *PoWMiner) currentWork(coinbase common.Address) *servedWork {
 // if import succeeds but RPCs fail, the moved head makes resubmissions stale,
 // and the local mining loop logs the error and moves on.
 func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash) error {
+	return m.SubmitWorkWithSignature(sealHash, nonce, mixHash, nil)
+}
+
+// SubmitWorkWithSignature submits a seal with an optional 65-byte root staking
+// signature over sealHash. Root consensus verifies the signed candidate on import.
+func (m *PoWMiner) SubmitWorkWithSignature(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error {
 	head := m.head()
 	m.mu.Lock()
 	w, ok := m.works.Get(sealHash)
@@ -307,7 +324,7 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	}
 	// TODO(mining): Check the parent under the chain's import lock. Two submissions
 	// can pass the check above and both be stored and propagated.
-	if err := w.submit(nonce, mixHash); err != nil {
+	if err := w.submit(nonce, mixHash, signature); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -439,5 +456,8 @@ func (m *PoWMiner) search(ctx context.Context, w *servedWork, changed <-chan str
 			}
 		}
 	})
-	return m.config.Search.Search(ctx, &w.MiningWork)
+	// The local miner submits unsigned work, so its search uses Difficulty.
+	work := w.MiningWork
+	work.DiffDivider = 0
+	return m.config.Search.Search(ctx, &work)
 }
