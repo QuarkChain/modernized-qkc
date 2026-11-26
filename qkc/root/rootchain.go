@@ -446,11 +446,6 @@ func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
 }
 
-// CurrentBlock returns the read-only canonical root header for mining.
-func (c *RootChain) CurrentBlock() *types.RootBlockHeader {
-	return c.RootTip()
-}
-
 // CreateBlockToMine builds an unsigned, unsealed candidate on the initialized root tip.
 // Parent selection waits for in-flight chain writes, including root delivery.
 // TODO(sync): Skip candidate construction while the root synchronizer is running.

@@ -50,10 +50,10 @@ func (s *Shard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*
 		Parent: block.ParentHash(),
 		Anchor: extra.PrevRootBlock,
 		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
-			sealedHeader, sealedExtra := types.CopyHeader(header), *extra
+			sealedHeader, sealedExtra := *header, *extra
 			sealedExtra.Nonce, sealedExtra.MixHash = nonce, mixHash
 			sealedHeader.Extra = sealedExtra.Encode()
-			return s.InsertMinedBlock(block.WithSeal(sealedHeader))
+			return s.InsertMinedBlock(block.WithSeal(&sealedHeader))
 		},
 	}, nil
 }

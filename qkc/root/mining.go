@@ -55,7 +55,7 @@ func (c *RootChain) MiningHead() common.Hash {
 	if !c.Ready() {
 		return common.Hash{}
 	}
-	return c.CurrentBlock().Hash()
+	return c.RootTip().Hash()
 }
 
 // MiningAnchor returns zero because root work depends only on the root head.

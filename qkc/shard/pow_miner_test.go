@@ -199,40 +199,19 @@ func TestPoWMinerSubmitWork(t *testing.T) {
 	})
 }
 
-// failingShard is a shard layer whose imports fail while err is set.
-type failingShard struct {
-	*Shard
-	err error
-}
-
-func (s *failingShard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
-	candidate, err := s.Shard.BuildMiningWork(ctx, coinbase)
-	if err != nil {
-		return nil, err
-	}
-	submit := candidate.Submit
-	candidate.Submit = func(nonce types.BlockNonce, mixHash common.Hash) error {
-		if s.err != nil {
-			return s.err
-		}
-		return submit(nonce, mixHash)
-	}
-	return candidate, nil
-}
-
 func TestPoWMinerSubmitWorkInsertFailure(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
-		env, _, _ := newMiningEnv(t, 10002)
-		insertErr := errors.New("insert failed")
-		backend := &failingShard{Shard: newMiningShard(env.sc), err: insertErr}
-		m := mining.NewPoWMiner(backend, mining.PoWMinerConfig{})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
 		work := getWork(t, m, common.Address{0xaa})
+		insertErr := errors.New("commit marker read failed")
+		db := &failingDepositDB{KeyValueStore: env.db, hasErr: insertErr}
+		env.sc.db = db
 		if err := m.SubmitWork(work.SealHash, types.EncodeNonce(1), common.Hash{}); !errors.Is(err, insertErr) {
 			t.Fatalf("insert failure: %v", err)
 		}
 		env.checkHead(env.genesis)
 		// The work stays available for another submission.
-		backend.err = nil
+		db.hasErr = nil
 		if err := m.SubmitWork(work.SealHash, types.EncodeNonce(1), common.Hash{}); err != nil {
 			t.Fatal(err)
 		}
