@@ -372,6 +372,35 @@ func TestOpSerializerFor_WireRegistry(t *testing.T) {
 	}
 }
 
+func TestP2POpSerializerFor_WireRegistry(t *testing.T) {
+	covered := make(map[wire.CommandOp]bool)
+	nonRPCOps := P2PNonRPCOps()
+	check := func(opcode byte, message wire.SSZMessage) {
+		registered, err := wire.NewCommandMessage(wire.CommandOp(opcode))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reflect.TypeOf(message) != reflect.TypeOf(registered) {
+			t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", opcode, message, registered)
+		}
+		covered[wire.CommandOp(opcode)] = true
+	}
+	for requestOp, serializer := range P2PSerializers() {
+		check(requestOp, serializer.NewRequest())
+		if _, nonRPC := nonRPCOps[requestOp]; !nonRPC {
+			check(serializer.ResponseOpCode, serializer.NewResponse())
+		}
+	}
+	for opcode := 0; opcode < int(wire.ClusterOpBase); opcode++ {
+		if wire.CommandOp(opcode) == wire.CommandOpHello {
+			continue
+		}
+		if _, err := wire.NewCommandMessage(wire.CommandOp(opcode)); err == nil && !covered[wire.CommandOp(opcode)] {
+			t.Errorf("opcode 0x%x has no serializer coverage", opcode)
+		}
+	}
+}
+
 // TestConfig_ValidationPanics covers config validation panics.
 func TestConfig_ValidationPanics(t *testing.T) {
 	tests := []struct {

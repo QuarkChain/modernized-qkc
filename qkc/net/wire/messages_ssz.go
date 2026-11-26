@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	ssz "github.com/OffchainLabs/methodical-ssz/ssz"
+	common "github.com/ethereum/go-ethereum/common"
 )
 
 func (c *PingRequest) SizeSSZ() int {
@@ -579,156 +580,6 @@ func (c *ConnectToSlavesResponse) HashTreeRootWith(hh *ssz.Hasher) (err error) {
 		}
 		hh.MerkleizeWithMixin(subIndx, uint64(len(c.ResultList)), 4294967295)
 	}
-	hh.Merkleize(indx)
-	return nil
-}
-
-func (c *HelloCommand) SizeSSZ() int {
-	size := 98
-	size += len(c.RootBlockHeader)
-	return size
-}
-
-func (c *HelloCommand) MarshalSSZ() ([]byte, error) {
-	buf := make([]byte, c.SizeSSZ())
-	return c.MarshalSSZTo(buf[:0])
-}
-
-func (c *HelloCommand) MarshalSSZTo(dst []byte) ([]byte, error) {
-	var err error
-	offset := 98
-
-	// Field 0: Version
-	dst = binary.LittleEndian.AppendUint32(dst, c.Version)
-
-	// Field 1: NetworkID
-	dst = binary.LittleEndian.AppendUint64(dst, c.NetworkID)
-
-	// Field 2: PeerID
-	if len(c.PeerID) != 32 {
-		return nil, ssz.ErrBytesLength
-	}
-	dst = append(dst, c.PeerID[:]...)
-
-	// Field 3: PeerIP
-	if len(c.PeerIP) != 16 {
-		return nil, ssz.ErrBytesLength
-	}
-	dst = append(dst, c.PeerIP[:]...)
-
-	// Field 4: PeerPort
-	dst = binary.LittleEndian.AppendUint16(dst, c.PeerPort)
-
-	// Field 5: RootBlockHeader
-	dst = ssz.WriteOffset(dst, offset)
-	offset += len(c.RootBlockHeader)
-
-	// Field 6: GenesisRootBlockHash
-	if len(c.GenesisRootBlockHash) != 32 {
-		return nil, ssz.ErrBytesLength
-	}
-	dst = append(dst, c.GenesisRootBlockHash[:]...)
-
-	// Field 5: RootBlockHeader
-	if len(c.RootBlockHeader) > 4294967295 {
-		return nil, ssz.ErrListTooBig
-	}
-	dst = append(dst, c.RootBlockHeader...)
-	return dst, err
-}
-
-func (c *HelloCommand) UnmarshalSSZ(buf []byte) error {
-	var err error
-	size := uint64(len(buf))
-	if size < 98 {
-		return ssz.ErrSize
-	}
-
-	sszSlice0 := buf[0:4]   // c.Version
-	sszSlice1 := buf[4:12]  // c.NetworkID
-	sszSlice2 := buf[12:44] // c.PeerID
-	sszSlice3 := buf[44:60] // c.PeerIP
-	sszSlice4 := buf[60:62] // c.PeerPort
-	sszSlice6 := buf[66:98] // c.GenesisRootBlockHash
-
-	sszVarOffset5 := ssz.ReadOffset(buf[62:66]) // c.RootBlockHeader
-	if sszVarOffset5 != 98 {
-		return ssz.ErrInvalidVariableOffset
-	}
-	if sszVarOffset5 > size {
-		return ssz.ErrOffset
-	}
-	sszSlice5 := buf[sszVarOffset5:] // c.RootBlockHeader
-
-	// Field 0: Version
-	c.Version = binary.LittleEndian.Uint32(sszSlice0)
-
-	// Field 1: NetworkID
-	c.NetworkID = binary.LittleEndian.Uint64(sszSlice1)
-
-	// Field 2: PeerID
-	copy(c.PeerID[:], sszSlice2)
-
-	// Field 3: PeerIP
-	copy(c.PeerIP[:], sszSlice3)
-
-	// Field 4: PeerPort
-	c.PeerPort = binary.LittleEndian.Uint16(sszSlice4)
-
-	// Field 5: RootBlockHeader
-	c.RootBlockHeader = append([]byte{}, Data(sszSlice5)...)
-
-	// Field 6: GenesisRootBlockHash
-	copy(c.GenesisRootBlockHash[:], sszSlice6)
-	return err
-}
-
-func (c *HelloCommand) HashTreeRoot() ([32]byte, error) {
-	hh := ssz.DefaultHasherPool.Get()
-	if err := c.HashTreeRootWith(hh); err != nil {
-		ssz.DefaultHasherPool.Put(hh)
-		return [32]byte{}, err
-	}
-	root, err := hh.HashRoot()
-	ssz.DefaultHasherPool.Put(hh)
-	return root, err
-}
-
-func (c *HelloCommand) HashTreeRootWith(hh *ssz.Hasher) (err error) {
-	indx := hh.Index()
-	// Field 0: Version
-	hh.PutUint32(c.Version)
-	// Field 1: NetworkID
-	hh.PutUint64(c.NetworkID)
-	// Field 2: PeerID
-	if len(c.PeerID) != 32 {
-		return ssz.ErrBytesLength
-	}
-	hh.PutBytes(c.PeerID[:])
-	// Field 3: PeerIP
-	if len(c.PeerIP) != 16 {
-		return ssz.ErrBytesLength
-	}
-	hh.PutBytes(c.PeerIP[:])
-	// Field 4: PeerPort
-	hh.PutUint16(c.PeerPort)
-	// Field 5: RootBlockHeader
-
-	{
-		if len(c.RootBlockHeader) > 4294967295 {
-			return ssz.ErrBytesLength
-		}
-		subIndx := hh.Index()
-		hh.AppendBytes32(c.RootBlockHeader)
-		numItems := uint64(len(c.RootBlockHeader))
-		hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
-	}
-
-	// Field 6: GenesisRootBlockHash
-	if len(c.GenesisRootBlockHash) != 32 {
-		return ssz.ErrBytesLength
-	}
-	hh.PutBytes(c.GenesisRootBlockHash[:])
 	hh.Merkleize(indx)
 	return nil
 }
@@ -1608,6 +1459,1358 @@ func (c *GetRootChainStakesResponse) HashTreeRootWith(hh *ssz.Hasher) (err error
 		return ssz.ErrBytesLength
 	}
 	hh.PutBytes(c.Signer[:])
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *HelloCommand) SizeSSZ() int {
+	size := 98
+	size += len(c.RootBlockHeader)
+	return size
+}
+
+func (c *HelloCommand) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *HelloCommand) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 98
+
+	// Field 0: Version
+	dst = binary.LittleEndian.AppendUint32(dst, c.Version)
+
+	// Field 1: NetworkID
+	dst = binary.LittleEndian.AppendUint64(dst, c.NetworkID)
+
+	// Field 2: PeerID
+	if len(c.PeerID) != 32 {
+		return nil, ssz.ErrBytesLength
+	}
+	dst = append(dst, c.PeerID[:]...)
+
+	// Field 3: PeerIP
+	if len(c.PeerIP) != 16 {
+		return nil, ssz.ErrBytesLength
+	}
+	dst = append(dst, c.PeerIP[:]...)
+
+	// Field 4: PeerPort
+	dst = binary.LittleEndian.AppendUint16(dst, c.PeerPort)
+
+	// Field 5: RootBlockHeader
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.RootBlockHeader)
+
+	// Field 6: GenesisRootBlockHash
+	if len(c.GenesisRootBlockHash) != 32 {
+		return nil, ssz.ErrBytesLength
+	}
+	dst = append(dst, c.GenesisRootBlockHash[:]...)
+
+	// Field 5: RootBlockHeader
+	if len(c.RootBlockHeader) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	dst = append(dst, c.RootBlockHeader...)
+	return dst, err
+}
+
+func (c *HelloCommand) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 98 {
+		return ssz.ErrSize
+	}
+
+	sszSlice0 := buf[0:4]   // c.Version
+	sszSlice1 := buf[4:12]  // c.NetworkID
+	sszSlice2 := buf[12:44] // c.PeerID
+	sszSlice3 := buf[44:60] // c.PeerIP
+	sszSlice4 := buf[60:62] // c.PeerPort
+	sszSlice6 := buf[66:98] // c.GenesisRootBlockHash
+
+	sszVarOffset5 := ssz.ReadOffset(buf[62:66]) // c.RootBlockHeader
+	if sszVarOffset5 != 98 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset5 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice5 := buf[sszVarOffset5:] // c.RootBlockHeader
+
+	// Field 0: Version
+	c.Version = binary.LittleEndian.Uint32(sszSlice0)
+
+	// Field 1: NetworkID
+	c.NetworkID = binary.LittleEndian.Uint64(sszSlice1)
+
+	// Field 2: PeerID
+	copy(c.PeerID[:], sszSlice2)
+
+	// Field 3: PeerIP
+	copy(c.PeerIP[:], sszSlice3)
+
+	// Field 4: PeerPort
+	c.PeerPort = binary.LittleEndian.Uint16(sszSlice4)
+
+	// Field 5: RootBlockHeader
+	c.RootBlockHeader = append([]byte{}, Data(sszSlice5)...)
+
+	// Field 6: GenesisRootBlockHash
+	copy(c.GenesisRootBlockHash[:], sszSlice6)
+	return err
+}
+
+func (c *HelloCommand) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *HelloCommand) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Version
+	hh.PutUint32(c.Version)
+	// Field 1: NetworkID
+	hh.PutUint64(c.NetworkID)
+	// Field 2: PeerID
+	if len(c.PeerID) != 32 {
+		return ssz.ErrBytesLength
+	}
+	hh.PutBytes(c.PeerID[:])
+	// Field 3: PeerIP
+	if len(c.PeerIP) != 16 {
+		return ssz.ErrBytesLength
+	}
+	hh.PutBytes(c.PeerIP[:])
+	// Field 4: PeerPort
+	hh.PutUint16(c.PeerPort)
+	// Field 5: RootBlockHeader
+
+	{
+		if len(c.RootBlockHeader) > 4294967295 {
+			return ssz.ErrBytesLength
+		}
+		subIndx := hh.Index()
+		hh.AppendBytes32(c.RootBlockHeader)
+		numItems := uint64(len(c.RootBlockHeader))
+		hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+	}
+
+	// Field 6: GenesisRootBlockHash
+	if len(c.GenesisRootBlockHash) != 32 {
+		return ssz.ErrBytesLength
+	}
+	hh.PutBytes(c.GenesisRootBlockHash[:])
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *NewTipCommand) SizeSSZ() int {
+	size := 8
+	size += len(c.RootTip)
+	size += len(c.ShardTip)
+	return size
+}
+
+func (c *NewTipCommand) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *NewTipCommand) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 8
+
+	// Field 0: RootTip
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.RootTip)
+
+	// Field 1: ShardTip
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.ShardTip)
+
+	// Field 0: RootTip
+	if len(c.RootTip) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	dst = append(dst, c.RootTip...)
+
+	// Field 1: ShardTip
+	if len(c.ShardTip) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	dst = append(dst, c.ShardTip...)
+	return dst, err
+}
+
+func (c *NewTipCommand) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 8 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.RootTip
+	if sszVarOffset0 != 8 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszVarOffset1 := ssz.ReadOffset(buf[4:8]) // c.ShardTip
+	if sszVarOffset1 > size || sszVarOffset1 < sszVarOffset0 {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:sszVarOffset1] // c.RootTip
+	sszSlice1 := buf[sszVarOffset1:]              // c.ShardTip
+
+	// Field 0: RootTip
+	c.RootTip = append([]byte{}, Data(sszSlice0)...)
+
+	// Field 1: ShardTip
+	c.ShardTip = append([]byte{}, Data(sszSlice1)...)
+	return err
+}
+
+func (c *NewTipCommand) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *NewTipCommand) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: RootTip
+
+	{
+		if len(c.RootTip) > 4294967295 {
+			return ssz.ErrBytesLength
+		}
+		subIndx := hh.Index()
+		hh.AppendBytes32(c.RootTip)
+		numItems := uint64(len(c.RootTip))
+		hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+	}
+
+	// Field 1: ShardTip
+
+	{
+		if len(c.ShardTip) > 4294967295 {
+			return ssz.ErrBytesLength
+		}
+		subIndx := hh.Index()
+		hh.AppendBytes32(c.ShardTip)
+		numItems := uint64(len(c.ShardTip))
+		hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+	}
+
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *NewTransactionsCommand) SizeSSZ() int {
+	size := 4
+	size += len(c.Transactions)
+	return size
+}
+
+func (c *NewTransactionsCommand) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *NewTransactionsCommand) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 4
+
+	// Field 0: Transactions
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.Transactions)
+
+	// Field 0: Transactions
+	if len(c.Transactions) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	dst = append(dst, c.Transactions...)
+	return dst, err
+}
+
+func (c *NewTransactionsCommand) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 4 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.Transactions
+	if sszVarOffset0 != 4 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:] // c.Transactions
+
+	// Field 0: Transactions
+	c.Transactions = append([]byte{}, Data(sszSlice0)...)
+	return err
+}
+
+func (c *NewTransactionsCommand) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *NewTransactionsCommand) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Transactions
+
+	{
+		if len(c.Transactions) > 4294967295 {
+			return ssz.ErrBytesLength
+		}
+		subIndx := hh.Index()
+		hh.AppendBytes32(c.Transactions)
+		numItems := uint64(len(c.Transactions))
+		hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+	}
+
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetRootHeadersRequest) SizeSSZ() int {
+	size := 42
+
+	return size
+}
+
+func (c *GetRootHeadersRequest) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetRootHeadersRequest) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+
+	// Field 0: Type
+	dst = append(dst, c.Type)
+
+	// Field 1: Data
+	if len(c.Data) != 32 {
+		return nil, ssz.ErrBytesLength
+	}
+	dst = append(dst, c.Data[:]...)
+
+	// Field 2: Limit
+	dst = binary.LittleEndian.AppendUint32(dst, c.Limit)
+
+	// Field 3: Skip
+	dst = binary.LittleEndian.AppendUint32(dst, c.Skip)
+
+	// Field 4: Direction
+	dst = append(dst, c.Direction)
+
+	return dst, err
+}
+
+func (c *GetRootHeadersRequest) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size != 42 {
+		return ssz.ErrSize
+	}
+
+	sszSlice0 := buf[0:1]   // c.Type
+	sszSlice1 := buf[1:33]  // c.Data
+	sszSlice2 := buf[33:37] // c.Limit
+	sszSlice3 := buf[37:41] // c.Skip
+	sszSlice4 := buf[41:42] // c.Direction
+
+	// Field 0: Type
+	c.Type = sszSlice0[0]
+
+	// Field 1: Data
+	copy(c.Data[:], sszSlice1)
+
+	// Field 2: Limit
+	c.Limit = binary.LittleEndian.Uint32(sszSlice2)
+
+	// Field 3: Skip
+	c.Skip = binary.LittleEndian.Uint32(sszSlice3)
+
+	// Field 4: Direction
+	c.Direction = sszSlice4[0]
+	return err
+}
+
+func (c *GetRootHeadersRequest) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetRootHeadersRequest) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Type
+	hh.PutUint8(c.Type)
+	// Field 1: Data
+	if len(c.Data) != 32 {
+		return ssz.ErrBytesLength
+	}
+	hh.PutBytes(c.Data[:])
+	// Field 2: Limit
+	hh.PutUint32(c.Limit)
+	// Field 3: Skip
+	hh.PutUint32(c.Skip)
+	// Field 4: Direction
+	hh.PutUint8(c.Direction)
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetRootHeadersResponse) SizeSSZ() int {
+	size := 8
+	size += len(c.RootTip)
+	for _, o := range c.Headers {
+		size += 4
+		size += len(o)
+	}
+	return size
+}
+
+func (c *GetRootHeadersResponse) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetRootHeadersResponse) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 8
+
+	// Field 0: RootTip
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.RootTip)
+
+	// Field 1: Headers
+	dst = ssz.WriteOffset(dst, offset)
+	for _, o := range c.Headers {
+		offset += 4
+		offset += len(o)
+	}
+
+	// Field 0: RootTip
+	if len(c.RootTip) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	dst = append(dst, c.RootTip...)
+
+	// Field 1: Headers
+	if len(c.Headers) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	{
+		offset = 4 * len(c.Headers)
+		for _, o := range c.Headers {
+			dst = ssz.WriteOffset(dst, offset)
+			offset += len(o)
+		}
+	}
+	for _, o := range c.Headers {
+		if len(o) > 4294967295 {
+			return nil, ssz.ErrListTooBig
+		}
+		dst = append(dst, o...)
+	}
+	return dst, err
+}
+
+func (c *GetRootHeadersResponse) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 8 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.RootTip
+	if sszVarOffset0 != 8 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszVarOffset1 := ssz.ReadOffset(buf[4:8]) // c.Headers
+	if sszVarOffset1 > size || sszVarOffset1 < sszVarOffset0 {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:sszVarOffset1] // c.RootTip
+	sszSlice1 := buf[sszVarOffset1:]              // c.Headers
+
+	// Field 0: RootTip
+	c.RootTip = append([]byte{}, Data(sszSlice0)...)
+
+	// Field 1: Headers
+	{
+		// empty lists are zero length, so make sure there is room for an offset
+		// before attempting to unmarshal it
+		if len(sszSlice1) > 3 {
+			startOffset := ssz.ReadOffset(sszSlice1[0:4])
+			if startOffset == 0 {
+				return fmt.Errorf("encountered invalid offset of 0 when decoding c.Headers")
+			}
+			if startOffset%4 != 0 {
+				return fmt.Errorf("misaligned list bytes: when decoding c.Headers, end-of-list offset is %d, which is not a multiple of 4 (offset size)", startOffset)
+			}
+			listLen := startOffset / 4
+			if listLen > 4294967295 {
+				return fmt.Errorf("ssz-max exceeded: c.Headers has %d elements, ssz-max is 4294967295: %w", listLen, ssz.ErrListTooBig)
+			}
+			totalVarBytes := uint64(len(sszSlice1))
+			if totalVarBytes < startOffset {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Headers")
+			}
+			c.Headers = make([]Data, listLen)
+			var tmpSlice []byte
+			for i := uint64(0); i < listLen; i++ {
+				var tmp Data
+
+				endOffset := totalVarBytes
+				if i+1 != listLen {
+					endOffset = ssz.ReadOffset(sszSlice1[(i+1)*4 : (i+2)*4])
+					if totalVarBytes < endOffset {
+						return fmt.Errorf("offset %d points past the end of buffer when decoding c.Headers", endOffset)
+					}
+				}
+				if endOffset < startOffset {
+					return fmt.Errorf("offset %d is not greater than start offset %d when decoding c.Headers", endOffset, startOffset)
+				}
+				tmpSlice = sszSlice1[startOffset:endOffset]
+				tmp = append([]byte{}, Data(tmpSlice)...)
+				c.Headers[i] = tmp
+				startOffset = endOffset
+			}
+		} else {
+			if len(sszSlice1) > 0 {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Headers")
+			}
+			c.Headers = make([]Data, 0)
+		}
+	}
+	return err
+}
+
+func (c *GetRootHeadersResponse) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetRootHeadersResponse) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: RootTip
+
+	{
+		if len(c.RootTip) > 4294967295 {
+			return ssz.ErrBytesLength
+		}
+		subIndx := hh.Index()
+		hh.AppendBytes32(c.RootTip)
+		numItems := uint64(len(c.RootTip))
+		hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+	}
+
+	// Field 1: Headers
+	{
+		if len(c.Headers) > 4294967295 {
+			return ssz.ErrListTooBig
+		}
+		subIndx := hh.Index()
+		for _, o := range c.Headers {
+
+			{
+				if len(o) > 4294967295 {
+					return ssz.ErrBytesLength
+				}
+				subIndx := hh.Index()
+				hh.AppendBytes32(o)
+				numItems := uint64(len(o))
+				hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+			}
+
+		}
+		hh.MerkleizeWithMixin(subIndx, uint64(len(c.Headers)), 4294967295)
+	}
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetRootBlocksRequest) SizeSSZ() int {
+	size := 4
+	size += len(c.Hashes) * 32
+	return size
+}
+
+func (c *GetRootBlocksRequest) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetRootBlocksRequest) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 4
+
+	// Field 0: Hashes
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.Hashes) * 32
+
+	// Field 0: Hashes
+	if len(c.Hashes) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	for _, o := range c.Hashes {
+		if len(o) != 32 {
+			return nil, ssz.ErrBytesLength
+		}
+		dst = append(dst, o[:]...)
+	}
+	return dst, err
+}
+
+func (c *GetRootBlocksRequest) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 4 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.Hashes
+	if sszVarOffset0 != 4 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:] // c.Hashes
+
+	// Field 0: Hashes
+	{
+		if len(sszSlice0)%32 != 0 {
+			return fmt.Errorf("misaligned bytes: c.Hashes length is %d, which is not a multiple of 32: %w", len(sszSlice0), ssz.ErrIncorrectListSize)
+		}
+		numElem := len(sszSlice0) / 32
+		if numElem > 4294967295 {
+			return fmt.Errorf("ssz-max exceeded: c.Hashes has %d elements, ssz-max is 4294967295: %w", numElem, ssz.ErrListTooBig)
+		}
+		c.Hashes = make([]common.Hash, numElem)
+		for i := 0; i < numElem; i++ {
+			var tmp common.Hash
+
+			tmpSlice := sszSlice0[i*32 : (1+i)*32]
+			copy(tmp[:], tmpSlice)
+			c.Hashes[i] = tmp
+		}
+	}
+	return err
+}
+
+func (c *GetRootBlocksRequest) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetRootBlocksRequest) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Hashes
+	{
+		if len(c.Hashes) > 4294967295 {
+			return ssz.ErrListTooBig
+		}
+		subIndx := hh.Index()
+		for _, o := range c.Hashes {
+			if len(o) != 32 {
+				return ssz.ErrBytesLength
+			}
+			hh.Append(o[:])
+		}
+		hh.MerkleizeWithMixin(subIndx, uint64(len(c.Hashes)), 4294967295)
+	}
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetRootBlocksResponse) SizeSSZ() int {
+	size := 4
+	for _, o := range c.Blocks {
+		size += 4
+		size += len(o)
+	}
+	return size
+}
+
+func (c *GetRootBlocksResponse) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetRootBlocksResponse) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 4
+
+	// Field 0: Blocks
+	dst = ssz.WriteOffset(dst, offset)
+	for _, o := range c.Blocks {
+		offset += 4
+		offset += len(o)
+	}
+
+	// Field 0: Blocks
+	if len(c.Blocks) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	{
+		offset = 4 * len(c.Blocks)
+		for _, o := range c.Blocks {
+			dst = ssz.WriteOffset(dst, offset)
+			offset += len(o)
+		}
+	}
+	for _, o := range c.Blocks {
+		if len(o) > 4294967295 {
+			return nil, ssz.ErrListTooBig
+		}
+		dst = append(dst, o...)
+	}
+	return dst, err
+}
+
+func (c *GetRootBlocksResponse) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 4 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.Blocks
+	if sszVarOffset0 != 4 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:] // c.Blocks
+
+	// Field 0: Blocks
+	{
+		// empty lists are zero length, so make sure there is room for an offset
+		// before attempting to unmarshal it
+		if len(sszSlice0) > 3 {
+			startOffset := ssz.ReadOffset(sszSlice0[0:4])
+			if startOffset == 0 {
+				return fmt.Errorf("encountered invalid offset of 0 when decoding c.Blocks")
+			}
+			if startOffset%4 != 0 {
+				return fmt.Errorf("misaligned list bytes: when decoding c.Blocks, end-of-list offset is %d, which is not a multiple of 4 (offset size)", startOffset)
+			}
+			listLen := startOffset / 4
+			if listLen > 4294967295 {
+				return fmt.Errorf("ssz-max exceeded: c.Blocks has %d elements, ssz-max is 4294967295: %w", listLen, ssz.ErrListTooBig)
+			}
+			totalVarBytes := uint64(len(sszSlice0))
+			if totalVarBytes < startOffset {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Blocks")
+			}
+			c.Blocks = make([]Data, listLen)
+			var tmpSlice []byte
+			for i := uint64(0); i < listLen; i++ {
+				var tmp Data
+
+				endOffset := totalVarBytes
+				if i+1 != listLen {
+					endOffset = ssz.ReadOffset(sszSlice0[(i+1)*4 : (i+2)*4])
+					if totalVarBytes < endOffset {
+						return fmt.Errorf("offset %d points past the end of buffer when decoding c.Blocks", endOffset)
+					}
+				}
+				if endOffset < startOffset {
+					return fmt.Errorf("offset %d is not greater than start offset %d when decoding c.Blocks", endOffset, startOffset)
+				}
+				tmpSlice = sszSlice0[startOffset:endOffset]
+				tmp = append([]byte{}, Data(tmpSlice)...)
+				c.Blocks[i] = tmp
+				startOffset = endOffset
+			}
+		} else {
+			if len(sszSlice0) > 0 {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Blocks")
+			}
+			c.Blocks = make([]Data, 0)
+		}
+	}
+	return err
+}
+
+func (c *GetRootBlocksResponse) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetRootBlocksResponse) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Blocks
+	{
+		if len(c.Blocks) > 4294967295 {
+			return ssz.ErrListTooBig
+		}
+		subIndx := hh.Index()
+		for _, o := range c.Blocks {
+
+			{
+				if len(o) > 4294967295 {
+					return ssz.ErrBytesLength
+				}
+				subIndx := hh.Index()
+				hh.AppendBytes32(o)
+				numItems := uint64(len(o))
+				hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+			}
+
+		}
+		hh.MerkleizeWithMixin(subIndx, uint64(len(c.Blocks)), 4294967295)
+	}
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetShardHeadersRequest) SizeSSZ() int {
+	size := 42
+
+	return size
+}
+
+func (c *GetShardHeadersRequest) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetShardHeadersRequest) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+
+	// Field 0: Type
+	dst = append(dst, c.Type)
+
+	// Field 1: Data
+	if len(c.Data) != 32 {
+		return nil, ssz.ErrBytesLength
+	}
+	dst = append(dst, c.Data[:]...)
+
+	// Field 2: Limit
+	dst = binary.LittleEndian.AppendUint32(dst, c.Limit)
+
+	// Field 3: Skip
+	dst = binary.LittleEndian.AppendUint32(dst, c.Skip)
+
+	// Field 4: Direction
+	dst = append(dst, c.Direction)
+
+	return dst, err
+}
+
+func (c *GetShardHeadersRequest) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size != 42 {
+		return ssz.ErrSize
+	}
+
+	sszSlice0 := buf[0:1]   // c.Type
+	sszSlice1 := buf[1:33]  // c.Data
+	sszSlice2 := buf[33:37] // c.Limit
+	sszSlice3 := buf[37:41] // c.Skip
+	sszSlice4 := buf[41:42] // c.Direction
+
+	// Field 0: Type
+	c.Type = sszSlice0[0]
+
+	// Field 1: Data
+	copy(c.Data[:], sszSlice1)
+
+	// Field 2: Limit
+	c.Limit = binary.LittleEndian.Uint32(sszSlice2)
+
+	// Field 3: Skip
+	c.Skip = binary.LittleEndian.Uint32(sszSlice3)
+
+	// Field 4: Direction
+	c.Direction = sszSlice4[0]
+	return err
+}
+
+func (c *GetShardHeadersRequest) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetShardHeadersRequest) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Type
+	hh.PutUint8(c.Type)
+	// Field 1: Data
+	if len(c.Data) != 32 {
+		return ssz.ErrBytesLength
+	}
+	hh.PutBytes(c.Data[:])
+	// Field 2: Limit
+	hh.PutUint32(c.Limit)
+	// Field 3: Skip
+	hh.PutUint32(c.Skip)
+	// Field 4: Direction
+	hh.PutUint8(c.Direction)
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetShardHeadersResponse) SizeSSZ() int {
+	size := 4
+	for _, o := range c.Headers {
+		size += 4
+		size += len(o)
+	}
+	return size
+}
+
+func (c *GetShardHeadersResponse) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetShardHeadersResponse) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 4
+
+	// Field 0: Headers
+	dst = ssz.WriteOffset(dst, offset)
+	for _, o := range c.Headers {
+		offset += 4
+		offset += len(o)
+	}
+
+	// Field 0: Headers
+	if len(c.Headers) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	{
+		offset = 4 * len(c.Headers)
+		for _, o := range c.Headers {
+			dst = ssz.WriteOffset(dst, offset)
+			offset += len(o)
+		}
+	}
+	for _, o := range c.Headers {
+		if len(o) > 4294967295 {
+			return nil, ssz.ErrListTooBig
+		}
+		dst = append(dst, o...)
+	}
+	return dst, err
+}
+
+func (c *GetShardHeadersResponse) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 4 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.Headers
+	if sszVarOffset0 != 4 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:] // c.Headers
+
+	// Field 0: Headers
+	{
+		// empty lists are zero length, so make sure there is room for an offset
+		// before attempting to unmarshal it
+		if len(sszSlice0) > 3 {
+			startOffset := ssz.ReadOffset(sszSlice0[0:4])
+			if startOffset == 0 {
+				return fmt.Errorf("encountered invalid offset of 0 when decoding c.Headers")
+			}
+			if startOffset%4 != 0 {
+				return fmt.Errorf("misaligned list bytes: when decoding c.Headers, end-of-list offset is %d, which is not a multiple of 4 (offset size)", startOffset)
+			}
+			listLen := startOffset / 4
+			if listLen > 4294967295 {
+				return fmt.Errorf("ssz-max exceeded: c.Headers has %d elements, ssz-max is 4294967295: %w", listLen, ssz.ErrListTooBig)
+			}
+			totalVarBytes := uint64(len(sszSlice0))
+			if totalVarBytes < startOffset {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Headers")
+			}
+			c.Headers = make([]Data, listLen)
+			var tmpSlice []byte
+			for i := uint64(0); i < listLen; i++ {
+				var tmp Data
+
+				endOffset := totalVarBytes
+				if i+1 != listLen {
+					endOffset = ssz.ReadOffset(sszSlice0[(i+1)*4 : (i+2)*4])
+					if totalVarBytes < endOffset {
+						return fmt.Errorf("offset %d points past the end of buffer when decoding c.Headers", endOffset)
+					}
+				}
+				if endOffset < startOffset {
+					return fmt.Errorf("offset %d is not greater than start offset %d when decoding c.Headers", endOffset, startOffset)
+				}
+				tmpSlice = sszSlice0[startOffset:endOffset]
+				tmp = append([]byte{}, Data(tmpSlice)...)
+				c.Headers[i] = tmp
+				startOffset = endOffset
+			}
+		} else {
+			if len(sszSlice0) > 0 {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Headers")
+			}
+			c.Headers = make([]Data, 0)
+		}
+	}
+	return err
+}
+
+func (c *GetShardHeadersResponse) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetShardHeadersResponse) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Headers
+	{
+		if len(c.Headers) > 4294967295 {
+			return ssz.ErrListTooBig
+		}
+		subIndx := hh.Index()
+		for _, o := range c.Headers {
+
+			{
+				if len(o) > 4294967295 {
+					return ssz.ErrBytesLength
+				}
+				subIndx := hh.Index()
+				hh.AppendBytes32(o)
+				numItems := uint64(len(o))
+				hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+			}
+
+		}
+		hh.MerkleizeWithMixin(subIndx, uint64(len(c.Headers)), 4294967295)
+	}
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetShardBlocksRequest) SizeSSZ() int {
+	size := 4
+	size += len(c.Hashes) * 32
+	return size
+}
+
+func (c *GetShardBlocksRequest) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetShardBlocksRequest) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 4
+
+	// Field 0: Hashes
+	dst = ssz.WriteOffset(dst, offset)
+	offset += len(c.Hashes) * 32
+
+	// Field 0: Hashes
+	if len(c.Hashes) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	for _, o := range c.Hashes {
+		if len(o) != 32 {
+			return nil, ssz.ErrBytesLength
+		}
+		dst = append(dst, o[:]...)
+	}
+	return dst, err
+}
+
+func (c *GetShardBlocksRequest) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 4 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.Hashes
+	if sszVarOffset0 != 4 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:] // c.Hashes
+
+	// Field 0: Hashes
+	{
+		if len(sszSlice0)%32 != 0 {
+			return fmt.Errorf("misaligned bytes: c.Hashes length is %d, which is not a multiple of 32: %w", len(sszSlice0), ssz.ErrIncorrectListSize)
+		}
+		numElem := len(sszSlice0) / 32
+		if numElem > 4294967295 {
+			return fmt.Errorf("ssz-max exceeded: c.Hashes has %d elements, ssz-max is 4294967295: %w", numElem, ssz.ErrListTooBig)
+		}
+		c.Hashes = make([]common.Hash, numElem)
+		for i := 0; i < numElem; i++ {
+			var tmp common.Hash
+
+			tmpSlice := sszSlice0[i*32 : (1+i)*32]
+			copy(tmp[:], tmpSlice)
+			c.Hashes[i] = tmp
+		}
+	}
+	return err
+}
+
+func (c *GetShardBlocksRequest) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetShardBlocksRequest) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Hashes
+	{
+		if len(c.Hashes) > 4294967295 {
+			return ssz.ErrListTooBig
+		}
+		subIndx := hh.Index()
+		for _, o := range c.Hashes {
+			if len(o) != 32 {
+				return ssz.ErrBytesLength
+			}
+			hh.Append(o[:])
+		}
+		hh.MerkleizeWithMixin(subIndx, uint64(len(c.Hashes)), 4294967295)
+	}
+	hh.Merkleize(indx)
+	return nil
+}
+
+func (c *GetShardBlocksResponse) SizeSSZ() int {
+	size := 4
+	for _, o := range c.Blocks {
+		size += 4
+		size += len(o)
+	}
+	return size
+}
+
+func (c *GetShardBlocksResponse) MarshalSSZ() ([]byte, error) {
+	buf := make([]byte, c.SizeSSZ())
+	return c.MarshalSSZTo(buf[:0])
+}
+
+func (c *GetShardBlocksResponse) MarshalSSZTo(dst []byte) ([]byte, error) {
+	var err error
+	offset := 4
+
+	// Field 0: Blocks
+	dst = ssz.WriteOffset(dst, offset)
+	for _, o := range c.Blocks {
+		offset += 4
+		offset += len(o)
+	}
+
+	// Field 0: Blocks
+	if len(c.Blocks) > 4294967295 {
+		return nil, ssz.ErrListTooBig
+	}
+	{
+		offset = 4 * len(c.Blocks)
+		for _, o := range c.Blocks {
+			dst = ssz.WriteOffset(dst, offset)
+			offset += len(o)
+		}
+	}
+	for _, o := range c.Blocks {
+		if len(o) > 4294967295 {
+			return nil, ssz.ErrListTooBig
+		}
+		dst = append(dst, o...)
+	}
+	return dst, err
+}
+
+func (c *GetShardBlocksResponse) UnmarshalSSZ(buf []byte) error {
+	var err error
+	size := uint64(len(buf))
+	if size < 4 {
+		return ssz.ErrSize
+	}
+
+	sszVarOffset0 := ssz.ReadOffset(buf[0:4]) // c.Blocks
+	if sszVarOffset0 != 4 {
+		return ssz.ErrInvalidVariableOffset
+	}
+	if sszVarOffset0 > size {
+		return ssz.ErrOffset
+	}
+	sszSlice0 := buf[sszVarOffset0:] // c.Blocks
+
+	// Field 0: Blocks
+	{
+		// empty lists are zero length, so make sure there is room for an offset
+		// before attempting to unmarshal it
+		if len(sszSlice0) > 3 {
+			startOffset := ssz.ReadOffset(sszSlice0[0:4])
+			if startOffset == 0 {
+				return fmt.Errorf("encountered invalid offset of 0 when decoding c.Blocks")
+			}
+			if startOffset%4 != 0 {
+				return fmt.Errorf("misaligned list bytes: when decoding c.Blocks, end-of-list offset is %d, which is not a multiple of 4 (offset size)", startOffset)
+			}
+			listLen := startOffset / 4
+			if listLen > 4294967295 {
+				return fmt.Errorf("ssz-max exceeded: c.Blocks has %d elements, ssz-max is 4294967295: %w", listLen, ssz.ErrListTooBig)
+			}
+			totalVarBytes := uint64(len(sszSlice0))
+			if totalVarBytes < startOffset {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Blocks")
+			}
+			c.Blocks = make([]Data, listLen)
+			var tmpSlice []byte
+			for i := uint64(0); i < listLen; i++ {
+				var tmp Data
+
+				endOffset := totalVarBytes
+				if i+1 != listLen {
+					endOffset = ssz.ReadOffset(sszSlice0[(i+1)*4 : (i+2)*4])
+					if totalVarBytes < endOffset {
+						return fmt.Errorf("offset %d points past the end of buffer when decoding c.Blocks", endOffset)
+					}
+				}
+				if endOffset < startOffset {
+					return fmt.Errorf("offset %d is not greater than start offset %d when decoding c.Blocks", endOffset, startOffset)
+				}
+				tmpSlice = sszSlice0[startOffset:endOffset]
+				tmp = append([]byte{}, Data(tmpSlice)...)
+				c.Blocks[i] = tmp
+				startOffset = endOffset
+			}
+		} else {
+			if len(sszSlice0) > 0 {
+				return fmt.Errorf("list bytes too short to contain an offset when decoding c.Blocks")
+			}
+			c.Blocks = make([]Data, 0)
+		}
+	}
+	return err
+}
+
+func (c *GetShardBlocksResponse) HashTreeRoot() ([32]byte, error) {
+	hh := ssz.DefaultHasherPool.Get()
+	if err := c.HashTreeRootWith(hh); err != nil {
+		ssz.DefaultHasherPool.Put(hh)
+		return [32]byte{}, err
+	}
+	root, err := hh.HashRoot()
+	ssz.DefaultHasherPool.Put(hh)
+	return root, err
+}
+
+func (c *GetShardBlocksResponse) HashTreeRootWith(hh *ssz.Hasher) (err error) {
+	indx := hh.Index()
+	// Field 0: Blocks
+	{
+		if len(c.Blocks) > 4294967295 {
+			return ssz.ErrListTooBig
+		}
+		subIndx := hh.Index()
+		for _, o := range c.Blocks {
+
+			{
+				if len(o) > 4294967295 {
+					return ssz.ErrBytesLength
+				}
+				subIndx := hh.Index()
+				hh.AppendBytes32(o)
+				numItems := uint64(len(o))
+				hh.MerkleizeWithMixin(subIndx, numItems, (4294967295*1+31)/32)
+			}
+
+		}
+		hh.MerkleizeWithMixin(subIndx, uint64(len(c.Blocks)), 4294967295)
+	}
 	hh.Merkleize(indx)
 	return nil
 }
