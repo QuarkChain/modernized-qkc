@@ -27,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/mining"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -82,7 +81,7 @@ func TestRootInsertMinedBlockRejectsStaleParent(t *testing.T) {
 		synctest.Wait()
 		close(release)
 		firstErr, otherErr := <-firstResult, <-otherResult
-		if firstErr != nil || !errors.Is(otherErr, mining.ErrStaleWork) {
+		if firstErr != nil || !errors.Is(otherErr, errNotOnTip) {
 			t.Fatalf("concurrent mined children of the same parent: %v, %v", firstErr, otherErr)
 		}
 		if engine.calls != 1 || len(f.client.broadcasts) != 1 || qkcrawdb.HasRootBlock(f.db, other.Hash()) {

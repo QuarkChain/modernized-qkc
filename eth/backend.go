@@ -443,7 +443,10 @@ func newBackend(stack *node.Node, config *ethconfig.Config, newClient func(slave
 		if err != nil {
 			return nil, err
 		}
-		eth.powMiner = mining.NewPoWMiner(eth.shard, mining.PoWMinerConfig{Coinbase: stack.Config().CoinbaseAddress})
+		eth.powMiner = mining.NewPoWMiner(eth.shard, mining.PoWMinerConfig{
+			Coinbase: stack.Config().CoinbaseAddress,
+			Chain:    chainConfig.ChainID.String(),
+		})
 	}
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}

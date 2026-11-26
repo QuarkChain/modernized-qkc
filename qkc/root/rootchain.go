@@ -32,7 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -53,6 +52,7 @@ var (
 	errChainNotInitialized = errors.New("root chain is not initialized")
 	errChainStopped        = errors.New("root chain is stopped")
 	errChainNotReady       = errors.New("root chain is not ready")
+	errNotOnTip            = errors.New("root block does not extend the canonical tip")
 )
 
 // RootChain manages root-chain data and recovery using a caller-provided database,
@@ -78,9 +78,9 @@ type RootChain struct {
 	closeOnce sync.Once
 
 	// Published headers are immutable; updates replace the tip pointer.
-	tip       atomic.Pointer[types.RootBlockHeader]
-	headFeed  event.FeedOf[struct{}]
-	headScope event.SubscriptionScope
+	tip           atomic.Pointer[types.RootBlockHeader]
+	chainHeadFeed event.FeedOf[struct{}]
+	scope         event.SubscriptionScope
 
 	// Initialization stays recorded when delivery fails or Close begins.
 	initialized atomic.Bool
@@ -244,15 +244,19 @@ func (c *RootChain) Init() error {
 // disable Init and insertion, and return an error. The client handles connection
 // failures and requests master shutdown for cluster recovery.
 func (c *RootChain) InsertBlock(block *types.RootBlock) error {
-	return c.insertBlock(block, false)
+	return c.insertBlock(block, nil)
 }
 
 // InsertMinedBlock imports a block only if it still extends the canonical tip.
 func (c *RootChain) InsertMinedBlock(block *types.RootBlock) error {
-	return c.insertBlock(block, true)
+	var parent common.Hash
+	if block != nil {
+		parent = block.ParentHash()
+	}
+	return c.insertBlock(block, &parent)
 }
 
-func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
+func (c *RootChain) insertBlock(block *types.RootBlock, expectParent *common.Hash) error {
 	if block == nil || block.Number() == 0 {
 		return errors.New("missing or genesis root block")
 	}
@@ -270,8 +274,8 @@ func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 		return errChainNotInitialized
 	}
 	tip := c.tip.Load()
-	if mined && block.ParentHash() != tip.Hash() {
-		return mining.ErrStaleWork
+	if expectParent != nil && *expectParent != tip.Hash() {
+		return errNotOnTip
 	}
 	// Reject stale blocks before loading, verifying or broadcasting them, even
 	// if already stored. Compare heights first to avoid unsigned underflow.
@@ -341,7 +345,7 @@ func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 	c.blockCache.Add(hash, block)
 	if updateTip {
 		c.tip.Store(header)
-		c.headFeed.Send(struct{}{})
+		c.chainHeadFeed.Send(struct{}{})
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
@@ -355,7 +359,7 @@ func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.
 		c.stopping.Store(true)
-		c.headScope.Close()
+		c.scope.Close()
 		return fmt.Errorf("broadcast root block: %w", err)
 	}
 	return nil
@@ -432,9 +436,20 @@ func (c *RootChain) rewriteCanonical(batch ethdb.KeyValueWriter, header *types.R
 func (c *RootChain) Close() {
 	c.closeOnce.Do(func() {
 		c.stopping.Store(true)
-		c.headScope.Close()
+		c.scope.Close()
 		c.chainmu.Close()
 	})
+}
+
+// SubscribeChainHeadEvent registers for canonical root tip changes. The caller
+// must drain ch while subscribed. It returns nil once the scope is closed.
+func (c *RootChain) SubscribeChainHeadEvent(ch chan<- struct{}) event.Subscription {
+	sub := c.chainHeadFeed.Subscribe(ch)
+	tracked := c.scope.Track(sub)
+	if tracked == nil {
+		sub.Unsubscribe()
+	}
+	return tracked
 }
 
 // Ready reports whether Init completed, backendCtx is active, and shutdown has

@@ -33,10 +33,17 @@ import (
 
 // MinerBackend supplies chain-specific work and tracks the mining head.
 type MinerBackend interface {
+	// BuildMiningWork selects the canonical head and anchor as MiningHead does,
+	// and records the parent and anchor it used in the candidate.
 	BuildMiningWork(ctx context.Context, coinbase common.Address) (*Candidate, error)
 	// MiningHead returns the canonical head and a backend-defined cache anchor
 	// in one snapshot. Backends that use only the head return a zero anchor.
 	MiningHead() (head, anchor common.Hash, err error)
+	// MiningCurrentHead reads the canonical head without waiting for an import.
+	// It has the same readiness checks as MiningHead.
+	MiningCurrentHead() (common.Hash, error)
+	// SubscribeMiningHead registers a buffered channel for head-change wakeups.
+	// Wakeups may be coalesced or dropped. It returns nil if the chain is closed.
 	SubscribeMiningHead(ch chan<- struct{}) event.Subscription
 }
 
@@ -72,8 +79,9 @@ type MiningWork struct {
 	Time       uint64      // Candidate timestamp
 }
 
-// Candidate binds work to the original block. Submit seals a copy and imports
-// it through the chain's normal validation path. It may be called concurrently.
+// Candidate binds work to the original block. Submit may run concurrently.
+// It seals a copy, leaving the shared block intact, and imports it through
+// the chain's normal validation path.
 // Submit must check Parent against the canonical head atomically with import.
 // If they differ, it returns ErrStaleWork before storing or propagating the block.
 type Candidate struct {
@@ -95,6 +103,7 @@ type PoWMinerConfig struct {
 	Coinbase    common.Address // Recipient of locally mined blocks
 	WorkRefresh time.Duration  // Lifetime of current work; zero selects DefaultWorkRefresh
 	Search      NonceSearch    // Local seal search; nil disables StartLocalMining
+	Chain       string         // Optional chain identifier for mining logs
 }
 
 // PoWMiner serves work to remote miners and mines locally, following
@@ -106,6 +115,7 @@ type PoWMinerConfig struct {
 type PoWMiner struct {
 	backend MinerBackend
 	config  PoWMinerConfig
+	logger  log.Logger
 
 	build   chan struct{}                             // Semaphore serializing candidate construction
 	mu      sync.Mutex                                // Protects works and current
@@ -127,9 +137,14 @@ func NewPoWMiner(backend MinerBackend, config PoWMinerConfig) *PoWMiner {
 	if config.WorkRefresh <= 0 {
 		config.WorkRefresh = DefaultWorkRefresh
 	}
+	logger := log.Root()
+	if config.Chain != "" {
+		logger = logger.New("chain", config.Chain)
+	}
 	return &PoWMiner{
 		backend: backend,
 		config:  config,
+		logger:  logger,
 		build:   make(chan struct{}, 1),
 		works:   lru.NewBasicLRU[common.Hash, *servedWork](miningWorkCacheSize),
 		current: lru.NewBasicLRU[common.Address, *servedWork](miningWorkCacheSize),
@@ -201,7 +216,7 @@ func (m *PoWMiner) currentWork(coinbase common.Address) (*servedWork, error) {
 // if import succeeds but RPCs fail, the moved head makes resubmissions stale,
 // and the local mining loop logs the error and moves on.
 func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash) error {
-	head, _, err := m.backend.MiningHead()
+	head, err := m.backend.MiningCurrentHead()
 	if err != nil {
 		return err
 	}
@@ -299,7 +314,7 @@ func (m *PoWMiner) mine(ctx context.Context, changed <-chan struct{}) {
 		w, err := m.getWork(ctx, m.config.Coinbase)
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Warn("Failed to get mining work", "err", err)
+				m.logger.Warn("Failed to get mining work", "err", err)
 			}
 			waitForMiningRetry(ctx)
 			continue
@@ -310,11 +325,11 @@ func (m *PoWMiner) mine(ctx context.Context, changed <-chan struct{}) {
 		}
 		switch err := m.SubmitWork(w.SealHash, nonce, mixHash); {
 		case err == nil:
-			log.Info("Mined block", "number", w.Number, "sealhash", w.SealHash)
+			m.logger.Info("Mined block", "number", w.Number, "sealhash", w.SealHash)
 		case errors.Is(err, ErrStaleWork):
-			log.Debug("Discarded stale mining work", "number", w.Number, "sealhash", w.SealHash)
+			m.logger.Debug("Discarded stale mining work", "number", w.Number, "sealhash", w.SealHash)
 		default:
-			log.Warn("Failed to import mined block", "number", w.Number, "err", err)
+			m.logger.Warn("Failed to import mined block", "number", w.Number, "err", err)
 			waitForMiningRetry(ctx)
 		}
 	}
@@ -338,7 +353,7 @@ func (m *PoWMiner) search(ctx context.Context, w *servedWork, changed <-chan str
 			select {
 			case <-changed:
 				// Events may predate w, such as the import of its parent.
-				head, _, err := m.backend.MiningHead()
+				head, err := m.backend.MiningCurrentHead()
 				if err != nil || head != w.Parent {
 					cancel()
 					return

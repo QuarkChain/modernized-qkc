@@ -56,7 +56,7 @@ func (s *Shard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*
 			sealedHeader, sealedExtra := types.CopyHeader(header), *extra
 			sealedExtra.Nonce, sealedExtra.MixHash = nonce, mixHash
 			sealedHeader.Extra = sealedExtra.Encode()
-			return s.InsertMinedBlock(block.WithSeal(sealedHeader))
+			return s.insertMinedBlock(block.WithSeal(sealedHeader))
 		},
 	}, nil
 }
@@ -67,10 +67,15 @@ func (s *Shard) MiningHead() (common.Hash, common.Hash, error) {
 	return s.chain.headAndRootTip()
 }
 
+// MiningCurrentHead returns the shard head without waiting for a block import.
+func (s *Shard) MiningCurrentHead() (common.Hash, error) {
+	return s.chain.miningCurrentHead()
+}
+
 // SubscribeMiningHead forwards changes to the shard head as wakeups.
 func (s *Shard) SubscribeMiningHead(ch chan<- struct{}) event.Subscription {
 	heads := make(chan core.ChainHeadEvent, 1)
-	sub := s.SubscribeChainHeadEvent(heads)
+	sub := s.chain.chain.SubscribeChainHeadEvent(heads)
 	if sub == nil {
 		return nil
 	}

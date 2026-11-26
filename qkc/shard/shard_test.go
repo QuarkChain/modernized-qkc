@@ -261,7 +261,7 @@ func TestShardCreateBlockToMine(t *testing.T) {
 		if diff.Sign() <= 0 || diff.Cmp(block.Header().QKCDifficulty()) != 0 {
 			t.Fatalf("difficulty %v, want base difficulty %v", diff, block.Header().QKCDifficulty())
 		}
-		if err := s.InsertMinedBlock(block); err != nil {
+		if err := s.insertMinedBlock(block); err != nil {
 			t.Fatal(err)
 		}
 		if s.CurrentBlock().Hash() != block.Hash() {
@@ -467,7 +467,7 @@ func TestShardInsertMinedBlockRejectsStaleParent(t *testing.T) {
 	var wg sync.WaitGroup
 	results := make([]error, len(blocks))
 	for i, block := range blocks {
-		wg.Go(func() { results[i] = s.InsertMinedBlock(block) })
+		wg.Go(func() { results[i] = s.insertMinedBlock(block) })
 	}
 	wg.Wait()
 
@@ -485,7 +485,7 @@ func TestShardInsertMinedBlockRejectsStaleParent(t *testing.T) {
 	}
 	// The commit marker may skip network delivery, but a mined replay is stale.
 	for _, block := range blocks {
-		if err := s.InsertMinedBlock(block); !errors.Is(err, mining.ErrStaleWork) {
+		if err := s.insertMinedBlock(block); !errors.Is(err, mining.ErrStaleWork) {
 			t.Fatalf("resubmitting mined block: got %v, want ErrStaleWork", err)
 		}
 		if err := s.AddShardBlock(t.Context(), block); err != nil || !env.chain.HasBlock(block.Hash(), block.NumberU64()) {
@@ -514,7 +514,7 @@ func TestBackendInsertMinedBlockTimeout(t *testing.T) {
 					},
 					report: func(ctx context.Context, _ *types.Header, _ *uint256.Int) error { return wait(ctx) },
 				}}
-				if err := s.InsertMinedBlock(block); !errors.Is(err, context.DeadlineExceeded) {
+				if err := s.insertMinedBlock(block); !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("hung %s: %v", stage, err)
 				}
 				if committed, err := qkcrawdb.IsShardBlockCommitted(env.db, block.Hash()); err != nil || committed {

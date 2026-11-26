@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -12,6 +13,7 @@ import (
 var _ mining.MinerBackend = (*RootChain)(nil)
 
 // BuildMiningWork packages a root candidate at its base seal difficulty.
+// TODO(mining): Support signed candidates that qualify for the PoSW discount.
 func (c *RootChain) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
 	block, err := c.CreateBlockToMine(ctx, coinbase)
 	if err != nil {
@@ -24,26 +26,31 @@ func (c *RootChain) BuildMiningWork(ctx context.Context, coinbase common.Address
 		},
 		Parent: block.ParentHash(),
 		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
-			return c.InsertMinedBlock(block.WithMiningResult(nonce.Uint64(), mixHash, nil))
+			err := c.InsertMinedBlock(block.WithMiningResult(nonce.Uint64(), mixHash, nil))
+			if errors.Is(err, errNotOnTip) {
+				return mining.ErrStaleWork
+			}
+			return err
 		},
 	}, nil
 }
 
-// MiningHead returns the canonical root tip once the chain is ready.
+// MiningHead returns the canonical root tip and a zero anchor.
 func (c *RootChain) MiningHead() (common.Hash, common.Hash, error) {
+	head, err := c.MiningCurrentHead()
+	return head, common.Hash{}, err
+}
+
+// MiningCurrentHead reads the canonical root tip once the chain is ready.
+func (c *RootChain) MiningCurrentHead() (common.Hash, error) {
 	tip := c.RootTip()
 	if !c.Ready() {
-		return common.Hash{}, common.Hash{}, errChainNotReady
+		return common.Hash{}, errChainNotReady
 	}
-	return tip.Hash(), common.Hash{}, nil
+	return tip.Hash(), nil
 }
 
 // SubscribeMiningHead registers for canonical root tip changes.
 func (c *RootChain) SubscribeMiningHead(ch chan<- struct{}) event.Subscription {
-	sub := c.headFeed.Subscribe(ch)
-	tracked := c.headScope.Track(sub)
-	if tracked == nil {
-		sub.Unsubscribe()
-	}
-	return tracked
+	return c.SubscribeChainHeadEvent(ch)
 }

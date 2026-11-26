@@ -363,7 +363,7 @@ func TestRootPoWMiner(t *testing.T) {
 			t.Fatalf("bad seal submitted: %v, broadcasts %v", err, f.client.broadcasts)
 		}
 		heads := make(chan struct{}, 1)
-		sub := chain.SubscribeMiningHead(heads)
+		sub := chain.SubscribeChainHeadEvent(heads)
 		defer sub.Unsubscribe()
 		if err := miner.SubmitWork(first.SealHash, nonce, mix); err != nil {
 			t.Fatal(err)
@@ -398,6 +398,10 @@ func TestRootPoWMinerHeadChangeDuringBuild(t *testing.T) {
 	t.Cleanup(f.chain.Close)
 	miner := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{})
 	coinbase := common.Address{42}
+	candidate, err := f.chain.BuildMiningWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Advance the tip while the builder collects shard headers for the old parent.
 	f.client.onHeaders = func(context.Context) error {
@@ -414,6 +418,10 @@ func TestRootPoWMinerHeadChangeDuringBuild(t *testing.T) {
 	}
 	if err := miner.SubmitWork(first.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
 		t.Fatalf("submitting work built on the old head: got %v, want ErrStaleWork", err)
+	}
+	// Check the adapter without the miner's precheck.
+	if err := candidate.Submit(coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
+		t.Fatalf("submitting candidate built on the old head: got %v, want ErrStaleWork", err)
 	}
 }
 

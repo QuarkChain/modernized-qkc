@@ -33,6 +33,11 @@ import (
 // Construction reuses the node's bound builder and its runtime settings. The caller
 // seals and imports the result.
 func (c *ShardChain) BuildBlock(ctx context.Context, args miner.QKCBlockArgs) (*types.Block, error) {
+	return c.buildBlock(ctx, args, nil)
+}
+
+// When minTimestamp is set, derive the candidate timestamp from the selected parent.
+func (c *ShardChain) buildBlock(ctx context.Context, args miner.QKCBlockArgs, minTimestamp *uint64) (*types.Block, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -41,7 +46,7 @@ func (c *ShardChain) BuildBlock(ctx context.Context, args miner.QKCBlockArgs) (*
 	}
 	// Select both tips under the lock shared with head updates.
 	c.mu.Lock()
-	root := c.rootTip
+	root := c.rootTip.Load()
 	if root == nil {
 		c.mu.Unlock()
 		return nil, ErrRootChainUninitialized
@@ -59,6 +64,9 @@ func (c *ShardChain) BuildBlock(ctx context.Context, args miner.QKCBlockArgs) (*
 		args.PrevRootBlock = root.Hash()
 	}
 	c.mu.Unlock()
+	if minTimestamp != nil {
+		args.Timestamp = max(*minTimestamp, parent.Time+1)
+	}
 	header := &types.Header{Extra: (&types.QKCExtra{PrevRootBlock: args.PrevRootBlock}).Encode()}
 	if _, err := c.validateRootReference(header, parent); err != nil {
 		return nil, err

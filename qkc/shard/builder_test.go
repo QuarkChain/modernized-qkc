@@ -113,7 +113,7 @@ func TestBuildShardBlock(t *testing.T) {
 			if err := pool.Add([]*types.Transaction{userTx}, true)[0]; err != nil {
 				t.Fatal(err)
 			}
-			root := env.sc.rootTip.Hash()
+			root := env.sc.RootTip().Hash()
 			args := miner.QKCBlockArgs{Timestamp: 1, FeeRecipient: common.Address{0xcc}}
 			block, err := env.sc.BuildBlock(context.Background(), args)
 			if err != nil {
@@ -162,7 +162,7 @@ func TestBuildShardBlock(t *testing.T) {
 func TestBuildShardBlockRootReferences(t *testing.T) {
 	env, _, _ := newMiningEnv(t, 10002)
 	ctx := context.Background()
-	root3 := env.sc.rootTip.Hash()
+	root3 := env.sc.RootTip().Hash()
 	root1 := env.sc.RootBlockByNumber(root3, 1)
 	args := miner.QKCBlockArgs{Timestamp: 1, PrevRootBlock: root1.Hash(), NoTxs: true}
 	a, err := env.sc.BuildBlock(ctx, args)
@@ -261,7 +261,7 @@ func TestBuildShardBlockBuilderSettings(t *testing.T) {
 func TestBuildShardBlockMissingDeposits(t *testing.T) {
 	env, _, _ := newMiningEnv(t, 10002)
 	source := sourceBlock(10001, 99)
-	root := newRoot(env.sc.RootBlock(env.sc.rootTip.Hash()), 99).WithBody([]*types.Header{source}, nil)
+	root := newRoot(env.sc.RootBlock(env.sc.RootTip().Hash()), 99).WithBody([]*types.Header{source}, nil)
 	env.addRoot(root, env.genesis)
 	env.setRootTip(root)
 	args := miner.QKCBlockArgs{Timestamp: 1, NoTxs: true}
@@ -296,7 +296,7 @@ func TestBuildShardBlockInputs(t *testing.T) {
 	}
 	withoutPool := miner.New(miningBackend{chain: env.chain}, miner.DefaultConfig, env.engine)
 	withoutPoolChain := NewShardChain(env.db, env.chain, withoutPool)
-	if err := withoutPoolChain.Init(env.sc.RootBlock(env.sc.rootTip.Hash())); err != nil {
+	if err := withoutPoolChain.Init(env.sc.RootBlock(env.sc.RootTip().Hash())); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := withoutPoolChain.BuildBlock(context.Background(), args); err == nil {

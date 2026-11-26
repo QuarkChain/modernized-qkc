@@ -91,6 +91,34 @@ func waitForHead(t *testing.T, env *testEnv, number uint64) {
 	}
 }
 
+func TestMiningCurrentHeadDoesNotWaitForImports(t *testing.T) {
+	env := newTestEnv(t)
+	uninitialized := &Shard{chain: &ShardChain{chain: env.chain}}
+	if _, err := uninitialized.MiningCurrentHead(); !errors.Is(err, ErrRootChainUninitialized) {
+		t.Fatalf("head before initialization: %v", err)
+	}
+	shard := newMiningShard(env.sc)
+	type result struct {
+		head common.Hash
+		err  error
+	}
+	read := make(chan result, 1)
+	env.sc.mu.Lock()
+	defer env.sc.mu.Unlock()
+	go func() {
+		head, err := shard.MiningCurrentHead()
+		read <- result{head, err}
+	}()
+	select {
+	case got := <-read:
+		if got.err != nil || got.head != env.genesis.Hash() {
+			t.Fatalf("head while import lock is held: got %s, %v", got.head, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading the mining head waited for the import lock")
+	}
+}
+
 func TestPoWMinerGetWork(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
@@ -132,7 +160,7 @@ func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 		first := getWork(t, m, coinbase)
 		// Replace the root tip the work references, keeping the shard head.
 		seed := uint64(1)
-		fork := env.sc.RootBlock(env.sc.rootTip.ParentHash).Header().CreateBlockToAppend(nil, uint256.NewInt(1), nil, &seed, nil)
+		fork := env.sc.RootBlock(env.sc.RootTip().ParentHash).Header().CreateBlockToAppend(nil, uint256.NewInt(1), nil, &seed, nil)
 		env.insertRoot(fork, true)
 		env.checkHead(env.genesis)
 		work := getWork(t, m, coinbase)

@@ -156,7 +156,7 @@ func (env *testEnv) addRoot(root *qkctypes.RootBlock, confirmed *types.Block) {
 }
 
 func (env *testEnv) setRootTip(root *qkctypes.RootBlock) {
-	env.sc.rootTip = root.Header()
+	env.sc.rootTip.Store(root.Header())
 }
 
 // insertRoot inserts a root block, and checks whether it became the root tip.
@@ -173,7 +173,7 @@ func (env *testEnv) insertRoot(root *qkctypes.RootBlock, wantSwitched bool) {
 
 func (env *testEnv) checkRootTip(want *qkctypes.RootBlock) {
 	env.t.Helper()
-	if have := env.sc.rootTip; have == nil || have.Hash() != want.Hash() {
+	if have := env.sc.RootTip(); have == nil || have.Hash() != want.Hash() {
 		env.t.Fatalf("root tip mismatch: have %v, want #%d [%x..]", have, want.Number(), want.Hash().Bytes()[:4])
 	}
 }
@@ -350,7 +350,7 @@ func TestShardChainInitGenesisValidation(t *testing.T) {
 			if err := env.sc.Init(root); !errors.Is(err, ErrInvalidRootBlock) {
 				t.Fatalf("invalid genesis root: %v", err)
 			}
-			if env.sc.rootTip != nil {
+			if env.sc.RootTip() != nil {
 				t.Fatal("invalid genesis published initialization state")
 			}
 			if qkcrawdb.HasRootBlock(rootDB, root.Hash()) || qkcrawdb.ReadLastConfirmedBlockHash(rootDB, root.Hash()) != (common.Hash{}) {
@@ -394,7 +394,7 @@ func TestShardChainInitGenesisRetry(t *testing.T) {
 			if err == nil || (!stopChain && !errors.Is(err, writeErr)) {
 				t.Fatalf("expected initialization failure: %v", err)
 			}
-			if env.sc.rootTip != nil {
+			if env.sc.RootTip() != nil {
 				t.Fatal("failed genesis initialization published state")
 			}
 			if qkcrawdb.HasRootBlock(rootDB, env.rootGenesis.Hash()) != stopChain {
@@ -521,7 +521,7 @@ func TestShardChainInitMissingParent(t *testing.T) {
 			if !nilInput && !errors.Is(err, ErrClusterStateInconsistency) {
 				t.Fatalf("missing cluster state inconsistency: %v", err)
 			}
-			if env.sc.rootTip != nil || qkcrawdb.HasRootBlock(env.db, root.Hash()) {
+			if env.sc.RootTip() != nil || qkcrawdb.HasRootBlock(env.db, root.Hash()) {
 				t.Fatal("unknown checkpoint initialized the chain or was persisted")
 			}
 			env.checkHead(env.genesis)
@@ -629,7 +629,7 @@ func TestShardChainInitMissingConfirmation(t *testing.T) {
 	if err := env.sc.Init(root); !errors.Is(err, ErrInvalidRootBlock) || errors.Is(err, ErrUnknownConfirmedBlock) || errors.Is(err, ErrShardStateInconsistency) {
 		t.Fatalf("missing confirmation: %v", err)
 	}
-	if env.sc.rootTip != nil {
+	if env.sc.RootTip() != nil {
 		t.Fatal("missing confirmation initialized the chain")
 	}
 	env.checkHead(blocks[1])
@@ -683,7 +683,7 @@ func TestShardChainInitMissingConfirmedBlock(t *testing.T) {
 			if !errors.Is(err, ErrShardStateInconsistency) || !errors.Is(err, want) || errors.Is(err, ErrInvalidRootBlock) {
 				t.Fatalf("missing confirmed data: have %v, want %v", err, want)
 			}
-			if env.sc.rootTip != nil {
+			if env.sc.RootTip() != nil {
 				t.Fatal("failed initialization published root tip")
 			}
 			env.checkHead(env.genesis)
@@ -716,7 +716,7 @@ func TestShardChainInitHeadFailure(t *testing.T) {
 	if err := env.sc.Init(root); err == nil {
 		t.Fatal("initialization succeeded despite stopped blockchain")
 	}
-	if env.sc.rootTip != nil {
+	if env.sc.RootTip() != nil {
 		t.Fatal("failed head switch published root tip")
 	}
 	env.checkHead(block)
@@ -808,7 +808,7 @@ func TestInsertShardBlockUnknownParent(t *testing.T) {
 //	Inserting a1 fails.
 func TestInsertShardBlockRootChainUninitialized(t *testing.T) {
 	env := newTestEnv(t)
-	env.sc.rootTip = nil
+	env.sc.rootTip.Store(nil)
 	blocks := env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)
 	if err := env.sc.InsertShardBlock(blocks[0]); !errors.Is(err, ErrRootChainUninitialized) {
 		t.Fatalf("error mismatch: have %v, want %v", err, ErrRootChainUninitialized)

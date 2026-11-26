@@ -25,9 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	posw "github.com/ethereum/go-ethereum/consensus/poswshard"
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -92,12 +90,8 @@ func (s *Shard) Init(root *qkctypes.RootBlock) error {
 // the parent even when its next second is ahead of the clock.
 func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, *big.Int, error) {
 	bc := s.chain.chain
-	parent := bc.CurrentBlock()
-	block, err := s.chain.BuildBlock(ctx, miner.QKCBlockArgs{
-		Parent:       parent.Hash(),
-		Timestamp:    max(uint64(time.Now().Unix()), parent.Time+1),
-		FeeRecipient: coinbase,
-	})
+	now := uint64(time.Now().Unix())
+	block, err := s.chain.buildBlock(ctx, miner.QKCBlockArgs{FeeRecipient: coinbase}, &now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -108,17 +102,12 @@ func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) 
 	return block, diff, nil
 }
 
-// InsertMinedBlock imports and propagates a sealed candidate if it still
+// insertMinedBlock imports and propagates a sealed candidate if it still
 // extends the canonical shard head.
-func (s *Shard) InsertMinedBlock(block *types.Block) error {
+func (s *Shard) insertMinedBlock(block *types.Block) error {
 	ctx, cancel := context.WithTimeout(context.Background(), minedBlockDeliveryTimeout)
 	defer cancel()
 	return s.addShardBlock(ctx, block, true)
-}
-
-// SubscribeChainHeadEvent registers a subscription for shard head changes.
-func (s *Shard) SubscribeChainHeadEvent(ch chan<- core.ChainHeadEvent) event.Subscription {
-	return s.chain.chain.SubscribeChainHeadEvent(ch)
 }
 
 // AddRootBlock imports a root and reports whether it became the root tip.
@@ -260,7 +249,7 @@ func (s *Shard) CurrentBlock() *types.Header {
 	return s.chain.chain.CurrentBlock()
 }
 
-// RootTip returns the root-tip hash, or zero before Init, for mining compatibility.
+// RootTip returns the root-tip hash, or zero before Init.
 func (s *Shard) RootTip() common.Hash {
 	if tip := s.chain.RootTip(); tip != nil {
 		return tip.Hash()
