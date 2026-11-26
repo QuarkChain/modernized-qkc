@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -123,8 +124,8 @@ type ShardChain struct {
 	// NewShardChain creates a shard chain on top of the given chain, reading the
 	// root blocks and incoming deposits from db. For a QuarkChain configuration,
 	// construction and validation share the inbox backed by this database.
-	rootTip *qkctypes.RootBlockHeader // Nil until Init succeeds; updated by root imports
-	mu      sync.Mutex                // Serializes block imports and shard/root tip selection and updates
+	rootTip atomic.Pointer[qkctypes.RootBlockHeader] // Nil until Init succeeds; writes hold mu
+	mu      sync.Mutex                               // Serializes block imports and shard/root tip selection and updates
 }
 
 // NewShardChain binds the node's existing blockchain and builder, reading root
@@ -162,7 +163,7 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 	defer c.mu.Unlock()
 
 	// Step 1: reject repeat initialization.
-	if c.rootTip != nil {
+	if c.rootTip.Load() != nil {
 		return ErrRootChainAlreadyInitialized
 	}
 	if root == nil {
@@ -228,7 +229,7 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 	if err := c.setHeadForRootTip(rootHeader, confirmed); err != nil {
 		return err
 	}
-	c.rootTip = rootHeader
+	c.rootTip.Store(rootHeader)
 	// TODO(SlaveService): Call Init with the master's root checkpoint
 	// before enabling mining or allowing block imports from P2P sync.
 	return nil
@@ -239,7 +240,26 @@ func (c *ShardChain) Init(root *qkctypes.RootBlock) error {
 func (c *ShardChain) RootTip() *qkctypes.RootBlockHeader {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.rootTip
+	return c.rootTip.Load()
+}
+
+// headAndRootTip reads the canonical shard head and root tip in one snapshot.
+func (c *ShardChain) headAndRootTip() (head, rootTip common.Hash, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	root := c.rootTip.Load()
+	if root == nil {
+		return common.Hash{}, common.Hash{}, ErrRootChainUninitialized
+	}
+	return c.chain.CurrentBlock().Hash(), root.Hash(), nil
+}
+
+// miningCurrentHead reads the head without waiting for block imports.
+func (c *ShardChain) miningCurrentHead() (common.Hash, error) {
+	if c.rootTip.Load() == nil {
+		return common.Hash{}, ErrRootChainUninitialized
+	}
+	return c.chain.CurrentBlock().Hash(), nil
 }
 
 // validateGenesisRoot verifies the body commitment and this shard's sole
@@ -333,7 +353,7 @@ func (c *ShardChain) insertShardBlock(block *types.Block) error {
 		// handled here yet.
 		return nil
 	}
-	rootTip := c.rootTip
+	rootTip := c.rootTip.Load()
 	if rootTip == nil {
 		return ErrRootChainUninitialized
 	}
@@ -516,7 +536,7 @@ func (c *ShardChain) InsertRootBlock(root *qkctypes.RootBlock) (bool, error) {
 	// do not reacquire c.mu or leave rootTip initialized after a failed Init.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.insertRootBlock(root, c.rootTip)
+	return c.insertRootBlock(root, c.rootTip.Load())
 }
 
 // insertRootBlock requires c.mu. Init supplies the recovery parent as rootTip
@@ -561,7 +581,7 @@ func (c *ShardChain) insertRootBlock(root *qkctypes.RootBlock, rootTip *qkctypes
 		return false, fmt.Errorf("store root block %x: %w", root.Hash(), err)
 	}
 	if switched {
-		c.rootTip = root.Header()
+		c.rootTip.Store(root.Header())
 	}
 	return switched, nil
 }
@@ -760,7 +780,7 @@ func (c *ShardChain) validateXShardDeposits(block *types.Header, extra *types.QK
 //	R1, and Y and H reference R2', the former root tip. With R3 as the new
 //	root tip, the head moves back from H to X.
 func (c *ShardChain) setHeadForRootTip(rootTip *qkctypes.RootBlockHeader, confirmed *types.Header) error {
-	if c.rootTip == nil || c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
+	if c.rootTip.Load() == nil || c.chain.GetCanonicalHash(confirmed.Number.Uint64()) != confirmed.Hash() {
 		// Initialization and case 1 select C directly. Init must also ask core
 		// to accept an unchanged head before publishing the root tip.
 		if err := c.setCanonicalByHead(confirmed); err != nil {
@@ -832,10 +852,11 @@ func (c *ShardChain) setCanonicalByHead(head *types.Header) error {
 func (c *ShardChain) GetUnconfirmedHeaderList() ([]*types.Header, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.rootTip == nil {
+	rootTip := c.rootTip.Load()
+	if rootTip == nil {
 		return nil, ErrRootChainUninitialized
 	}
-	confirmed, err := c.lastConfirmed(c.rootTip)
+	confirmed, err := c.lastConfirmed(rootTip)
 	if err != nil {
 		return nil, err
 	}

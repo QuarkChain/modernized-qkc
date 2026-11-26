@@ -91,6 +91,34 @@ func waitForHead(t *testing.T, env *testEnv, number uint64) {
 	}
 }
 
+func TestMiningCurrentHeadDoesNotWaitForImports(t *testing.T) {
+	env := newTestEnv(t)
+	uninitialized := &Shard{chain: &ShardChain{chain: env.chain}}
+	if _, err := uninitialized.MiningCurrentHead(); !errors.Is(err, ErrRootChainUninitialized) {
+		t.Fatalf("head before initialization: %v", err)
+	}
+	shard := newMiningShard(env.sc)
+	type result struct {
+		head common.Hash
+		err  error
+	}
+	read := make(chan result, 1)
+	env.sc.mu.Lock()
+	defer env.sc.mu.Unlock()
+	go func() {
+		head, err := shard.MiningCurrentHead()
+		read <- result{head, err}
+	}()
+	select {
+	case got := <-read:
+		if got.err != nil || got.head != env.genesis.Hash() {
+			t.Fatalf("head while import lock is held: got %s, %v", got.head, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading the mining head waited for the import lock")
+	}
+}
+
 func TestPoWMinerGetWork(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
@@ -132,13 +160,32 @@ func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 		first := getWork(t, m, coinbase)
 		// Replace the root tip the work references, keeping the shard head.
 		seed := uint64(1)
-		fork := env.sc.RootBlock(env.sc.rootTip.ParentHash).Header().CreateBlockToAppend(nil, uint256.NewInt(1), nil, &seed, nil)
+		fork := env.sc.RootBlock(env.sc.RootTip().ParentHash).Header().CreateBlockToAppend(nil, uint256.NewInt(1), nil, &seed, nil)
 		env.insertRoot(fork, true)
 		env.checkHead(env.genesis)
 		work := getWork(t, m, coinbase)
 		extra, _ := submitWork(t, env, m, work).QKCExtra()
 		if work.SealHash == first.SealHash || extra.PrevRootBlock != fork.Hash() {
 			t.Fatal("work was not rebuilt on the new root tip")
+		}
+	})
+}
+
+func TestPoWMinerSubmitWorkAfterRootAdvance(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
+		coinbase := common.Address{0xaa}
+		first := getWork(t, m, coinbase)
+		root := env.sc.RootTip()
+		env.insertRoot(root.CreateBlockToAppend(nil, uint256.NewInt(1), nil, nil, nil), true)
+		if next := getWork(t, m, coinbase); next.SealHash == first.SealHash {
+			t.Fatal("root advance did not refresh work")
+		}
+		// The original root is still canonical and the shard parent is still the head.
+		head := submitWork(t, env, m, first)
+		extra, err := head.QKCExtra()
+		if err != nil || extra.PrevRootBlock != root.Hash() {
+			t.Fatalf("accepted work lost its original root reference: %v", err)
 		}
 	})
 }
@@ -186,11 +233,19 @@ type failingShard struct {
 	err error
 }
 
-func (s *failingShard) InsertMinedBlock(block *types.Block) error {
-	if s.err != nil {
-		return s.err
+func (s *failingShard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
+	candidate, err := s.Shard.BuildMiningWork(ctx, coinbase)
+	if err != nil {
+		return nil, err
 	}
-	return s.Shard.InsertMinedBlock(block)
+	submit := candidate.Submit
+	candidate.Submit = func(nonce types.BlockNonce, mixHash common.Hash) error {
+		if s.err != nil {
+			return s.err
+		}
+		return submit(nonce, mixHash)
+	}
+	return candidate, nil
 }
 
 func TestPoWMinerSubmitWorkInsertFailure(t *testing.T) {
