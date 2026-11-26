@@ -110,8 +110,10 @@ func serviceMaster(t *testing.T, s *Service, handler conn.TypedHandler) *conn.Ba
 	}
 	remote := conn.NewBaseConn(conn.Config{
 		Transport: conn.NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
-			return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
-		}, wire.WriteClusterFrameWithPeerID),
+			return wire.ReadClusterFrameWithPeerID(r, 0)
+		}, func(w io.Writer, frame wire.Frame) error {
+			return wire.WriteClusterFrameWithPeerID(w, frame, 0)
+		}),
 		Serializers: map[byte]*conn.OpSerializer{
 			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
@@ -314,7 +316,7 @@ func TestServiceStopWaitsForRejectedXshardHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := newXshardConn(nc, 0, big.NewInt(2), big.NewInt(1), true, &serviceBackend{}, nil)
+	peer, err := newXshardConn(nc, big.NewInt(2), big.NewInt(1), true, &serviceBackend{}, nil)
 	if err != nil {
 		nc.Close()
 		t.Fatal(err)

@@ -41,7 +41,6 @@ type XshardConnManager struct {
 	localChainID *big.Int
 	// Only connections to slaves with configured chain IDs enter the routing index.
 	configuredChainIDs map[string]struct{}
-	maxPayloadSize     uint32               // Resolved frame payload limit.
 	handler            XshardRequestHandler // Serves cross-shard requests from other slaves.
 	log                log.Logger
 
@@ -60,11 +59,10 @@ type XshardConnManager struct {
 
 // NewXshardConnManager creates the local slave's manager of cross-shard connections.
 // localChainID identifies the chain hosted by this slave; configuredChainIDs
-// lists the chain IDs hosted by the cluster's slaves. A zero maxPayloadSize
-// uses the protocol's maximum payload size. handler serves cross-shard requests
-// from other slaves and must not be nil. shutdownSlave must stop the local
+// lists the chain IDs hosted by the cluster's slaves. handler serves cross-shard
+// requests from other slaves and must not be nil. shutdownSlave must stop the local
 // slave when an established cross-shard connection closes unexpectedly.
-func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, maxPayloadSize uint32, handler XshardRequestHandler, shutdownSlave func(), logger log.Logger) (*XshardConnManager, error) {
+func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, handler XshardRequestHandler, shutdownSlave func(), logger log.Logger) (*XshardConnManager, error) {
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
 	}
@@ -76,10 +74,6 @@ func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, 
 	}
 	if len(configuredChainIDs) == 0 {
 		return nil, errors.New("configured chain IDs must not be empty")
-	}
-	maxPayloadSize, err := conn.ClusterPayloadSize(maxPayloadSize)
-	if err != nil {
-		return nil, err
 	}
 	if logger == nil {
 		logger = log.Root()
@@ -101,7 +95,6 @@ func NewXshardConnManager(localChainID *big.Int, configuredChainIDs []*big.Int, 
 		handler:            handler,
 		shutdownSlave:      shutdownSlave,
 		configuredChainIDs: clusterSet,
-		maxPayloadSize:     maxPayloadSize,
 		log:                logger,
 	}, nil
 }
@@ -128,7 +121,7 @@ func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo clusterne
 		return fmt.Errorf("dial xshard slave %s: %w", addr, err)
 	}
 
-	conn, err := newXshardConn(nc, p.maxPayloadSize, p.localChainID, remoteChainID, true, p.handler, p.log)
+	conn, err := newXshardConn(nc, p.localChainID, remoteChainID, true, p.handler, p.log)
 	if err != nil {
 		nc.Close()
 		return fmt.Errorf("create xshard connection to slave %s: %w", addr, err)
@@ -178,7 +171,7 @@ func (p *XshardConnManager) DialToSlave(ctx context.Context, slaveInfo clusterne
 // connection never being re-established: the slave shuts down if it drops.
 func (p *XshardConnManager) HandleInbound(nc net.Conn) {
 	// Inbound identity arrives with the first PING.
-	conn, err := newXshardConn(nc, p.maxPayloadSize, p.localChainID, nil, false, p.handler, p.log)
+	conn, err := newXshardConn(nc, p.localChainID, nil, false, p.handler, p.log)
 	if err != nil {
 		nc.Close()
 		p.log.Error("inbound xshard connection from slave rejected", "err", err)

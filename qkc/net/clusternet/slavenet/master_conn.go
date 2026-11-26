@@ -53,12 +53,11 @@ type SlaveDialer interface {
 
 // MasterConnConfig configures the slave's connection to its master.
 type MasterConnConfig struct {
-	Conn           net.Conn
-	LocalChainID   *big.Int
-	MaxPayloadSize uint32 // Zero uses the protocol maximum.
-	Handler        MasterRequestHandler
-	SlaveDialer    SlaveDialer
-	Logger         log.Logger
+	Conn         net.Conn
+	LocalChainID *big.Int
+	Handler      MasterRequestHandler
+	SlaveDialer  SlaveDialer
+	Logger       log.Logger
 }
 
 // MasterConn handles master requests and sends shard block notifications.
@@ -86,7 +85,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if err := conn.ValidateSlaveChainID(cfg.LocalChainID); err != nil {
 		return nil, err
 	}
-	transport, err := conn.NewMasterSlaveTransport(cfg.Conn, cfg.MaxPayloadSize)
+	transport, err := conn.NewMasterSlaveTransport(cfg.Conn)
 	if err != nil {
 		return nil, err
 	}

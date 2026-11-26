@@ -177,7 +177,6 @@ func TestServiceConfig(t *testing.T) {
 		func(c *ServiceConfig) { c.SlaveInfos = append(c.SlaveInfos, c.SlaveInfos[0]) },
 		func(c *ServiceConfig) { c.SlaveInfos[0].Host = "" },
 		func(c *ServiceConfig) { c.SlaveInfos[0].Port = 0 },
-		func(c *ServiceConfig) { c.MaxPayloadSize = ^uint32(0) },
 	} {
 		cfg := base()
 		change(&cfg)

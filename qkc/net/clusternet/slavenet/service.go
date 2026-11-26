@@ -51,7 +51,6 @@ type ServiceConfig struct {
 	ListenAddr         string
 	LocalChainID       *big.Int
 	ConfiguredChainIDs []*big.Int
-	MaxPayloadSize     uint32
 	Logger             log.Logger
 	// Shutdown requests node shutdown on unexpected disconnect or listener failure.
 	// It is called at most once, never as a result of Stop. It must return promptly and
@@ -101,7 +100,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		cfg.Logger = log.Root()
 	}
 	s := &Service{cfg: cfg}
-	manager, err := NewXshardConnManager(cfg.LocalChainID, cfg.ConfiguredChainIDs, cfg.MaxPayloadSize, s, s.shutdown, cfg.Logger)
+	manager, err := NewXshardConnManager(cfg.LocalChainID, cfg.ConfiguredChainIDs, s, s.shutdown, cfg.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +197,7 @@ func (s *Service) acceptLoop(listener net.Listener) {
 		if s.master == nil {
 			mc, err := NewMasterConn(MasterConnConfig{
 				Conn: nc, LocalChainID: s.cfg.LocalChainID,
-				MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s,
+				Handler:     s,
 				SlaveDialer: s, Logger: s.cfg.Logger,
 			})
 			if err != nil {
