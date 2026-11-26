@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/lru"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -76,7 +77,9 @@ type RootChain struct {
 	closeOnce sync.Once
 
 	// Published headers are immutable; updates replace the tip pointer.
-	tip atomic.Pointer[types.RootBlockHeader]
+	tip      atomic.Pointer[types.RootBlockHeader]
+	headFeed event.FeedOf[common.Hash]
+	scope    event.SubscriptionScope
 
 	// Initialization stays recorded when delivery fails or Close begins.
 	initialized atomic.Bool
@@ -324,6 +327,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	c.blockCache.Add(hash, block)
 	if updateTip {
 		c.tip.Store(header)
+		c.headFeed.Send(hash)
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
@@ -413,8 +417,20 @@ func (c *RootChain) rewriteCanonical(batch ethdb.KeyValueWriter, header *types.R
 func (c *RootChain) Close() {
 	c.closeOnce.Do(func() {
 		c.stopping.Store(true)
+		c.scope.Close()
 		c.chainmu.Close()
 	})
+}
+
+// SubscribeRootHeadEvent sends the hash of each new canonical root tip.
+// Subscribers must drain ch until they unsubscribe. A closed chain returns nil.
+func (c *RootChain) SubscribeRootHeadEvent(ch chan<- common.Hash) event.Subscription {
+	sub := c.headFeed.Subscribe(ch)
+	tracked := c.scope.Track(sub)
+	if tracked == nil {
+		sub.Unsubscribe()
+	}
+	return tracked
 }
 
 // Ready reports whether Init completed, backendCtx is active, and shutdown has
@@ -428,6 +444,11 @@ func (c *RootChain) Ready() bool {
 // The returned header is read-only; callers must copy it before modification.
 func (c *RootChain) RootTip() *types.RootBlockHeader {
 	return c.tip.Load()
+}
+
+// CurrentBlock returns the read-only canonical root header for mining.
+func (c *RootChain) CurrentBlock() *types.RootBlockHeader {
+	return c.RootTip()
 }
 
 // CreateBlockToMine builds an unsigned, unsealed candidate on the initialized root tip.

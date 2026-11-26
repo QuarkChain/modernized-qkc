@@ -379,6 +379,51 @@ func TestRootPoWMinerTipChange(t *testing.T) {
 	}
 }
 
+// waitingRootSearch holds the current mining height until the search is canceled.
+type waitingRootSearch struct{ height uint64 }
+
+func (s *waitingRootSearch) Search(ctx context.Context, work *mining.MiningWork) (coretypes.BlockNonce, common.Hash, bool) {
+	s.height = work.Number
+	<-ctx.Done()
+	s.height = 0
+	return coretypes.BlockNonce{}, common.Hash{}, false
+}
+
+func TestRootPoWMinerLocalHeadChange(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, _ := newInsertEnv(t)
+		search := new(waitingRootSearch)
+		m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{Search: search, WorkRefresh: time.Hour})
+		if err := m.StartLocalMining(); err != nil {
+			t.Fatal(err)
+		}
+		defer m.StopLocalMining()
+		synctest.Wait()
+		if search.height != 1 {
+			t.Fatalf("mining height %d on genesis, want 1", search.height)
+		}
+		tip := f.block(f.genesis, 1)
+		if err := f.chain.InsertBlock(tip); err != nil {
+			t.Fatal(err)
+		}
+		// Drain the head event without advancing the work refresh timer.
+		synctest.Wait()
+		if search.height != tip.NumberU64()+1 {
+			t.Fatalf("mining height %d after head change, want %d", search.height, tip.NumberU64()+1)
+		}
+		f.cancel()
+		f.chain.Close()
+		synctest.Wait()
+		if search.height != 0 {
+			t.Fatalf("still mining height %d after closing the chain", search.height)
+		}
+		m.StopLocalMining()
+		if err := m.StartLocalMining(); err == nil {
+			t.Fatal("started mining on a closed root chain")
+		}
+	})
+}
+
 func TestRootPoWMinerNotReady(t *testing.T) {
 	f := newRootEnv(t)
 	m := mining.NewRootPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
