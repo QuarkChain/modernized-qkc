@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/trie"
@@ -441,6 +443,57 @@ func TestBackendAddShardBlockCoinbaseAmountFailure(t *testing.T) {
 		if err := s.AddShardBlock(context.Background(), block); err == nil || !strings.Contains(err.Error(), "receipts") {
 			t.Fatalf("attempt %d: have %v, want missing receipts error", attempt, err)
 		}
+	}
+}
+
+func TestShardInsertMinedBlockRejectsStaleParent(t *testing.T) {
+	env := newTestEnv(t)
+	blocks := []*types.Block{
+		env.makeBlocks(env.genesis, 1, env.rootGenesis, 1)[0],
+		env.makeBlocks(env.genesis, 1, env.rootGenesis, 2)[0],
+	}
+	var broadcasts, reports atomic.Int32
+	s := &Shard{chain: env.sc, clusterClient: &backendClusterClient{
+		broadcast: func(context.Context, *big.Int, common.Hash, []*types.DepositTx) error {
+			broadcasts.Add(1)
+			return nil
+		},
+		report: func(context.Context, *types.Header, *uint256.Int) error {
+			reports.Add(1)
+			return nil
+		},
+	}}
+	// Submit directly to the backend, after both miners have selected the same parent.
+	var wg sync.WaitGroup
+	results := make([]error, len(blocks))
+	for i, block := range blocks {
+		wg.Go(func() { results[i] = s.InsertMinedBlock(block) })
+	}
+	wg.Wait()
+
+	for i, block := range blocks {
+		if block.Hash() == s.CurrentBlock().Hash() {
+			if results[i] != nil {
+				t.Fatalf("canonical submission: %v", results[i])
+			}
+		} else if !errors.Is(results[i], mining.ErrStaleWork) || env.chain.HasBlock(block.Hash(), block.NumberU64()) {
+			t.Fatalf("competing block was not rejected before storage: %v", results[i])
+		}
+	}
+	if broadcasts.Load() != 1 || reports.Load() != 1 {
+		t.Fatalf("got %d broadcasts and %d reports, want one each", broadcasts.Load(), reports.Load())
+	}
+	// The commit marker may skip network delivery, but a mined replay is stale.
+	for _, block := range blocks {
+		if err := s.InsertMinedBlock(block); !errors.Is(err, mining.ErrStaleWork) {
+			t.Fatalf("resubmitting mined block: got %v, want ErrStaleWork", err)
+		}
+		if err := s.AddShardBlock(t.Context(), block); err != nil || !env.chain.HasBlock(block.Hash(), block.NumberU64()) {
+			t.Fatalf("network import of %x: %v", block.Hash(), err)
+		}
+	}
+	if broadcasts.Load() != 2 || reports.Load() != 2 {
+		t.Fatalf("network delivery: got %d broadcasts and %d reports, want two each", broadcasts.Load(), reports.Load())
 	}
 }
 
