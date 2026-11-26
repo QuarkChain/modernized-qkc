@@ -2,7 +2,7 @@
 # with Go source code. If you know what GOPATH is then you probably
 # don't need to bother with make.
 
-.PHONY: geth qkc evm all test lint fmt clean devtools help
+.PHONY: geth qkc cluster evm all test lint fmt clean devtools help
 
 GOBIN = ./build/bin
 GO ?= latest
@@ -19,6 +19,10 @@ qkc:
 	$(GORUN) build/ci.go install ./cmd/qkc
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/qkc\" to launch qkc."
+
+#? cluster: Build the QuarkChain cluster launcher.
+cluster:
+	$(GORUN) build/ci.go install ./cmd/cluster
 
 #? evm: Build evm.
 evm:

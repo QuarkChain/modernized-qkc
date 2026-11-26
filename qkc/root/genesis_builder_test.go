@@ -92,10 +92,10 @@ func TestBuildRootGenesisInvalid(t *testing.T) {
 		{"shard count", "shard genesis count", func(c *config.RootConfig) { c.Shards = c.Shards[:1] }},
 		{"shard order", "expected shard genesis for chain", func(c *config.RootConfig) { slices.Reverse(c.Shards) }},
 		{"late shard genesis", "shard 100002 genesis timestamp 1 is later than root genesis timestamp 0", func(c *config.RootConfig) {
-			c.Shards[1].Genesis.Timestamp = c.Genesis.Timestamp + 1
+			c.Shards[1].Eth.Genesis.Timestamp = c.Genesis.Timestamp + 1
 		}},
-		{"network rules", "network rules differ", func(c *config.RootConfig) { c.Shards[1].Genesis.Config.QuarkChain.MaxBlocksPerRootBlock++ }},
-		{"invalid shard genesis", "invalid gas limit", func(c *config.RootConfig) { c.Shards[0].Genesis.GasLimit = 10000 }},
+		{"network rules", "network rules differ", func(c *config.RootConfig) { c.Shards[1].Eth.Genesis.Config.QuarkChain.MaxBlocksPerRootBlock++ }},
+		{"invalid shard genesis", "invalid gas limit", func(c *config.RootConfig) { c.Shards[0].Eth.Genesis.GasLimit = 10000 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := config.LoadRoot(filepath.Join("..", "config", "devnet", "root.toml"))

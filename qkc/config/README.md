@@ -1,5 +1,33 @@
 # QKC deployment configuration
 
+## Start a local devnet cluster
+
+From the repository root:
+
+```sh
+make cluster
+build/bin/cluster --devnet
+```
+
+`--devnet` selects `qkc/config/devnet/root.toml`. The launcher runs the root
+node and starts one child process for each TOML in `Root.ShardConfigs`.
+The default cluster runs three processes.
+Use `--config <root.toml>` for another deployment. Relative shard config
+paths resolve from the root TOML, and relative data directories resolve from
+the current working directory.
+
+After `Cluster ready`, query the root and shard RPCs on loopback:
+
+| Node | HTTP RPC address |
+| --- | --- |
+| Root | `127.0.0.1:18391` (`master_getBlockByNumber`) |
+| Shard 100001 | `127.0.0.1:18545` (`eth_chainId`) |
+| Shard 100002 | `127.0.0.1:18546` (`eth_chainId`) |
+
+Ctrl-C stops all nodes and waits for the shard processes to exit. Run the same
+command again to reopen the databases and restore the shards from the root's
+latest checkpoint.
+
 ## Start local devnet shards with geth
 
 The [devnet](devnet) directory contains a self-contained geth configuration for
@@ -246,9 +274,9 @@ the local mining recipient.
 Load the file with `config.LoadRoot(path)` and call
 `root.BuildRootGenesis(cfg.Genesis, cfg.ShardGeneses())` to derive R0 offline.
 
-Set both `Node.PrivateHost` and `Node.PrivatePort` to configure the root private
-RPC listener. The root can bind a wildcard address. Shard endpoints require
-concrete hosts for dialing. Each configured private endpoint must be distinct.
+The master dials each shard at its `Node.PrivateHost` and `Node.PrivatePort`.
+Shard endpoints require concrete hosts for dialing. The launcher serves root
+queries over the root's configured HTTP RPC and IPC endpoints.
 
 ## Initialize a local root database
 

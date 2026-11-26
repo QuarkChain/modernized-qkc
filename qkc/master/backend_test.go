@@ -27,15 +27,17 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/masternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/masternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -357,6 +359,48 @@ func TestBackendConstructionFailures(t *testing.T) {
 	waitBackendReady(t, b)
 }
 
+func TestBackendInitializesAndRecoversGenesis(t *testing.T) {
+	dir := t.TempDir()
+	shardConfig := params.NewTestQuarkChainConfig(10001, 10001)
+	const gasLimit = 1_000_000
+	shards := []*core.Genesis{{
+		Config: shardConfig, Timestamp: 1, GasLimit: gasLimit, Difficulty: new(big.Int),
+		Mixhash: common.BigToHash(shardConfig.QuarkChain.PoSW.MinimumDifficulty),
+		Alloc:   core.PoSWStakingContractAllocs(shardConfig),
+		ExtraData: (&coretypes.QKCExtra{
+			ChainID:        shardConfig.ChainID,
+			Cursor:         coretypes.XShardCursor{RootBlockHeight: 1},
+			XShardGasLimit: gasLimit / params.XShardGasLimitDivisor,
+		}).Encode(),
+	}}
+	for _, withSeed := range []bool{true, false} {
+		cfg, _ := newTestConfig(t, new(testShard))
+		rules := cfg.Chain
+		cfg.Chain = nil
+		cfg.ShardGeneses = shards
+		seed := &root.RootGenesis{Config: rules, Timestamp: 1, Difficulty: big.NewInt(100)}
+		if withSeed {
+			cfg.Genesis = seed
+		}
+		want, err := root.BuildRootGenesis(seed, shards)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stack := newTestNode(t, "pebble", func(config *node.Config) { config.DataDir = dir })
+		backend := newTestBackend(t, stack, cfg)
+		if err := stack.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitBackendReady(t, backend)
+		if got := backend.RootChain().RootTip().Hash(); got != want.Hash() {
+			t.Fatalf("root tip %s, want %s", got, want.Hash())
+		}
+		if err := stack.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestBackendBecomesReadyAfterCheckpointInitialization checks that readiness is
 // published only after the shard acknowledges its checkpoint.
 func TestBackendBecomesReadyAfterCheckpointInitialization(t *testing.T) {
@@ -457,7 +501,7 @@ func TestBackendReportFailureClosesNode(t *testing.T) {
 		Number: big.NewInt(1), Difficulty: new(big.Int), UncleHash: coretypes.EmptyUncleHash,
 		Extra: (&coretypes.QKCExtra{ChainID: cfg.Chain.ChainIDs[0]}).Encode(),
 	}
-	var remote *clusternet.RemoteError
+	var remote *wire.RemoteError
 	if err := slave.SendShardBlockHeaderToMaster(testContext(t), header, uint256.NewInt(1)); err == nil || errors.As(err, &remote) {
 		t.Fatalf("expected connection failure, not a business error code: %v", err)
 	}

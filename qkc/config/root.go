@@ -36,7 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	"github.com/naoina/toml"
 )
@@ -58,17 +58,19 @@ type RootConfig struct {
 	Shards    []ShardConfig
 }
 
-// ShardConfig is one shard's genesis and its private endpoint.
+// ShardConfig contains a shard TOML path, its native geth settings and private endpoint.
 type ShardConfig struct {
-	Genesis *core.Genesis
-	Slave   clusternet.SlaveInfo
+	Path  string
+	Node  node.Config
+	Eth   ethconfig.Config
+	Slave clusternet.SlaveInfo
 }
 
 // ShardGeneses returns the shard genesis specifications in ChainIDs order.
 func (c *RootConfig) ShardGeneses() []*core.Genesis {
 	genesis := make([]*core.Genesis, len(c.Shards))
 	for i, shard := range c.Shards {
-		genesis[i] = shard.Genesis
+		genesis[i] = shard.Eth.Genesis
 	}
 	return genesis
 }
@@ -141,12 +143,12 @@ func LoadRoot(file string) (*RootConfig, error) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(filepath.Dir(file), path)
 		}
-		shard, err := loadRootShard(path, cfg.NetworkID, shared)
+		shard, err := loadShard(path, cfg.NetworkID, shared)
 		if err != nil {
 			return nil, fmt.Errorf("%s: shard %q: %w", file, ref, err)
 		}
 		slave := shard.Slave
-		q := shard.Genesis.Config.QuarkChain
+		q := shard.Eth.Genesis.Config.QuarkChain
 		if shared == nil {
 			shared = q
 			cfg.Shards = make([]ShardConfig, len(q.ChainIDs))
@@ -155,7 +157,7 @@ func LoadRoot(file string) (*RootConfig, error) {
 			}
 		}
 		i := indices[slave.ChainID.String()] // ValidateQuarkChain checks local membership.
-		if cfg.Shards[i].Genesis != nil {
+		if cfg.Shards[i].Eth.Genesis != nil {
 			return nil, fmt.Errorf("%s: duplicate shard chain ID %v", path, slave.ChainID)
 		}
 		addr := net.JoinHostPort(canonicalHost(slave.Host), strconv.Itoa(int(slave.Port)))
@@ -166,7 +168,7 @@ func LoadRoot(file string) (*RootConfig, error) {
 		cfg.Shards[i] = shard
 	}
 	for i, shard := range cfg.Shards {
-		if shard.Genesis == nil {
+		if shard.Eth.Genesis == nil {
 			return nil, fmt.Errorf("%s: missing shard config for chain ID %v", file, shared.ChainIDs[i])
 		}
 	}
@@ -180,7 +182,13 @@ func LoadRoot(file string) (*RootConfig, error) {
 	return cfg, nil
 }
 
-func loadRootShard(path string, networkID uint64, shared *params.QuarkChainConfig) (ShardConfig, error) {
+// LoadShard loads a native geth TOML for a standalone shard process.
+func LoadShard(path string) (ShardConfig, error) {
+	return loadShard(path, 0, nil)
+}
+
+// A zero networkID skips comparison with a root deployment.
+func loadShard(path string, networkID uint64, shared *params.QuarkChainConfig) (ShardConfig, error) {
 	// Decode native geth TOML, including unrelated runtime sections so a shard
 	// can use the same file for standalone startup.
 	var spec struct {
@@ -189,6 +197,12 @@ func loadRootShard(path string, networkID uint64, shared *params.QuarkChainConfi
 		Metrics  metrics.Config
 		Ethstats struct{ URL string }
 	}
+	spec.Eth = ethconfig.Defaults
+	spec.Node = node.DefaultConfig
+	spec.Node.Name = "geth"
+	spec.Node.IPCPath = "geth.ipc"
+	spec.Node.HTTPModules = append(spec.Node.HTTPModules, "eth")
+	spec.Node.WSModules = append(spec.Node.WSModules, "eth")
 	if err := load(path, &spec); err != nil {
 		return ShardConfig{}, err
 	}
@@ -204,14 +218,14 @@ func loadRootShard(path string, networkID uint64, shared *params.QuarkChainConfi
 	if id == 0 {
 		id = g.Config.ChainID.Uint64()
 	}
-	if id != networkID {
+	if networkID != 0 && id != networkID {
 		return ShardConfig{}, fmt.Errorf("shard network ID %d differs from root NetworkID %d", id, networkID)
 	}
 	if err := checkPrivateEndpoint(spec.Node.PrivateHost, spec.Node.PrivatePort, false); err != nil {
 		return ShardConfig{}, err
 	}
 	slave := clusternet.SlaveInfo{Host: spec.Node.PrivateHost, Port: uint16(spec.Node.PrivatePort), ChainID: g.Config.ChainID}
-	return ShardConfig{Genesis: g, Slave: slave}, nil
+	return ShardConfig{Path: path, Node: spec.Node, Eth: spec.Eth, Slave: slave}, nil
 }
 
 func load(file string, cfg interface{}) error {

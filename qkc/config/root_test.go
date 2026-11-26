@@ -77,11 +77,36 @@ func TestLoadRoot(t *testing.T) {
 		t.Fatalf("got %d shards", len(cfg.Shards))
 	}
 	for i, id := range []int64{100001, 100002} {
-		g, slave := cfg.Shards[i].Genesis, cfg.Shards[i].Slave
+		shard := cfg.Shards[i]
+		wantPath := filepath.Join(filepath.Dir(path), "shard-"+strconv.FormatInt(id, 10)+".toml")
+		if shard.Path != wantPath {
+			t.Fatalf("shard %d: config path = %q, want %q", id, shard.Path, wantPath)
+		}
+		g, slave := shard.Eth.Genesis, shard.Slave
 		if g.Config.ChainID.Cmp(big.NewInt(id)) != 0 || slave.ChainID.Cmp(big.NewInt(id)) != 0 ||
 			slave.Host != "127.0.0.1" || int(slave.Port) != 38000+i || !cfg.Genesis.Config.EqualNetworkRules(g.Config.QuarkChain) {
 			t.Fatalf("shard %d: got genesis for %v, endpoint %+v", id, g.Config.ChainID, slave)
 		}
+		if shard.Eth.NetworkId != cfg.NetworkID || shard.Eth.Miner.GasPrice == nil ||
+			shard.Node.Name != "geth" || shard.Node.PrivatePort != int(slave.Port) ||
+			shard.Node.HTTPEndpoint() != "127.0.0.1:"+strconv.Itoa(18545+i) {
+			t.Fatalf("shard %d: unexpected runtime settings", id)
+		}
+	}
+}
+
+func TestLoadShard(t *testing.T) {
+	const filename = "shard-100001.toml"
+	rootPath := writeRootDeployment(t, filename, func(s string) string {
+		return strings.Replace(s, "NetworkId = 2", "NetworkId = 42", 1)
+	})
+	path := filepath.Join(filepath.Dir(rootPath), filename)
+	shard, err := LoadShard(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shard.Path != path || shard.Eth.NetworkId != 42 || int(shard.Slave.Port) != 38000 {
+		t.Fatalf("unexpected shard path, network ID or endpoint: %q, %d, %+v", shard.Path, shard.Eth.NetworkId, shard.Slave)
 	}
 }
 
