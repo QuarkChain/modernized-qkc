@@ -32,6 +32,7 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -186,6 +187,11 @@ type rootEnv struct {
 // Unlike Python's empty-DB startup, root genesis already confirms every member.
 func newRootEnv(t *testing.T) *rootEnv {
 	t.Helper()
+	return newRootEnvWithConsensus(t, params.ConsensusEthash)
+}
+
+func newRootEnvWithConsensus(t *testing.T, consensus params.ConsensusType) *rootEnv {
+	t.Helper()
 	f := &rootEnv{
 		t: t, config: params.NewTestQuarkChainConfig(10001, 10001, 10002).QuarkChain,
 		db: &rootDB{Database: rawdb.NewMemoryDatabase()}, client: new(rootClient),
@@ -194,7 +200,12 @@ func newRootEnv(t *testing.T) *rootEnv {
 	t.Cleanup(func() { f.db.Close() })
 	// An old parent brings a candidate down to difficulty one for the Ethash test.
 	f.config.PoSW.AdjustmentFactor = 1
-	engine, err := posw.New(f.config)
+	f.config.ConsensusType = consensus
+	newEngine := posw.New
+	if consensus == params.ConsensusSimulate {
+		newEngine = posw.NewSimulate
+	}
+	engine, err := newEngine(f.config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +339,176 @@ func TestRootCreateBlockToMine(t *testing.T) {
 	}
 	if chain.RootTip().Hash() != parent.Hash() || qkcrawdb.HasRootBlock(f.db, block.Hash()) || len(f.client.broadcasts) != 0 {
 		t.Fatal("candidate construction advanced the tip, stored or broadcast the block")
+	}
+}
+
+func TestRootPoWMiner(t *testing.T) {
+	f := newRootEnv(t)
+	if err := f.chain.Init(); err != nil {
+		t.Fatal(err)
+	}
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{})
+	coinbase := common.Address{42}
+	work, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
+	defer search.Close()
+	nonce, mix, ok := search.SearchNonce(t.Context(), work.Number, work.SealHash, work.Difficulty, 1)
+	if !ok {
+		t.Fatal("Ethash search failed")
+	}
+	badMix := mix
+	badMix[0] ^= 1
+	if err := m.SubmitWork(work.SealHash, nonce, badMix); err == nil || len(f.client.broadcasts) != 0 {
+		t.Fatal("invalid seal was accepted or broadcast")
+	}
+	if err := m.SubmitWork(work.SealHash, nonce, mix); err != nil {
+		t.Fatal(err)
+	}
+	tip := f.chain.RootTip()
+	if tip.ParentHash != f.genesis.Hash() || tip.Coinbase != coinbase || tip.SealHash() != work.SealHash ||
+		uint64(tip.Number) != work.Number || tip.Time != work.Time || tip.Difficulty.ToBig().Cmp(work.Difficulty) != 0 ||
+		tip.Nonce != nonce.Uint64() || tip.MixDigest != mix || tip.Signature != ([65]byte{}) {
+		t.Fatal("root tip does not match the unsigned work and submitted seal")
+	}
+	if !qkcrawdb.HasRootBlock(f.db, tip.Hash()) || len(f.client.broadcasts) != 1 || f.client.broadcasts[0] != tip.Hash() {
+		t.Fatal("sealed root was not persisted and broadcast")
+	}
+}
+
+func TestRootPoWMinerSimulated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newRootEnvWithConsensus(t, params.ConsensusSimulate)
+		if err := f.chain.Init(); err != nil {
+			t.Fatal(err)
+		}
+		coinbase := common.Address{42}
+		m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{
+			Coinbase: coinbase, Search: mining.NewSimulatedSearch(time.Second),
+		})
+		if err := m.StartLocalMining(); err != nil {
+			t.Fatal(err)
+		}
+		const wantHeight = 3
+		deadline := time.Now().Add(time.Minute)
+		for f.chain.RootTip().Number < wantHeight && time.Now().Before(deadline) {
+			time.Sleep(time.Second)
+		}
+		m.StopLocalMining()
+
+		height := f.chain.RootTip().Number
+		if height < wantHeight || len(f.client.broadcasts) != int(height) {
+			t.Fatalf("root tip #%d, %d broadcasts, want at least %d blocks and one broadcast per block", height, len(f.client.broadcasts), wantHeight)
+		}
+		parent := f.genesis
+		for n := uint32(1); n <= height; n++ {
+			block, err := f.chain.GetRootBlockByNumber(n)
+			if err != nil || block == nil {
+				t.Fatalf("read canonical root #%d: block %v, err %v", n, block, err)
+			}
+			if block.ParentHash() != parent.Hash() {
+				t.Fatalf("root #%d has parent %s, want %s", n, block.ParentHash(), parent.Hash())
+			}
+			if got := f.client.broadcasts[n-1]; got != block.Hash() {
+				t.Fatalf("broadcast root #%d has hash %s, want %s", n, got, block.Hash())
+			}
+			if block.Coinbase() != coinbase || block.Time() <= parent.Time() || block.Time() > uint64(time.Now().Unix()) {
+				t.Fatalf("root #%d has coinbase %s and time %d after parent time %d", n, block.Coinbase(), block.Time(), parent.Time())
+			}
+			parent = block
+		}
+	})
+}
+
+func TestRootPoWMinerTipChange(t *testing.T) {
+	f, _ := newInsertEnv(t)
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
+	coinbase := common.Address{42}
+	old, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tip := f.block(f.genesis, 1)
+	if err := f.chain.InsertBlock(tip); err != nil {
+		t.Fatal(err)
+	}
+	// Request work while the old candidate is still cached for this coinbase.
+	if next, err := m.GetWork(t.Context(), coinbase); err != nil || next.Number != tip.NumberU64()+1 || next.SealHash == old.SealHash {
+		t.Fatalf("work after tip change: got %+v, err %v", next, err)
+	}
+	if err := m.SubmitWork(old.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
+		t.Fatalf("submit work on old tip: got %v, want ErrStaleWork", err)
+	}
+}
+
+// waitingRootSearch holds the current mining height until the search is canceled.
+type waitingRootSearch struct{ height uint64 }
+
+func (s *waitingRootSearch) Search(ctx context.Context, work *mining.MiningWork) (coretypes.BlockNonce, common.Hash, bool) {
+	s.height = work.Number
+	<-ctx.Done()
+	s.height = 0
+	return coretypes.BlockNonce{}, common.Hash{}, false
+}
+
+func TestRootPoWMinerLocalHeadChange(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, _ := newInsertEnv(t)
+		search := new(waitingRootSearch)
+		m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{Search: search, WorkRefresh: time.Hour})
+		if err := m.StartLocalMining(); err != nil {
+			t.Fatal(err)
+		}
+		defer m.StopLocalMining()
+		synctest.Wait()
+		if search.height != 1 {
+			t.Fatalf("mining height %d on genesis, want 1", search.height)
+		}
+		tip := f.block(f.genesis, 1)
+		if err := f.chain.InsertBlock(tip); err != nil {
+			t.Fatal(err)
+		}
+		// Drain the head event without advancing the work refresh timer.
+		synctest.Wait()
+		if search.height != tip.NumberU64()+1 {
+			t.Fatalf("mining height %d after head change, want %d", search.height, tip.NumberU64()+1)
+		}
+		f.cancel()
+		f.chain.Close()
+		synctest.Wait()
+		if search.height != 0 {
+			t.Fatalf("still mining height %d after closing the chain", search.height)
+		}
+		m.StopLocalMining()
+		if err := m.StartLocalMining(); err == nil {
+			t.Fatal("started mining on a closed root chain")
+		}
+	})
+}
+
+func TestRootPoWMinerNotReady(t *testing.T) {
+	f := newRootEnv(t)
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
+	coinbase := common.Address{42}
+	if work, err := m.GetWork(t.Context(), coinbase); work != nil || !errors.Is(err, errChainNotReady) {
+		t.Fatalf("work before Init: got %+v, err %v", work, err)
+	}
+	if err := f.chain.Init(); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cancel the backend with the same tip and unexpired work in the cache.
+	f.cancel()
+	if work, err := m.GetWork(t.Context(), coinbase); work != nil || !errors.Is(err, errChainNotReady) {
+		t.Fatalf("cached work after shutdown: got %+v, err %v", work, err)
+	}
+	if err := m.SubmitWork(cached.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
+		t.Fatalf("submit work after shutdown: got %v, want ErrStaleWork", err)
 	}
 }
 

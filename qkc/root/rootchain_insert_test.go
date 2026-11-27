@@ -62,6 +62,9 @@ func newInsertEnv(t *testing.T) (*rootEnv, *insertEngine) {
 
 func TestRootInsertForkChoiceAndConfirmations(t *testing.T) {
 	f, engine := newInsertEnv(t)
+	heads := make(chan common.Hash, 5)
+	sub := f.chain.SubscribeRootHeadEvent(heads)
+	defer sub.Unsubscribe()
 	shards := types.ShardBlockHeaders{}
 	for _, number := range []int64{1, 2} {
 		shards = append(shards, &coretypes.Header{
@@ -104,6 +107,15 @@ func TestRootInsertForkChoiceAndConfirmations(t *testing.T) {
 	}
 	if engine.calls != 5 || len(f.client.broadcasts) != 5 {
 		t.Fatal("verification or side-chain delivery was skipped")
+	}
+	wantHeads := []common.Hash{a.Hash(), b.Hash(), fork.Hash()}
+	if len(heads) != len(wantHeads) {
+		t.Fatalf("got %d root head events, want %d", len(heads), len(wantHeads))
+	}
+	for _, want := range wantHeads {
+		if got := <-heads; got != want {
+			t.Fatalf("root head event %x, want %x", got, want)
+		}
 	}
 	for number, block := range []*types.RootBlock{f.genesis, a, equal, fork} {
 		if hash := qkcrawdb.ReadRootCanonicalHash(f.db, uint32(number)); hash != block.Hash() {

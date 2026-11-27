@@ -143,6 +143,25 @@ func TestPoWMinerGetWorkRootReorg(t *testing.T) {
 	})
 }
 
+func TestPoWMinerSubmitWorkAfterRootAdvance(t *testing.T) {
+	testPoWMiner(t, func(t *testing.T) {
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
+		coinbase := common.Address{0xaa}
+		first := getWork(t, m, coinbase)
+		root := env.sc.RootTip()
+		env.insertRoot(root.CreateBlockToAppend(nil, uint256.NewInt(1), nil, nil, nil), true)
+		if next := getWork(t, m, coinbase); next.SealHash == first.SealHash {
+			t.Fatal("root advance did not refresh work")
+		}
+		// The original root is still canonical and the shard parent is still the head.
+		head := submitWork(t, env, m, first)
+		extra, err := head.QKCExtra()
+		if err != nil || extra.PrevRootBlock != root.Hash() {
+			t.Fatalf("accepted work lost its original root reference: %v", err)
+		}
+	})
+}
+
 func TestPoWMinerSubmitWork(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
 		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
@@ -180,32 +199,19 @@ func TestPoWMinerSubmitWork(t *testing.T) {
 	})
 }
 
-// failingShard is a shard layer whose imports fail while err is set.
-type failingShard struct {
-	*Shard
-	err error
-}
-
-func (s *failingShard) InsertMinedBlock(block *types.Block) error {
-	if s.err != nil {
-		return s.err
-	}
-	return s.Shard.InsertMinedBlock(block)
-}
-
 func TestPoWMinerSubmitWorkInsertFailure(t *testing.T) {
 	testPoWMiner(t, func(t *testing.T) {
-		env, _, _ := newMiningEnv(t, 10002)
-		insertErr := errors.New("insert failed")
-		backend := &failingShard{Shard: newMiningShard(env.sc), err: insertErr}
-		m := mining.NewPoWMiner(backend, mining.PoWMinerConfig{})
+		env, m := newPoWMinerEnv(t, mining.PoWMinerConfig{})
 		work := getWork(t, m, common.Address{0xaa})
+		insertErr := errors.New("commit marker read failed")
+		db := &failingDepositDB{KeyValueStore: env.db, hasErr: insertErr}
+		env.sc.db = db
 		if err := m.SubmitWork(work.SealHash, types.EncodeNonce(1), common.Hash{}); !errors.Is(err, insertErr) {
 			t.Fatalf("insert failure: %v", err)
 		}
 		env.checkHead(env.genesis)
 		// The work stays available for another submission.
-		backend.err = nil
+		db.hasErr = nil
 		if err := m.SubmitWork(work.SealHash, types.EncodeNonce(1), common.Hash{}); err != nil {
 			t.Fatal(err)
 		}
