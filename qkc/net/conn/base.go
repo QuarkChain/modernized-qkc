@@ -14,8 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the quarkchain library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package conn provides the generic RPC engine used by cluster connection
-// implementations.
+// Package conn provides the shared RPC engine for cluster and P2P connections.
 package conn
 
 import (
@@ -23,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"runtime/debug"
 	"sync"
@@ -79,8 +79,7 @@ const (
 	ConnectionStateClosed
 )
 
-// BaseConn is the shared RPC engine used by cluster connection
-// implementations.
+// BaseConn is the shared RPC engine for cluster and P2P connections.
 //
 // Concurrency model:
 //
@@ -117,7 +116,7 @@ type BaseConn struct {
 	responseSerializers map[byte]*OpSerializer
 	typedHandlers       map[byte]TypedHandler
 	nonRPCOps           map[byte]struct{}
-	forwarder           func(*wire.ClusterFrame) bool
+	forwarder           func(wire.Frame) bool
 
 	// -- Protocol state (mu) --
 	mu        sync.RWMutex
@@ -224,10 +223,20 @@ func (c *BaseConn) WaitHandlers() {
 	c.handlers.Wait()
 }
 
-// SendRPC serializes a request with ClusterPeerID zero and waits for its response.
+// SendRPC serializes a cluster request with ClusterPeerID zero and waits for its response.
 // Serialization errors are returned without closing the connection.
 // ctx controls response waiting; it does not interrupt lock waits or writes.
 func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, req wire.SSZMessage) (wire.SSZMessage, error) {
+	return c.sendRPC(ctx, &wire.ClusterFrame{Opcode: opcode}, req)
+}
+
+// SendP2PRPC serializes a P2P request to chainID and waits for its response.
+func (c *BaseConn) SendP2PRPC(ctx context.Context, chainID *big.Int, opcode byte, req wire.SSZMessage) (wire.SSZMessage, error) {
+	return c.sendRPC(ctx, &wire.P2PFrame{ChainID: chainID, Opcode: opcode}, req)
+}
+
+func (c *BaseConn) sendRPC(ctx context.Context, frame wire.Frame, req wire.SSZMessage) (wire.SSZMessage, error) {
+	opcode := frame.GetOpcode()
 	ser, ok := c.requestSerializers[opcode]
 	_, nonRPC := c.nonRPCOps[opcode]
 	if !ok || nonRPC {
@@ -263,11 +272,7 @@ func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, req wire.SSZMessage
 	c.pending[rpcID] = call
 	c.mu.Unlock()
 
-	err = c.writeFrameLocked(&wire.ClusterFrame{
-		Opcode:  opcode,
-		RPCID:   rpcID,
-		Payload: payload,
-	})
+	err = c.writeFrameLocked(frame.WithBody(opcode, rpcID, payload))
 	c.writeMu.Unlock()
 
 	defer func() {
@@ -296,10 +301,20 @@ func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, req wire.SSZMessage
 	}
 }
 
-// SendCommand serializes a fire-and-forget command with ClusterPeerID zero.
+// SendCommand serializes a cluster command with RPC ID and ClusterPeerID zero.
 // The opcode must be registered in Config.NonRPCOps.
 // Serialization errors are returned without closing the connection.
 func (c *BaseConn) SendCommand(opcode byte, cmd wire.SSZMessage) error {
+	return c.sendCommand(&wire.ClusterFrame{Opcode: opcode}, cmd)
+}
+
+// SendP2PCommand serializes a fire-and-forget P2P command to chainID with RPC ID zero.
+func (c *BaseConn) SendP2PCommand(chainID *big.Int, opcode byte, cmd wire.SSZMessage) error {
+	return c.sendCommand(&wire.P2PFrame{ChainID: chainID, Opcode: opcode}, cmd)
+}
+
+func (c *BaseConn) sendCommand(frame wire.Frame, cmd wire.SSZMessage) error {
+	opcode := frame.GetOpcode()
 	if _, ok := c.nonRPCOps[opcode]; !ok {
 		return fmt.Errorf("unknown command opcode 0x%x", opcode)
 	}
@@ -310,12 +325,7 @@ func (c *BaseConn) SendCommand(opcode byte, cmd wire.SSZMessage) error {
 	if err != nil {
 		return fmt.Errorf("serialize command: %w", err)
 	}
-	frame := &wire.ClusterFrame{
-		Opcode:  opcode,
-		RPCID:   0,
-		Payload: payload,
-	}
-	return c.writeFrame(frame)
+	return c.writeFrame(frame.WithBody(opcode, 0, payload))
 }
 
 // WriteFrame writes a pre-built frame to the transport, serialized by writeMu
@@ -326,7 +336,7 @@ func (c *BaseConn) SendCommand(opcode byte, cmd wire.SSZMessage) error {
 // It is exposed so connections that route already-constructed frames from other
 // connections can reuse this connection's writeMu for physical serialization
 // (e.g. forwarding virtual peer traffic over a Master↔slave connection).
-func (c *BaseConn) WriteFrame(f *wire.ClusterFrame) error {
+func (c *BaseConn) WriteFrame(f wire.Frame) error {
 	return c.writeFrame(f)
 }
 
@@ -392,7 +402,7 @@ func (c *BaseConn) checkActiveLocked() error {
 // -- Write path ---------------------------------------------------------------
 //
 // writeFrame writes a pre-built frame, serialized with all other writes.
-func (c *BaseConn) writeFrame(f *wire.ClusterFrame) error {
+func (c *BaseConn) writeFrame(f wire.Frame) error {
 	c.writeMu.Lock()
 	c.mu.RLock()
 	if err := c.checkActiveLocked(); err != nil {
@@ -411,12 +421,12 @@ func (c *BaseConn) writeFrame(f *wire.ClusterFrame) error {
 // writeFrameLocked requires writeMu. Except for validation errors, a failed or
 // panicked write shuts down the connection before releasing writeMu to prevent
 // further writes.
-func (c *BaseConn) writeFrameLocked(f *wire.ClusterFrame) (err error) {
+func (c *BaseConn) writeFrameLocked(f wire.Frame) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("transport write panic: %v", r)
 		}
-		if err != nil && !errors.Is(err, wire.ErrInvalidClusterFrame) {
+		if err != nil && !errors.Is(err, wire.ErrInvalidFrame) {
 			c.shutdown(fmt.Errorf("write frame: %w", err))
 			err = fmt.Errorf("%w: %w", ErrConnectionClosed, err)
 		}
@@ -445,20 +455,20 @@ func (c *BaseConn) readerLoop() {
 // frame processing (the forwarder, response deserialization, serializer
 // callbacks, or future extension points) is converted into a connection
 // shutdown instead of crashing the process.
-func (c *BaseConn) handleFrameSafely(frame *wire.ClusterFrame) {
+func (c *BaseConn) handleFrameSafely(frame wire.Frame) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			c.log.Error("frame processing panic",
-				"opcode", frame.Opcode, "rpcid", frame.RPCID,
+				"opcode", frame.GetOpcode(), "rpcid", frame.GetRPCID(), "payload_len", len(frame.GetPayload()),
 				"panic", recovered, "stack", string(debug.Stack()))
 			c.shutdown(fmt.Errorf("frame processing panic (opcode=0x%x rpc_id %d): %v",
-				frame.Opcode, frame.RPCID, recovered))
+				frame.GetOpcode(), frame.GetRPCID(), recovered))
 		}
 	}()
 	c.handleFrame(frame)
 }
 
-func (c *BaseConn) handleFrame(frame *wire.ClusterFrame) {
+func (c *BaseConn) handleFrame(frame wire.Frame) {
 	// A closed transport can still have complete frames in its read buffer.
 	if c.IsClosed() {
 		return
@@ -471,49 +481,49 @@ func (c *BaseConn) handleFrame(frame *wire.ClusterFrame) {
 		return
 	}
 
-	if ser := c.responseSerializers[frame.Opcode]; ser != nil {
+	if ser := c.responseSerializers[frame.GetOpcode()]; ser != nil {
 		c.handleResponse(frame, ser)
 		return
 	}
-	if handler, ok := c.typedHandlers[frame.Opcode]; ok {
-		_, isNonRPC := c.nonRPCOps[frame.Opcode]
-		c.handleRequest(frame, handler, c.requestSerializers[frame.Opcode], isNonRPC)
+	if handler, ok := c.typedHandlers[frame.GetOpcode()]; ok {
+		_, isNonRPC := c.nonRPCOps[frame.GetOpcode()]
+		c.handleRequest(frame, handler, c.requestSerializers[frame.GetOpcode()], isNonRPC)
 		return
 	}
-	c.shutdown(fmt.Errorf("unsupported inbound opcode 0x%x", frame.Opcode))
+	c.shutdown(fmt.Errorf("unsupported inbound opcode 0x%x", frame.GetOpcode()))
 }
 
 // -- handleResponse (inbound response matching) -------------------------------
 
 // handleResponse matches an inbound response to a pending RPC.
 // Late and duplicate responses are ignored.
-func (c *BaseConn) handleResponse(frame *wire.ClusterFrame, ser *OpSerializer) {
+func (c *BaseConn) handleResponse(frame wire.Frame, ser *OpSerializer) {
 	c.mu.Lock()
 	// A missing call with an allocated ID is a late or duplicate response.
-	allocated := frame.RPCID > 0 && frame.RPCID <= c.nextRPCID
-	call := c.pending[frame.RPCID]
-	if call != nil && frame.Opcode != call.expectedOp {
+	allocated := frame.GetRPCID() > 0 && frame.GetRPCID() <= c.nextRPCID
+	call := c.pending[frame.GetRPCID()]
+	if call != nil && frame.GetOpcode() != call.expectedOp {
 		c.mu.Unlock()
 		c.shutdown(fmt.Errorf("unexpected response opcode 0x%x for rpc %d (want 0x%x)",
-			frame.Opcode, frame.RPCID, call.expectedOp))
+			frame.GetOpcode(), frame.GetRPCID(), call.expectedOp))
 		return
 	}
-	delete(c.pending, frame.RPCID)
+	delete(c.pending, frame.GetRPCID())
 	c.mu.Unlock()
 
 	if call == nil {
 		// An allocated ID with no pending call is a late or duplicate response;
 		// ignore it. An ID that was never allocated is a protocol error.
 		if !allocated {
-			c.shutdown(fmt.Errorf("unexpected rpc response %d", frame.RPCID))
+			c.shutdown(fmt.Errorf("unexpected rpc response %d", frame.GetRPCID()))
 		}
 		return
 	}
 
 	resp := ser.NewResponse()
-	if err := resp.UnmarshalSSZ(frame.Payload); err != nil {
-		c.log.Warn("malformed response payload", "opcode", frame.Opcode, "err", err)
-		c.shutdown(fmt.Errorf("malformed response payload for opcode 0x%x: %w", frame.Opcode, err))
+	if err := resp.UnmarshalSSZ(frame.GetPayload()); err != nil {
+		c.log.Warn("malformed response payload", "opcode", frame.GetOpcode(), "err", err)
+		c.shutdown(fmt.Errorf("malformed response payload for opcode 0x%x: %w", frame.GetOpcode(), err))
 		return
 	}
 
@@ -522,18 +532,18 @@ func (c *BaseConn) handleResponse(frame *wire.ClusterFrame, ser *OpSerializer) {
 
 // -- handleRequest (inbound request dispatch) --------------------------------
 
-func (c *BaseConn) handleRequest(frame *wire.ClusterFrame, handler TypedHandler, ser *OpSerializer, isNonRPC bool) {
-	if isNonRPC && frame.RPCID != 0 {
-		c.log.Warn("non-rpc command with non-zero rpc_id", "opcode", frame.Opcode, "rpcid", frame.RPCID)
-		c.shutdown(fmt.Errorf("non-rpc command with rpc id %d", frame.RPCID))
+func (c *BaseConn) handleRequest(frame wire.Frame, handler TypedHandler, ser *OpSerializer, isNonRPC bool) {
+	if isNonRPC && frame.GetRPCID() != 0 {
+		c.log.Warn("non-rpc command with non-zero rpc_id", "opcode", frame.GetOpcode(), "rpcid", frame.GetRPCID())
+		c.shutdown(fmt.Errorf("non-rpc command with rpc id %d", frame.GetRPCID()))
 		return
 	}
 
 	if !isNonRPC {
 		// defaultValidateRPCID is owned exclusively by readerLoop, so no lock needed.
-		ok := c.defaultValidateRPCID(frame.RPCID)
+		ok := c.defaultValidateRPCID(frame.GetRPCID())
 		if !ok {
-			c.log.Warn("incorrect rpc request id sequence", "rpcid", frame.RPCID)
+			c.log.Warn("incorrect rpc request id sequence", "rpcid", frame.GetRPCID())
 			c.shutdown(fmt.Errorf("incorrect rpc request id sequence"))
 			return
 		}
@@ -554,28 +564,28 @@ func (c *BaseConn) handleRequest(frame *wire.ClusterFrame, handler TypedHandler,
 
 // -- dispatch (handler execution + response write) ----------------------------
 
-func (c *BaseConn) dispatch(frame *wire.ClusterFrame, handler TypedHandler, ser *OpSerializer) {
+func (c *BaseConn) dispatch(frame wire.Frame, handler TypedHandler, ser *OpSerializer) {
 	defer c.handlers.Done()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			c.shutdown(fmt.Errorf("handler panic (opcode=0x%x): %v", frame.Opcode, recovered))
+			c.shutdown(fmt.Errorf("handler panic (opcode=0x%x): %v", frame.GetOpcode(), recovered))
 		}
 	}()
 
 	req := ser.NewRequest()
-	if err := req.UnmarshalSSZ(frame.Payload); err != nil {
+	if err := req.UnmarshalSSZ(frame.GetPayload()); err != nil {
 		c.shutdown(fmt.Errorf("deserialize failed: %w", err))
 		return
 	}
 	resp, err := handler(req)
 	if err != nil {
-		c.log.Error("request handler failed", "opcode", frame.Opcode, "err", err)
+		c.log.Error("request handler failed", "opcode", frame.GetOpcode(), "err", err)
 		c.shutdown(err)
 		return
 	}
 
 	// Fire-and-forget commands (rpc_id=0) get no response frame.
-	if frame.RPCID == 0 {
+	if frame.GetRPCID() == 0 {
 		return
 	}
 	respPayload, err := resp.MarshalSSZ()
@@ -584,22 +594,17 @@ func (c *BaseConn) dispatch(frame *wire.ClusterFrame, handler TypedHandler, ser 
 		return
 	}
 
-	respFrame := &wire.ClusterFrame{
-		ClusterPeerID: frame.ClusterPeerID,
-		Opcode:        ser.ResponseOpCode,
-		RPCID:         frame.RPCID,
-		Payload:       respPayload,
-	}
+	respFrame := frame.WithBody(ser.ResponseOpCode, frame.GetRPCID(), respPayload)
 
 	if err := c.writeFrame(respFrame); err != nil {
-		if errors.Is(err, wire.ErrInvalidClusterFrame) {
+		if errors.Is(err, wire.ErrInvalidFrame) {
 			// writeFrame leaves the connection open on validation errors so callers
 			// can correct invalid outbound frames. This response is constructed
 			// internally, and we cannot complete the peer's RPC, so close the
 			// connection rather than leave it waiting for a response.
-			c.shutdown(fmt.Errorf("invalid response frame rpc=%d: %w", frame.RPCID, err))
+			c.shutdown(fmt.Errorf("invalid response frame rpc=%d: %w", frame.GetRPCID(), err))
 		}
-		c.log.Debug("response write failed, connection shutting down", "rpcid", frame.RPCID, "err", err)
+		c.log.Debug("response write failed, connection shutting down", "rpcid", frame.GetRPCID(), "err", err)
 	}
 }
 
