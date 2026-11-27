@@ -61,7 +61,7 @@ func (h *masterTestHandler) GetUnconfirmedHeaders() ([]*coretypes.Header, error)
 
 func masterTestPair(t *testing.T, h *masterTestHandler, headerCode uint32, chainID *big.Int) (*MasterConn, *conn.BaseConn, *XshardConnManager) {
 	t.Helper()
-	pool, err := NewXshardConnManager(chainID, []*big.Int{chainID, big.NewInt(2)}, 0, &testXshardHandler{}, noopShutdown, nil)
+	pool, err := NewXshardConnManager(chainID, []*big.Int{chainID, big.NewInt(2)}, &testXshardHandler{}, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func masterTestPair(t *testing.T, h *masterTestHandler, headerCode uint32, chain
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport, err := conn.NewMasterSlaveTransport(b, 0)
+	transport, err := conn.NewMasterSlaveTransport(b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestMasterConnIgnoresPeerFrames(t *testing.T) {
 	}
 	mc.Start()
 	defer mc.Close()
-	if err = wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{ClusterPeerID: 1, Opcode: byte(wire.ClusterOpPing), RPCID: 1}); err != nil {
+	if err = wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{ClusterPeerID: 1, Opcode: byte(wire.ClusterOpPing), RPCID: 1}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -203,10 +203,10 @@ func TestMasterConnIgnoresPeerFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPing), RPCID: 2, Payload: payload}); err != nil {
+	if err := wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPing), RPCID: 2, Payload: payload}, 0); err != nil {
 		t.Fatal(err)
 	}
-	response, err := wire.ReadClusterFrameWithPeerID(b, wire.MaxFramePayloadLen)
+	response, err := wire.ReadClusterFrameWithPeerID(b, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestMasterConnWritesPeerFrame(t *testing.T) {
 	go func() {
 		writeErr <- mc.WriteFrame(&wire.ClusterFrame{ClusterPeerID: 42, Opcode: 3, RPCID: 7, Payload: []byte("peer")})
 	}()
-	frame, err := wire.ReadClusterFrameWithPeerID(b, wire.MaxFramePayloadLen)
+	frame, err := wire.ReadClusterFrameWithPeerID(b, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestMasterConnWritesPeerFrame(t *testing.T) {
 
 func TestMasterConnConnectToSlaves(t *testing.T) {
 	_, remote, pool := masterTestPair(t, &masterTestHandler{}, 0, big.NewInt(1))
-	other, err := NewXshardConnManager(big.NewInt(2), []*big.Int{big.NewInt(1), big.NewInt(2)}, 0, &testXshardHandler{}, noopShutdown, nil)
+	other, err := NewXshardConnManager(big.NewInt(2), []*big.Int{big.NewInt(1), big.NewInt(2)}, &testXshardHandler{}, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

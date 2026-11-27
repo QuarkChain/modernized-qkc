@@ -60,7 +60,7 @@ func newSlaveTestPair(t *testing.T, chainID *big.Int, handler SlaveRequestHandle
 		remote.Close()
 		t.Fatal(err)
 	}
-	transport, err := conn.NewMasterSlaveTransport(remote, 0)
+	transport, err := conn.NewMasterSlaveTransport(remote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,6 @@ func TestSlaveConnConfig(t *testing.T) {
 		{"zero chain ID", func(cfg *SlaveConnConfig) { cfg.RemoteChainID = new(big.Int) }},
 		{"negative chain ID", func(cfg *SlaveConnConfig) { cfg.RemoteChainID = big.NewInt(-1) }},
 		{"oversized chain ID", func(cfg *SlaveConnConfig) { cfg.RemoteChainID = new(big.Int).Lsh(big.NewInt(1), 256) }},
-		{"oversized payload", func(cfg *SlaveConnConfig) { cfg.MaxPayloadSize = wire.MaxFramePayloadLen + 1 }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			local, remote := net.Pipe()

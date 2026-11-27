@@ -41,10 +41,12 @@ type Data []byte
 // §1  Internal cluster messages (Master↔slave, slave↔slave)
 // =============================================================================
 
-// The large ssz-max tags below are schema bounds, not permitted frame sizes.
-// MaxFramePayloadLen caps network payloads, including single Data fields such
-// as RootTip. Generated dynamic-list decoders validate the offset table
-// against the actual input before allocating elements.
+// The large ssz-max tags below describe individual fields. External frames and
+// virtual peer traffic must fit the entire encoded message within MaxP2PPayloadLen.
+// Internal RPCs can carry complete messages such as a PING with RootTip up to
+// the cluster frame capacity.
+// Generated dynamic-list decoders validate the offset table against the actual
+// input before allocating elements.
 
 // PingRequest (ClusterOp.PING, 0x81) initializes a slave connection.
 // Slave↔slave PINGs use HasRootTip=false. pyquarkchain sent a dummy root block

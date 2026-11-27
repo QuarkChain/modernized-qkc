@@ -31,11 +31,10 @@ type SlaveRequestHandler interface {
 
 // SlaveConnConfig configures the master's connection to a slave.
 type SlaveConnConfig struct {
-	Conn           net.Conn
-	RemoteChainID  *big.Int
-	MaxPayloadSize uint32
-	Handler        SlaveRequestHandler
-	Logger         log.Logger
+	Conn          net.Conn
+	RemoteChainID *big.Int
+	Handler       SlaveRequestHandler
+	Logger        log.Logger
 }
 
 // SlaveConn wraps one master-to-slave TCP connection. The owner establishes the
@@ -50,7 +49,7 @@ type SlaveConn struct {
 
 // NewSlaveConn wraps a TCP connection without starting it. On error the caller
 // retains ownership of cfg.Conn. RemoteChainID must be positive and fit in
-// uint256. A zero MaxPayloadSize uses the protocol maximum.
+// uint256.
 func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	if cfg.Conn == nil {
 		return nil, errors.New("slave connection must not be nil")
@@ -61,7 +60,7 @@ func NewSlaveConn(cfg SlaveConnConfig) (*SlaveConn, error) {
 	if err := conn.ValidateSlaveChainID(cfg.RemoteChainID); err != nil {
 		return nil, err
 	}
-	transport, err := conn.NewMasterSlaveTransport(cfg.Conn, cfg.MaxPayloadSize)
+	transport, err := conn.NewMasterSlaveTransport(cfg.Conn)
 	if err != nil {
 		return nil, err
 	}

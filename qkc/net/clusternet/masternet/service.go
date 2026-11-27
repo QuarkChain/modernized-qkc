@@ -234,7 +234,7 @@ func (s *Service) connectSlave(ctx context.Context, info clusternet.SlaveInfo) e
 		case <-timer.C:
 		}
 	}
-	sc, err := NewSlaveConn(SlaveConnConfig{Conn: nc, RemoteChainID: info.ChainID, MaxPayloadSize: s.cfg.MaxPayloadSize, Handler: s, Logger: s.cfg.Logger})
+	sc, err := NewSlaveConn(SlaveConnConfig{Conn: nc, RemoteChainID: info.ChainID, Handler: s, Logger: s.cfg.Logger})
 	if err != nil {
 		nc.Close()
 		return err
