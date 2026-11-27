@@ -151,7 +151,7 @@ func TestBuildRootBlock(t *testing.T) {
 	if block.Nonce() != 0 || block.MixDigest() != (common.Hash{}) || block.Signature() != ([65]byte{}) {
 		t.Fatal("candidate inherited the parent seal or signature")
 	}
-	if err := builder.engine.VerifyBlock(chain, block); err != nil {
+	if err := builder.engine.VerifyBlock(t.Context(), chain, block); err != nil {
 		t.Fatalf("constructed root failed consensus: %v", err)
 	}
 	cluster.err = errors.New("unexpected cluster request")
@@ -238,7 +238,7 @@ func TestBuildRootBlockAlignsShardConfirmations(t *testing.T) {
 		if !slices.EqualFunc(block.ShardBlockHeaders(), wantHeaders, func(got, want *types.Header) bool { return got.Hash() == want.Hash() }) {
 			t.Fatal("root did not include the expected headers from both shards")
 		}
-		if err := builder.engine.VerifyBlock(chain, block); err != nil {
+		if err := builder.engine.VerifyBlock(t.Context(), chain, block); err != nil {
 			t.Fatalf("constructed root failed consensus: %v", err)
 		}
 	}
@@ -337,7 +337,7 @@ func TestBuildRootBlockFiltersSiblingRoot(t *testing.T) {
 	if block.ShardHeaderHash() != qkctypes.CalcShardHeaderHash(want) {
 		t.Fatal("expected the prefix before the sibling root and the other shard's header")
 	}
-	if err := builder.engine.VerifyBlock(chain, block); err != nil {
+	if err := builder.engine.VerifyBlock(t.Context(), chain, block); err != nil {
 		t.Fatalf("constructed root failed consensus: %v", err)
 	}
 	delete(chain.roots, sibling.Hash())

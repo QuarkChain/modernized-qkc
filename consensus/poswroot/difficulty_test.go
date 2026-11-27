@@ -82,7 +82,7 @@ func TestSignerAndQuota(t *testing.T) {
 			}
 			f.chain.stakes[confirmed.Hash()] = result
 			before := block.Header()
-			info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+			info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -114,7 +114,7 @@ func TestPoSWInfoBeforeSigning(t *testing.T) {
 	header := block.Header()
 	header.Signature = [65]byte{}
 	before := header.Hash()
-	info, err := GetPoSWInfo(f.engine.config, f.chain, header)
+	info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, header)
 	if err != nil || info == nil || info.Signer != result.signer || info.Quota != 4 || info.Mined != 2 || info.EffectiveDifficulty.Int64() != 100 {
 		t.Fatalf("info %+v, error %v; want quota 4, mined 2 and base difficulty before signing", info, err)
 	}
@@ -130,7 +130,7 @@ func TestZeroQuotaStillCountsHistory(t *testing.T) {
 		f.appendRoot(t, common.Address{9})
 		f.appendRoot(t, common.Address{})
 		block := authorize(t, f, f.candidate(t), stakes)
-		info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+		info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 		if err != nil || info == nil || info.Quota != 0 || info.Mined != 2 || info.Signer == (common.Address{}) {
 			t.Fatalf("stakes %d: info %+v, error %v; want zero quota and mined 2", stakes, info, err)
 		}
@@ -169,13 +169,13 @@ func TestDiscountedEthashSeal(t *testing.T) {
 			// This fixed proof meets difficulty 10 but fails difficulty 100.
 			// All cases share the seal hash from TestRealEthashIsChecked.
 			block = block.WithMiningResult(5, common.HexToHash("0xfe3841ae5cc7b3068f24e6ccf2109e313657958a82f7e3090434d297ce20d82e"), nil)
-			err := f.engine.VerifyBlock(f.chain, block)
+			err := f.engine.VerifyBlock(t.Context(), f.chain, block)
 			if name == "authorized" {
 				if err != nil {
 					t.Fatalf("discounted proof rejected: %v", err)
 				}
 				invalid := changeHeader(block, func(h *qkctypes.RootBlockHeader) { h.MixDigest[0] ^= 1 })
-				if err := f.engine.VerifyBlock(f.chain, invalid); err == nil || !strings.Contains(err.Error(), "mix hash") {
+				if err := f.engine.VerifyBlock(t.Context(), f.chain, invalid); err == nil || !strings.Contains(err.Error(), "mix hash") {
 					t.Fatalf("authorized signer bypassed PoW verification: %v", err)
 				}
 			} else if name == "missing confirmation" {
@@ -236,7 +236,7 @@ func TestQuotaUsesParentBranchWindow(t *testing.T) {
 				stakes = 100
 			}
 			block := authorize(t, f, f.candidate(t), stakes)
-			info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+			info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 			wantInfo := map[string]PoSWInfo{
 				"below quota": {Quota: 2, Mined: 2}, "quota used": {Quota: 2, Mined: 3},
 				"outside window": {Quota: 1, Mined: 1}, "genesis counted": {Quota: 1, Mined: 2},
@@ -265,7 +265,7 @@ func TestStakesUseConfirmedStateBeforeCandidate(t *testing.T) {
 	// The new confirmation funds the same coinbase, but it cannot give this
 	// candidate a discount. Eligibility comes from its parent's confirmation.
 	f.chain.stakes[newShard.Hash()] = stakeResult{uint256.NewInt(10000), common.Address{1}}
-	info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+	info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestStakesUseConfirmedStateBeforeCandidate(t *testing.T) {
 	f.chain.blocks[fork.Hash()], f.chain.confirmed[fork.Hash()] = fork, forkConfirmed
 	f.parent = fork
 	block = authorize(t, f, f.candidate(t), 100)
-	info, err = GetPoSWInfo(f.engine.config, f.chain, block.Header())
+	info, err = GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestStakingFallbackAndReadFailures(t *testing.T) {
 			case "ancestor error":
 				f.chain.headerErr = failure
 			}
-			info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+			info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 			if name == "missing confirmation" {
 				if err == nil || !strings.Contains(err.Error(), "missing parent root staking shard confirmation") {
 					t.Fatalf("missing confirmation did not fail before reading stakes: %v", err)
@@ -386,7 +386,7 @@ func TestConfiguredStakingChainAndLargeIDs(t *testing.T) {
 	if err := f.verifyUnsealed(block); err != nil {
 		t.Fatalf("body with large chain ID rejected: %v", err)
 	}
-	info, err := GetPoSWInfo(f.engine.config, f.chain, block.Header())
+	info, err := GetPoSWInfo(t.Context(), f.engine.config, f.chain, block.Header())
 	if err != nil {
 		t.Fatal(err)
 	}

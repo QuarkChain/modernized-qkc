@@ -40,7 +40,7 @@ type insertEngine struct {
 	err   error
 }
 
-func (e *insertEngine) VerifyBlock(chain posw.RootChainReader, block *types.RootBlock) error {
+func (e *insertEngine) VerifyBlock(_ context.Context, chain posw.RootChainReader, block *types.RootBlock) error {
 	e.calls++
 	if e.err != nil {
 		return e.err
