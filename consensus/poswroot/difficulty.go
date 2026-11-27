@@ -36,6 +36,12 @@ type PoSWInfo struct {
 	Mined               uint64         // This coinbase's blocks in the preceding WindowSize-1, plus the candidate.
 }
 
+// EligibleForDiscount reports whether the authorized signer can claim the
+// discount for this candidate. Mined already includes the candidate.
+func (info *PoSWInfo) EligibleForDiscount() bool {
+	return info != nil && info.Signer != (common.Address{}) && info.Mined <= info.Quota
+}
+
 // verifySeal selects the effective staking difficulty, then checks Ethash outside
 // simulation. Header fields must already pass verifyHeader.
 func (p *PoSW) verifySeal(chain RootChainReader, header *qkctypes.RootBlockHeader) error {
@@ -127,8 +133,7 @@ func GetPoSWInfo(config *params.QuarkChainConfig, chain RootChainReader, header 
 			ancestor = previous
 		}
 	}
-	// Mined includes the candidate, so it may equal the quota and still qualify.
-	if info.Mined > info.Quota || signer == (common.Address{}) {
+	if !info.EligibleForDiscount() {
 		return info, nil
 	}
 	// Require V=0/1 so CGO and pure Go recovery apply the same consensus rule.

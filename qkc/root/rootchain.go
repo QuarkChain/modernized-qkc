@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -243,6 +244,10 @@ func (c *RootChain) Init() error {
 // disable Init and insertion, and return an error. The client handles connection
 // failures and requests master shutdown for cluster recovery.
 func (c *RootChain) InsertBlock(block *types.RootBlock) error {
+	return c.insertBlock(block, false)
+}
+
+func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 	if block == nil || block.Number() == 0 {
 		return errors.New("missing or genesis root block")
 	}
@@ -259,10 +264,14 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	if !c.initialized.Load() {
 		return errChainNotInitialized
 	}
+	tip := c.tip.Load()
+	if mined && block.ParentHash() != tip.Hash() {
+		return mining.ErrStaleWork
+	}
 	// Reject stale blocks before loading, verifying or broadcasting them, even
 	// if already stored. Compare heights first to avoid unsigned underflow.
-	if tip := c.tip.Load().Number; tip > block.Number() && tip-block.Number() > maxStaleRootBlockHeightDiff {
-		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip, maxStaleRootBlockHeightDiff)
+	if tip.Number > block.Number() && tip.Number-block.Number() > maxStaleRootBlockHeightDiff {
+		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip.Number, maxStaleRootBlockHeightDiff)
 	}
 	hash := block.Hash()
 	stored, err := c.GetRootBlock(hash)
@@ -306,7 +315,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	header := block.Header()
 	// Stored blocks can belong to side branches. Re-evaluate fork choice and
 	// promote a block only when its TD strictly exceeds the current runtime tip.
-	updateTip := header.TotalDifficulty.Cmp(&c.tip.Load().TotalDifficulty) > 0
+	updateTip := header.TotalDifficulty.Cmp(&tip.TotalDifficulty) > 0
 	if updateTip {
 		if err := c.rewriteCanonical(batch, header); err != nil {
 			return err
@@ -565,12 +574,25 @@ func (c *RootChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int,
 // substituting zero stakes or retrying here. Connection failures are managed by
 // the client. Wrapped context and remote errors remain identifiable with errors.Is/As.
 func (c *RootChain) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
-	ctx, cancel := context.WithTimeout(c.backendCtx, rpcTimeout)
+	return (rootStakeReader{c, c.backendCtx}).GetRootChainStakes(chainID, shardBlockHash, coinbase)
+}
+
+// rootStakeReader binds the staking RPC to the lifetime of the operation.
+type rootStakeReader struct {
+	*RootChain
+	ctx context.Context
+}
+
+func (r rootStakeReader) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, rpcTimeout)
 	defer cancel()
+	// A mining request has its own context and must also stop at backend shutdown.
+	stop := context.AfterFunc(r.backendCtx, cancel)
+	defer stop()
 	if err := ctx.Err(); err != nil {
 		return nil, common.Address{}, err
 	}
-	result, err := c.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
+	result, err := r.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
 	if err != nil {
 		return nil, common.Address{}, fmt.Errorf("query root stakes for chain %v, shard block %x, coinbase %s: %w", chainID, shardBlockHash, coinbase, err)
 	}

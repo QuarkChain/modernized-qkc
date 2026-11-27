@@ -18,6 +18,7 @@ package shard
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -49,7 +50,10 @@ func (s *Shard) BuildMiningWork(ctx context.Context, coinbase common.Address) (*
 		},
 		Parent: block.ParentHash(),
 		Anchor: extra.PrevRootBlock,
-		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
+		Submit: func(nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error {
+			if signature != nil {
+				return errors.New("shard work does not accept a staking signature")
+			}
 			sealedHeader, sealedExtra := *header, *extra
 			sealedExtra.Nonce, sealedExtra.MixHash = nonce, mixHash
 			sealedHeader.Extra = sealedExtra.Encode()

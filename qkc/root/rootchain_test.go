@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/poswshard"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/mining"
@@ -175,7 +177,7 @@ type rootEnv struct {
 
 // Seed genesis directly so startup tests do not depend on block insertion.
 // Unlike Python's empty-DB startup, root genesis already confirms every member.
-func newRootEnv(t *testing.T) *rootEnv {
+func newRootEnv(t *testing.T, configure ...func(*params.PoSWConfig)) *rootEnv {
 	t.Helper()
 	f := &rootEnv{
 		t: t, config: params.NewTestQuarkChainConfig(10001, 10001, 10002).QuarkChain,
@@ -185,6 +187,9 @@ func newRootEnv(t *testing.T) *rootEnv {
 	t.Cleanup(func() { f.db.Close() })
 	// An old parent brings a candidate down to difficulty one for the Ethash test.
 	f.config.PoSW.AdjustmentFactor = 1
+	for _, apply := range configure {
+		apply(f.config.PoSW)
+	}
 	engine, err := posw.New(f.config)
 	if err != nil {
 		t.Fatal(err)
@@ -333,6 +338,9 @@ func TestRootPoWMiner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if work.DiffDivider != 0 {
+		t.Fatalf("staking disabled: got divider %d, want 0", work.DiffDivider)
+	}
 	search := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
 	defer search.Close()
 	nonce, mix, ok := search.SearchNonce(t.Context(), work.Number, work.SealHash, work.Difficulty, 1)
@@ -358,6 +366,131 @@ func TestRootPoWMiner(t *testing.T) {
 	}
 }
 
+func TestRootPoSWMiner(t *testing.T) {
+	synctest.Test(t, testRootPoSWMiner)
+}
+
+func testRootPoSWMiner(t *testing.T) {
+	f := newRootEnv(t, func(cfg *params.PoSWConfig) {
+		cfg.StakingEnabled = true
+		cfg.WindowSize, cfg.DiffDivider = 2, 10
+		cfg.StakePerBlock, cfg.MinimumDifficulty = big.NewInt(100), big.NewInt(10)
+	})
+	if err := f.chain.Init(); err != nil {
+		t.Fatal(err)
+	}
+	staker, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	coinbase := crypto.PubkeyToAddress(staker.PublicKey)
+	local := new(waitingRootSearch)
+	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{Coinbase: coinbase, Search: local})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.client.onStakes = func(rpcCtx context.Context, _ *big.Int, _ common.Address, _ common.Hash) (*clusternet.RootChainStakesResult, error) {
+		cancel()
+		<-rpcCtx.Done()
+		return nil, rpcCtx.Err()
+	}
+	if work, err := m.GetWork(ctx, coinbase); work != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled stake lookup: got work %+v, err %v", work, err)
+	}
+	f.client.onStakes = func(_ context.Context, id *big.Int, addr common.Address, hash common.Hash) (*clusternet.RootChainStakesResult, error) {
+		if id.Cmp(f.config.ChainIDs[0]) != 0 || hash != f.confirmed[id.String()] {
+			t.Fatalf("unexpected staking snapshot: chain %v, block %v", id, hash)
+		}
+		result := &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(100)}
+		if addr == coinbase {
+			result.Signer = crypto.PubkeyToAddress(signer.PublicKey)
+		}
+		return result, nil
+	}
+	if work, err := m.GetWork(t.Context(), common.Address{42}); err != nil || work.DiffDivider != 0 {
+		t.Fatalf("stake with no signer: got work %+v, err %v", work, err)
+	}
+	work, err := m.GetWork(t.Context(), coinbase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Difficulty.Cmp(big.NewInt(10)) != 0 || work.DiffDivider != 10 {
+		t.Fatalf("eligible root work: base %v, divider %d, want 10, 10", work.Difficulty, work.DiffDivider)
+	}
+	if err := m.StartLocalMining(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.StopLocalMining()
+	synctest.Wait()
+	if local.work == nil || local.work.SealHash != work.SealHash || local.work.DiffDivider != 0 || local.work.Difficulty.Cmp(work.Difficulty) != 0 {
+		t.Fatalf("unsigned local search: got %+v, want the same work at base difficulty", local.work)
+	}
+	m.StopLocalMining()
+	if current, err := m.GetWork(t.Context(), coinbase); err != nil || current.DiffDivider != work.DiffDivider {
+		t.Fatalf("remote work after unsigned local search: got %+v, err %v", current, err)
+	}
+	// Find a real Ethash seal that only passes at the advertised discount.
+	search := &poswshard.PoSW{EthashVerifier: poswshard.NewEthashVerifier()}
+	defer search.Close()
+	discount := poswshard.DiscountDifficulty(work.DiffDivider, work.Difficulty)
+	var nonce coretypes.BlockNonce
+	var mix common.Hash
+	for start := uint64(0); ; start = nonce.Uint64() + 1 {
+		var ok bool
+		nonce, mix, ok = search.SearchNonce(t.Context(), work.Number, work.SealHash, discount, start)
+		if !ok {
+			t.Fatal("discounted Ethash search failed")
+		}
+		if search.Verify(work.Number, work.SealHash, nonce.Uint64(), mix, work.Difficulty) != nil {
+			break
+		}
+	}
+	if err := m.SubmitWork(work.SealHash, nonce, mix); err == nil {
+		t.Fatal("unsigned discounted seal accepted")
+	}
+	wrong, err := crypto.Sign(work.SealHash[:], staker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SubmitWorkWithSignature(work.SealHash, nonce, mix, (*[65]byte)(wrong)); err == nil {
+		t.Fatal("discounted seal signed by the staker instead of the authorized signer accepted")
+	}
+	valid, err := crypto.Sign(work.SealHash[:], signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SubmitWorkWithSignature(work.SealHash, nonce, mix, (*[65]byte)(valid)); err != nil {
+		t.Fatal(err)
+	}
+	tip := f.chain.RootTip()
+	if tip.SealHash() != work.SealHash || tip.Signature != [65]byte(valid) || tip.Difficulty.Uint64() != 10 ||
+		tip.TotalDifficulty.Uint64() != f.genesis.TotalDifficulty().Uint64()+10 || len(f.client.broadcasts) != 1 {
+		t.Fatal("signed root was not imported and broadcast at base difficulty")
+	}
+	next, err := m.GetWork(t.Context(), coinbase)
+	if err != nil || next.DiffDivider != 0 {
+		t.Fatalf("exhausted quota: got work %+v, err %v", next, err)
+	}
+	nonce, mix, ok := search.SearchNonce(t.Context(), next.Number, next.SealHash, next.Difficulty, 0)
+	if !ok {
+		t.Fatal("base-difficulty Ethash search failed")
+	}
+	if err := m.SubmitWork(next.SealHash, nonce, mix); err != nil {
+		t.Fatalf("unsigned full-difficulty work after exhausting quota: %v", err)
+	}
+	f.client.onStakes = func(ctx context.Context, _ *big.Int, _ common.Address, _ common.Hash) (*clusternet.RootChainStakesResult, error) {
+		f.cancel()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if work, err := m.GetWork(t.Context(), coinbase); work != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("backend stopped during stake lookup: got work %+v, err %v", work, err)
+	}
+}
+
 func TestRootPoWMinerTipChange(t *testing.T) {
 	f, _ := newInsertEnv(t)
 	m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{WorkRefresh: time.Hour})
@@ -379,13 +512,54 @@ func TestRootPoWMinerTipChange(t *testing.T) {
 	}
 }
 
-// waitingRootSearch holds the current mining height until the search is canceled.
-type waitingRootSearch struct{ height uint64 }
+func TestRootPoWMinerCompetingSubmissions(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, engine := newInsertEnv(t)
+		m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{})
+		var work [2]*mining.MiningWork
+		for i := range work {
+			var err error
+			work[i], err = m.GetWork(t.Context(), common.Address{byte(i + 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Let both submissions pass the miner's head check before either imports.
+		f.chain.chainmu.MustLock()
+		var wg sync.WaitGroup
+		var results [2]error
+		for i, w := range work {
+			wg.Go(func() { results[i] = m.SubmitWork(w.SealHash, coretypes.EncodeNonce(1), common.Hash{}) })
+		}
+		synctest.Wait()
+		f.chain.chainmu.Unlock()
+		wg.Wait()
+		tip := f.chain.RootTip()
+		if engine.calls != 1 || len(f.client.broadcasts) != 1 || f.client.broadcasts[0] != tip.Hash() {
+			t.Fatalf("verified %d blocks, broadcast %v, tip %x", engine.calls, f.client.broadcasts, tip.Hash())
+		}
+		for i, w := range work {
+			var want error
+			if w.SealHash != tip.SealHash() {
+				want = mining.ErrStaleWork
+			}
+			if !errors.Is(results[i], want) {
+				t.Fatalf("submission %d: got %v, want %v", i, results[i], want)
+			}
+			if err := m.SubmitWork(w.SealHash, coretypes.EncodeNonce(1), common.Hash{}); !errors.Is(err, mining.ErrUnknownWork) {
+				t.Fatalf("resubmitting %d: got %v, want evicted work", i, err)
+			}
+		}
+	})
+}
+
+// waitingRootSearch holds the local work until the search is canceled.
+type waitingRootSearch struct{ work *mining.MiningWork }
 
 func (s *waitingRootSearch) Search(ctx context.Context, work *mining.MiningWork) (coretypes.BlockNonce, common.Hash, bool) {
-	s.height = work.Number
+	s.work = work
 	<-ctx.Done()
-	s.height = 0
+	s.work = nil
 	return coretypes.BlockNonce{}, common.Hash{}, false
 }
 
@@ -399,8 +573,8 @@ func TestRootPoWMinerLocalHeadChange(t *testing.T) {
 		}
 		defer m.StopLocalMining()
 		synctest.Wait()
-		if search.height != 1 {
-			t.Fatalf("mining height %d on genesis, want 1", search.height)
+		if search.work == nil || search.work.Number != 1 {
+			t.Fatalf("local work on genesis: got %+v, want height 1", search.work)
 		}
 		tip := f.block(f.genesis, 1)
 		if err := f.chain.InsertBlock(tip); err != nil {
@@ -408,14 +582,14 @@ func TestRootPoWMinerLocalHeadChange(t *testing.T) {
 		}
 		// Drain the head event without advancing the work refresh timer.
 		synctest.Wait()
-		if search.height != tip.NumberU64()+1 {
-			t.Fatalf("mining height %d after head change, want %d", search.height, tip.NumberU64()+1)
+		if search.work == nil || search.work.Number != tip.NumberU64()+1 {
+			t.Fatalf("local work after head change: got %+v, want height %d", search.work, tip.NumberU64()+1)
 		}
 		f.cancel()
 		f.chain.Close()
 		synctest.Wait()
-		if search.height != 0 {
-			t.Fatalf("still mining height %d after closing the chain", search.height)
+		if search.work != nil {
+			t.Fatalf("still mining height %d after closing the chain", search.work.Number)
 		}
 		m.StopLocalMining()
 		if err := m.StartLocalMining(); err == nil {

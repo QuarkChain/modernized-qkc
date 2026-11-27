@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/poswroot"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/qkc/mining"
@@ -27,25 +28,33 @@ import (
 
 var _ mining.MinerBackend = (*RootChain)(nil)
 
-// BuildMiningWork serves unsigned root work at the header's base difficulty.
-// TODO(mining): Offer discounted work to eligible root PoSW miners and
-// accept the staking signer's signature over the seal hash on submission.
+// BuildMiningWork serves the header's base difficulty and the discount
+// available to the authorized signer on this candidate's parent branch.
 func (c *RootChain) BuildMiningWork(ctx context.Context, coinbase common.Address) (*mining.Candidate, error) {
 	block, err := c.CreateBlockToMine(ctx, coinbase)
 	if err != nil {
 		return nil, err
 	}
 	header := block.Header()
+	info, err := poswroot.GetPoSWInfo(c.config, rootStakeReader{c, ctx}, header)
+	if err != nil {
+		return nil, err
+	}
+	var divider uint64
+	if info.EligibleForDiscount() {
+		divider = c.config.PoSW.DiffDivider
+	}
 	return &mining.Candidate{
 		MiningWork: mining.MiningWork{
-			SealHash:   c.engine.SealHash(header),
-			Number:     block.NumberU64(),
-			Difficulty: header.Difficulty.ToBig(),
-			Time:       header.Time,
+			SealHash:    c.engine.SealHash(header),
+			Number:      block.NumberU64(),
+			Difficulty:  header.Difficulty.ToBig(),
+			DiffDivider: divider,
+			Time:        header.Time,
 		},
 		Parent: header.ParentHash,
-		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
-			return c.InsertBlock(block.WithMiningResult(nonce.Uint64(), mixHash, nil))
+		Submit: func(nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error {
+			return c.insertBlock(block.WithMiningResult(nonce.Uint64(), mixHash, signature), true)
 		},
 	}, nil
 }
