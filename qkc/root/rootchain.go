@@ -326,7 +326,7 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 		// fully verifying the supplied block and atomically rewriting its snapshot.
 		// Reader methods do not acquire chainmu, so engine queries can run while
 		// insertion holds the write lock without reentering it.
-		if err := c.engine.VerifyBlock(c, block); err != nil {
+		if err := c.engine.VerifyBlock(c.backendCtx, c, block); err != nil {
 			return fmt.Errorf("verify root block: %w", err)
 		}
 		confirmed, err := c.readConfirmations(block.ParentHash())
@@ -608,31 +608,24 @@ func (c *RootChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int,
 }
 
 // GetRootChainStakes returns stakes and signer at the confirmed shard state.
-// Its deadline derives from the backend lifetime; the consensus reader interface
-// has no per-import context. Zero stakes and an unset signer are valid responses.
+// The RPC is bounded by ctx, backend shutdown and rpcTimeout.
+// Zero stakes and an unset signer are valid responses.
 // Query failures, including timeouts, abort the caller's operation without
 // substituting zero stakes or retrying here. Connection failures are managed by
 // the client. Wrapped context and remote errors remain identifiable with errors.Is/As.
-func (c *RootChain) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
-	return (rootStakeReader{c, c.backendCtx}).GetRootChainStakes(chainID, shardBlockHash, coinbase)
-}
-
-// rootStakeReader binds the staking RPC to the lifetime of the operation.
-type rootStakeReader struct {
-	*RootChain
-	ctx context.Context
-}
-
-func (r rootStakeReader) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, rpcTimeout)
+func (c *RootChain) GetRootChainStakes(ctx context.Context, chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+	if err := c.backendCtx.Err(); err != nil {
+		return nil, common.Address{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 	// A mining request has its own context and must also stop at backend shutdown.
-	stop := context.AfterFunc(r.backendCtx, cancel)
+	stop := context.AfterFunc(c.backendCtx, cancel)
 	defer stop()
 	if err := ctx.Err(); err != nil {
 		return nil, common.Address{}, err
 	}
-	result, err := r.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
+	result, err := c.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
 	if err != nil {
 		return nil, common.Address{}, fmt.Errorf("query root stakes for chain %v, shard block %x, coinbase %s: %w", chainID, shardBlockHash, coinbase, err)
 	}

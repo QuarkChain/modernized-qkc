@@ -17,6 +17,7 @@
 package poswroot
 
 import (
+	"context"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -50,7 +51,7 @@ type RootChainReader interface {
 
 	// GetRootChainStakes reads the coinbase's locked stakes and allowed signer
 	// at exactly shardBlockHash on chainID. Zero stakes use a non-nil zero value.
-	GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error)
+	GetRootChainStakes(ctx context.Context, chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error)
 }
 
 // RootEngine defines consensus for root blocks, separate from consensus.Engine.
@@ -60,7 +61,7 @@ type RootEngine interface {
 
 	// VerifyBlock checks a non-genesis root's header, body and seal against the
 	// consensus rules without changing the block or stored chain data.
-	VerifyBlock(chain RootChainReader, block *qkctypes.RootBlock) error
+	VerifyBlock(ctx context.Context, chain RootChainReader, block *qkctypes.RootBlock) error
 
 	// Prepare calculates and sets Difficulty and TotalDifficulty in the header.
 	// These base values do not include any staking discount used for the seal.

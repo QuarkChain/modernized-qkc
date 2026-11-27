@@ -36,7 +36,7 @@ func (c *RootChain) BuildMiningWork(ctx context.Context, coinbase common.Address
 		return nil, err
 	}
 	header := block.Header()
-	info, err := poswroot.GetPoSWInfo(c.config, rootStakeReader{c, ctx}, header)
+	info, err := poswroot.GetPoSWInfo(ctx, c.config, c, header)
 	if err != nil {
 		return nil, err
 	}

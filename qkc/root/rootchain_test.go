@@ -331,11 +331,11 @@ func TestRootCreateBlockToMine(t *testing.T) {
 		t.Fatal("Ethash search failed")
 	}
 	sealed := block.WithMiningResult(nonce.Uint64(), mix, nil)
-	if err := f.engine.VerifyBlock(chain, sealed); err != nil {
+	if err := f.engine.VerifyBlock(t.Context(), chain, sealed); err != nil {
 		t.Fatalf("valid Ethash seal rejected: %v", err)
 	}
 	mix[0] ^= 1
-	if err := f.engine.VerifyBlock(chain, block.WithMiningResult(nonce.Uint64(), mix, nil)); err == nil {
+	if err := f.engine.VerifyBlock(t.Context(), chain, block.WithMiningResult(nonce.Uint64(), mix, nil)); err == nil {
 		t.Fatal("invalid Ethash mix digest accepted")
 	}
 	if block.Nonce() != 0 || block.MixDigest() != (common.Hash{}) || block.Signature() != ([65]byte{}) {
@@ -1240,7 +1240,7 @@ func TestRootChainStakeQuery(t *testing.T) {
 	if !f.chain.chainmu.TryLock() {
 		t.Fatal("chain already closed")
 	}
-	amount, signer, err := f.chain.GetRootChainStakes(id, hash, coinbase)
+	amount, signer, err := f.chain.GetRootChainStakes(t.Context(), id, hash, coinbase)
 	f.chain.chainmu.Unlock()
 	if err != nil || amount == nil || !amount.Eq(want.Stakes) || signer != want.Signer {
 		t.Fatal("stake response changed", amount, signer, err)
@@ -1262,7 +1262,7 @@ func TestRootChainStakeQuery(t *testing.T) {
 				return &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(0)}, nil
 			}
 		}
-		amount, signer, err := f.chain.GetRootChainStakes(id, hash, coinbase)
+		amount, signer, err := f.chain.GetRootChainStakes(t.Context(), id, hash, coinbase)
 		if stage == "zero" {
 			if err != nil || amount == nil || !amount.IsZero() || signer != (common.Address{}) {
 				t.Fatal("valid zero stakes or unset signer rejected", amount, signer, err)
@@ -1298,7 +1298,7 @@ func TestRootChainStakeQueryCancellation(t *testing.T) {
 				if stage == "timeout" {
 					want = context.DeadlineExceeded
 				}
-				if amount, _, err := f.chain.GetRootChainStakes(big.NewInt(10001), common.Hash{9}, common.Address{}); amount != nil || !errors.Is(err, want) {
+				if amount, _, err := f.chain.GetRootChainStakes(t.Context(), big.NewInt(10001), common.Hash{9}, common.Address{}); amount != nil || !errors.Is(err, want) {
 					t.Fatal("stake query did not observe cancellation", amount, err)
 				}
 				if stage == "already canceled" && len(f.client.calls) != 0 {
@@ -1310,7 +1310,7 @@ func TestRootChainStakeQueryCancellation(t *testing.T) {
 					f.client.onStakes = func(ctx context.Context, _ *big.Int, _ common.Address, _ common.Hash) (*clusternet.RootChainStakesResult, error) {
 						return &clusternet.RootChainStakesResult{Stakes: uint256.NewInt(1)}, ctx.Err()
 					}
-					if amount, _, err := f.chain.GetRootChainStakes(big.NewInt(10001), common.Hash{9}, common.Address{}); err != nil || amount == nil || amount.Uint64() != 1 {
+					if amount, _, err := f.chain.GetRootChainStakes(t.Context(), big.NewInt(10001), common.Hash{9}, common.Address{}); err != nil || amount == nil || amount.Uint64() != 1 {
 						t.Fatal("query timeout affected subsequent stake queries", amount, err)
 					}
 				}

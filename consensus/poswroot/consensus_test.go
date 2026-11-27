@@ -18,6 +18,7 @@ package poswroot
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"maps"
 	"math/big"
@@ -81,7 +82,7 @@ func (c *testChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int,
 	return c.shardAmounts[hash], c.shardAmountErr
 }
 
-func (c *testChain) GetRootChainStakes(id *big.Int, hash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+func (c *testChain) GetRootChainStakes(_ context.Context, id *big.Int, hash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
 	c.stakeHash, c.stakeChain, c.stakeCoinbase = hash, new(big.Int).Set(id), coinbase
 	r := c.stakes[hash]
 	return r.stakes, r.signer, c.stakeErr
@@ -317,14 +318,14 @@ func TestVerifyRootFields(t *testing.T) {
 	if err := f.verifyUnsealed(block); err != nil {
 		t.Fatalf("size boundary: %v", err)
 	}
-	if err := f.engine.VerifyBlock(f.chain, nil); err == nil {
+	if err := f.engine.VerifyBlock(t.Context(), f.chain, nil); err == nil {
 		t.Fatal("nil root accepted")
 	}
-	if err := f.engine.VerifyBlock(nil, f.candidate(t)); err == nil {
+	if err := f.engine.VerifyBlock(t.Context(), nil, f.candidate(t)); err == nil {
 		t.Fatal("nil reader accepted")
 	}
 	missingParent := changeHeader(f.candidate(t), func(h *qkctypes.RootBlockHeader) { h.ParentHash = common.Hash{1} })
-	if err := f.engine.VerifyBlock(f.chain, missingParent); !errors.Is(err, consensus.ErrUnknownAncestor) {
+	if err := f.engine.VerifyBlock(t.Context(), f.chain, missingParent); !errors.Is(err, consensus.ErrUnknownAncestor) {
 		t.Fatalf("missing parent error %v, want ErrUnknownAncestor", err)
 	}
 }
@@ -575,7 +576,7 @@ func TestInvalidSealSkipsBodyHistory(t *testing.T) {
 	header := f.extendShard(f.chain.confirmed[f.parent.Hash()]["10001"], genesis.Hash(), 1)
 	block := f.candidate(t, header)
 	f.chain.headerReads = 0
-	if err := f.engine.VerifyBlock(f.chain, block); err == nil || !strings.Contains(err.Error(), "mix hash") {
+	if err := f.engine.VerifyBlock(t.Context(), f.chain, block); err == nil || !strings.Contains(err.Error(), "mix hash") {
 		t.Fatalf("error %v, want invalid Ethash mix hash", err)
 	}
 	if f.chain.headerReads != 1 {
@@ -664,13 +665,13 @@ func TestSimulateVerifyBlock(t *testing.T) {
 			if name == "staking" {
 				block = authorize(t, f, block, 100)
 			}
-			if err := engine.VerifyBlock(f.chain, block); err != nil {
+			if err := engine.VerifyBlock(t.Context(), f.chain, block); err != nil {
 				t.Fatalf("simulated root rejected: %v", err)
 			}
 			if name == "staking" && f.chain.stakeHash != f.chain.confirmed[f.parent.Hash()]["10001"].Hash() {
 				t.Fatal("simulation did not read parent-confirmed staking state")
 			}
-			if err := f.engine.VerifyBlock(f.chain, block); err == nil || !strings.Contains(err.Error(), "mix hash") {
+			if err := f.engine.VerifyBlock(t.Context(), f.chain, block); err == nil || !strings.Contains(err.Error(), "mix hash") {
 				t.Fatalf("normal PoSW accepted an unmined root: %v", err)
 			}
 			for _, test := range []struct {
@@ -681,7 +682,7 @@ func TestSimulateVerifyBlock(t *testing.T) {
 				{block.WithBody(nil, nil), "shard header hash"},
 				{changeHeader(block, func(h *qkctypes.RootBlockHeader) { h.CoinbaseAmount.AddUint64(&h.CoinbaseAmount, 1) }), "coinbase amount"},
 			} {
-				if err := engine.VerifyBlock(f.chain, test.block); err == nil || !strings.Contains(err.Error(), test.want) {
+				if err := engine.VerifyBlock(t.Context(), f.chain, test.block); err == nil || !strings.Contains(err.Error(), test.want) {
 					t.Fatalf("error %v, want %q", err, test.want)
 				}
 			}
@@ -689,11 +690,11 @@ func TestSimulateVerifyBlock(t *testing.T) {
 				// Simulation must not hide missing state or confirmation records.
 				failure := errors.New("staking read failed")
 				f.chain.stakeErr = failure
-				if err := engine.VerifyBlock(f.chain, block); !errors.Is(err, failure) {
+				if err := engine.VerifyBlock(t.Context(), f.chain, block); !errors.Is(err, failure) {
 					t.Fatalf("staking error lost: %v", err)
 				}
 				delete(f.chain.confirmed[f.parent.Hash()], "10001")
-				if err := engine.VerifyBlock(f.chain, block); err == nil || !strings.Contains(err.Error(), "missing parent root staking shard confirmation") {
+				if err := engine.VerifyBlock(t.Context(), f.chain, block); err == nil || !strings.Contains(err.Error(), "missing parent root staking shard confirmation") {
 					t.Fatalf("missing confirmation error lost: %v", err)
 				}
 			}
@@ -706,7 +707,7 @@ func TestSimulateVerifyBlock(t *testing.T) {
 func TestRealEthashIsChecked(t *testing.T) {
 	f := newFixture(t, nil)
 	block := f.candidate(t)
-	if err := f.engine.VerifyBlock(f.chain, block); err == nil || !strings.Contains(err.Error(), "mix hash") {
+	if err := f.engine.VerifyBlock(t.Context(), f.chain, block); err == nil || !strings.Contains(err.Error(), "mix hash") {
 		t.Fatalf("invalid Ethash seal accepted: %v", err)
 	}
 	// Fixed epoch-0 Ethash vector for this root fixture, with base difficulty 100.
@@ -714,11 +715,11 @@ func TestRealEthashIsChecked(t *testing.T) {
 		t.Fatal("root seal vector fixture changed")
 	}
 	sealed := block.WithMiningResult(14, common.HexToHash("0xb578552c5fffb785f605bc931ae720068dd2d77e3c31a02894dd47288ead6789"), nil)
-	if err := f.engine.VerifyBlock(f.chain, sealed); err != nil {
+	if err := f.engine.VerifyBlock(t.Context(), f.chain, sealed); err != nil {
 		t.Fatalf("valid root Ethash seal rejected: %v", err)
 	}
 	// Tracking data is outside SealHash; valid PoW must still reach body checks.
-	if err := f.engine.VerifyBlock(f.chain, sealed.WithBody(nil, make([]byte, 1025))); err == nil || !strings.Contains(err.Error(), "tracking data") {
+	if err := f.engine.VerifyBlock(t.Context(), f.chain, sealed.WithBody(nil, make([]byte, 1025))); err == nil || !strings.Contains(err.Error(), "tracking data") {
 		t.Fatalf("valid seal bypassed body validation: %v", err)
 	}
 	for _, test := range []struct {
@@ -730,7 +731,7 @@ func TestRealEthashIsChecked(t *testing.T) {
 		{"seal hash", func(h *qkctypes.RootBlockHeader) { h.Extra = []byte("changed") }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := f.engine.VerifyBlock(f.chain, changeHeader(sealed, test.edit)); err == nil {
+			if err := f.engine.VerifyBlock(t.Context(), f.chain, changeHeader(sealed, test.edit)); err == nil {
 				t.Fatal("changed Ethash input accepted")
 			}
 		})

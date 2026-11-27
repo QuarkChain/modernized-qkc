@@ -80,7 +80,7 @@ func (p *PoSW) Author(header *qkctypes.RootBlockHeader) (common.Address, error) 
 
 // VerifyBlock validates a non-genesis root. Genesis and its shard confirmation
 // records are established by the root-chain initialization code.
-func (p *PoSW) VerifyBlock(chain RootChainReader, block *qkctypes.RootBlock) error {
+func (p *PoSW) VerifyBlock(ctx context.Context, chain RootChainReader, block *qkctypes.RootBlock) error {
 	if chain == nil {
 		return errors.New("missing root chain reader")
 	}
@@ -103,7 +103,7 @@ func (p *PoSW) VerifyBlock(chain RootChainReader, block *qkctypes.RootBlock) err
 	// Verify the root's PoW seal before body validation, as in pyquarkchain.
 	// Checking shard headers' PrevRootBlock references may require walking many
 	// root ancestors; blocks with invalid PoW should not trigger those reads.
-	if err := p.verifySeal(chain, header); err != nil {
+	if err := p.verifySeal(ctx, chain, header); err != nil {
 		return err
 	}
 	return p.verifyBody(chain, block, parent)

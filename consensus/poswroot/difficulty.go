@@ -17,6 +17,7 @@
 package poswroot
 
 import (
+	"context"
 	"errors"
 	"math/big"
 
@@ -44,8 +45,8 @@ func (info *PoSWInfo) EligibleForDiscount() bool {
 
 // verifySeal selects the effective staking difficulty, then checks Ethash outside
 // simulation. Header fields must already pass verifyHeader.
-func (p *PoSW) verifySeal(chain RootChainReader, header *qkctypes.RootBlockHeader) error {
-	info, err := GetPoSWInfo(p.config, chain, header)
+func (p *PoSW) verifySeal(ctx context.Context, chain RootChainReader, header *qkctypes.RootBlockHeader) error {
+	info, err := GetPoSWInfo(ctx, p.config, chain, header)
 	if err != nil {
 		return err
 	}
@@ -68,7 +69,7 @@ func (p *PoSW) verifySeal(chain RootChainReader, header *qkctypes.RootBlockHeade
 // config must pass Check; the header must be valid apart from its unverified seal.
 // Staking disabled or genesis returns nil without reading chain. Mined includes
 // the candidate as if it were added, even when quota is zero or the signature fails.
-func GetPoSWInfo(config *params.QuarkChainConfig, chain RootChainReader, header *qkctypes.RootBlockHeader) (*PoSWInfo, error) {
+func GetPoSWInfo(ctx context.Context, config *params.QuarkChainConfig, chain RootChainReader, header *qkctypes.RootBlockHeader) (*PoSWInfo, error) {
 	if !config.PoSW.StakingEnabled || header.Number == 0 {
 		return nil, nil
 	}
@@ -85,7 +86,7 @@ func GetPoSWInfo(config *params.QuarkChainConfig, chain RootChainReader, header 
 	if !ok || confirmed == (common.Hash{}) {
 		return nil, errors.New("missing parent root staking shard confirmation")
 	}
-	stakes, signer, err := chain.GetRootChainStakes(chainID, confirmed, header.Coinbase)
+	stakes, signer, err := chain.GetRootChainStakes(ctx, chainID, confirmed, header.Coinbase)
 	if err != nil {
 		return nil, err
 	}
