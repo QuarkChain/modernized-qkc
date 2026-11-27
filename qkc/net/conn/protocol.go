@@ -40,22 +40,19 @@ func ClusterSerializers() map[byte]*OpSerializer {
 	}
 }
 
-// NewMasterSlaveTransport creates the peer-ID frame transport for ordinary
-// cluster traffic without a configurable payload limit.
-// On error the caller retains nc.
+// NewMasterSlaveTransport creates a cluster frame transport with peer IDs.
+// On error the caller retains ownership of nc.
 func NewMasterSlaveTransport(nc net.Conn) (FrameTransport, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("master-slave connection must not be nil")
 	}
 	return NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
-		return wire.ReadClusterFrameWithPeerID(r, 0)
-	}, func(w io.Writer, frame wire.Frame) error {
-		return wire.WriteClusterFrameWithPeerID(w, frame, 0)
-	}), nil
+		return wire.ReadClusterFrameWithPeerID(r)
+	}, wire.WriteClusterFrameWithPeerID), nil
 }
 
 // NewXshardTransport creates an internal slave-to-slave frame transport without
-// peer IDs or a payload limit. On error the caller retains ownership of nc.
+// peer IDs. On error the caller retains ownership of nc.
 func NewXshardTransport(nc net.Conn) (FrameTransport, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("xshard connection must not be nil")

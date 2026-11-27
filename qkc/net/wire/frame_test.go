@@ -24,14 +24,11 @@ import (
 	"math"
 	"math/big"
 	"math/rand"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/golang/snappy"
 )
-
-const testMaxPayloadLen = 1024
 
 func TestClusterFrameRoundTrip(t *testing.T) {
 	frame := &ClusterFrame{Opcode: 0x42, RPCID: 0x0102030405060708, Payload: []byte("chain")}
@@ -60,14 +57,14 @@ func TestClusterFrameWithPeerIDRoundTrip(t *testing.T) {
 		Payload:       []byte("master-chain"),
 	}
 	var buf bytes.Buffer
-	if err := WriteClusterFrameWithPeerID(&buf, frame, 0); err != nil {
+	if err := WriteClusterFrameWithPeerID(&buf, frame); err != nil {
 		t.Fatal(err)
 	}
 	encoded := buf.Bytes()
 	if got := binary.BigEndian.Uint64(encoded[4:12]); got != frame.ClusterPeerID {
 		t.Fatalf("cluster peer ID = 0x%x, want 0x%x", got, frame.ClusterPeerID)
 	}
-	got, err := ReadClusterFrameWithPeerID(&buf, testMaxPayloadLen)
+	got, err := ReadClusterFrameWithPeerID(&buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +163,7 @@ func TestFrameWireLayouts(t *testing.T) {
 
 	frame.ClusterPeerID = peerID
 	var master bytes.Buffer
-	if err := WriteClusterFrameWithPeerID(&master, frame, 0); err != nil {
+	if err := WriteClusterFrameWithPeerID(&master, frame); err != nil {
 		t.Fatal(err)
 	}
 	wantMaster := []byte{0, 0, 0, 1, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x10, 1, 2, 3, 4, 5, 6, 7, 8, 0xaa}
@@ -210,21 +207,15 @@ func TestFrameReadErrors(t *testing.T) {
 	if _, err := ReadClusterFrame(bytes.NewReader(nil)); !errors.Is(err, io.EOF) {
 		t.Fatalf("empty stream error = %v, want EOF", err)
 	}
-	if _, err := ReadClusterFrameWithPeerID(bytes.NewReader([]byte{0, 0}), testMaxPayloadLen); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if _, err := ReadClusterFrameWithPeerID(bytes.NewReader([]byte{0, 0})); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("truncated length error = %v, want unexpected EOF", err)
-	}
-	var buf bytes.Buffer
-	if err := WriteClusterFrameWithPeerID(&buf, &ClusterFrame{Payload: []byte("payload")}, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadClusterFrameWithPeerID(bytes.NewReader(buf.Bytes()), 3); err == nil {
-		t.Fatal("oversized payload accepted")
 	}
 	if _, err := DecodeP2PFrame([]byte{1, 2, 3}); err == nil {
 		t.Fatal("short P2P frame accepted")
 	}
-	if err := WriteClusterFrame(&buf, &ClusterFrame{ClusterPeerID: 1}); err == nil {
-		t.Fatal("direct chain codec accepted a cluster peer ID")
+	var buf bytes.Buffer
+	if err := WriteClusterFrame(&buf, &ClusterFrame{ClusterPeerID: 1}); !errors.Is(err, ErrInvalidFrame) || buf.Len() != 0 {
+		t.Fatalf("direct cluster write with peer ID: error = %v, bytes = %d", err, buf.Len())
 	}
 	if _, err := EncodeP2PFrame(nil); err == nil {
 		t.Fatal("EncodeP2PFrame accepted a nil frame")
@@ -239,7 +230,7 @@ func TestFrameCodecRejectsInvalidTypes(t *testing.T) {
 		typedNil Frame
 	}{
 		{"cluster", WriteClusterFrame, &P2PFrame{ChainID: RootChainID()}, (*ClusterFrame)(nil)},
-		{"cluster with peer ID", func(w io.Writer, frame Frame) error { return WriteClusterFrameWithPeerID(w, frame, 0) }, &P2PFrame{ChainID: RootChainID()}, (*ClusterFrame)(nil)},
+		{"cluster with peer ID", WriteClusterFrameWithPeerID, &P2PFrame{ChainID: RootChainID()}, (*ClusterFrame)(nil)},
 		{"P2P", WriteP2PFrame, &ClusterFrame{}, (*P2PFrame)(nil)},
 	} {
 		t.Run(codec.name, func(t *testing.T) {
@@ -263,7 +254,7 @@ func TestFrameEOFContract(t *testing.T) {
 	if _, err := ReadClusterFrame(bytes.NewReader([]byte{0, 0})); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("partial length = %v, want unexpected EOF", err)
 	}
-	if _, err := ReadClusterFrameWithPeerID(bytes.NewReader([]byte{0, 0, 0, 0}), testMaxPayloadLen); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if _, err := ReadClusterFrameWithPeerID(bytes.NewReader([]byte{0, 0, 0, 0})); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("missing cluster peer ID = %v, want unexpected EOF", err)
 	}
 	if _, err := ReadClusterFrame(bytes.NewReader([]byte{0, 0, 0, 0})); !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -286,7 +277,7 @@ func TestClusterFrameFinalReadError(t *testing.T) {
 		write func(io.Writer, Frame) error
 	}{
 		{"direct", ReadClusterFrame, WriteClusterFrame},
-		{"peer", func(r io.Reader) (*ClusterFrame, error) { return ReadClusterFrameWithPeerID(r, 0) }, func(w io.Writer, frame Frame) error { return WriteClusterFrameWithPeerID(w, frame, 0) }},
+		{"peer", ReadClusterFrameWithPeerID, WriteClusterFrameWithPeerID},
 	}
 	for _, codec := range codecs {
 		t.Run(codec.name, func(t *testing.T) {
@@ -322,87 +313,59 @@ func TestClusterFrameFinalReadError(t *testing.T) {
 }
 
 type finalErrorReader struct {
-	data []byte
-	err  error
+	data        []byte
+	err         error
+	maxReadSize int
 }
 
 func (r *finalErrorReader) Read(p []byte) (int, error) {
+	r.maxReadSize = max(r.maxReadSize, len(p))
 	n := copy(p, r.data)
 	r.data = r.data[n:]
 	if len(r.data) == 0 {
-		return n, r.err
+		err := r.err
+		r.err = io.EOF
+		return n, err
 	}
 	return n, nil
 }
 
-func TestFramePayloadLimits(t *testing.T) {
-	for _, codec := range []struct {
-		name  string
-		read  func(io.Reader, uint32) (*ClusterFrame, error)
-		write func(io.Writer, Frame, uint32) error
-	}{
-		{"peer", ReadClusterFrameWithPeerID, WriteClusterFrameWithPeerID},
-	} {
-		t.Run(codec.name, func(t *testing.T) {
-			if _, err := codec.read(bytes.NewReader(nil), 0); !errors.Is(err, io.EOF) {
-				t.Fatalf("unlimited empty stream error = %v, want EOF", err)
-			}
-			frame := &ClusterFrame{Payload: []byte("payload")}
-			var encoded bytes.Buffer
-			if err := codec.write(&encoded, frame, uint32(len(frame.Payload))); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := codec.read(bytes.NewReader(encoded.Bytes()), 3); !errors.Is(err, ErrInvalidFrame) {
-				t.Fatalf("read above configured limit: %v", err)
-			}
-			encoded.Reset()
-			if err := codec.write(&encoded, frame, 3); !errors.Is(err, ErrInvalidFrame) {
-				t.Fatalf("write above configured limit: %v", err)
-			}
-			if encoded.Len() != 0 {
-				t.Fatal("writer emitted bytes before rejecting oversized payload")
-			}
-		})
+func TestClusterFrameTruncatedLargePayload(t *testing.T) {
+	// Declare a large ordinary cluster payload, then provide only its first byte.
+	var data [frameHeader + clusterPeerIDSize + frameBodyHeader + 1]byte
+	binary.BigEndian.PutUint32(data[:], 32<<20)
+	r := &finalErrorReader{data: data[:], err: io.EOF}
+	if _, err := ReadClusterFrameWithPeerID(r); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated payload error = %v, want unexpected EOF", err)
+	}
+	if r.maxReadSize > 64<<10 {
+		t.Fatalf("truncated frame requested a read of %d bytes", r.maxReadSize)
 	}
 }
 
-func TestClusterFrameConfiguredLimit(t *testing.T) {
-	for _, limit := range []uint32{0, MaxP2PPayloadLen, MaxP2PPayloadLen + 1, math.MaxUint32} {
-		var encoded bytes.Buffer
-		if err := WriteClusterFrameWithPeerID(&encoded, &ClusterFrame{}, 0); err != nil {
-			t.Fatal(err)
-		}
-		_, readErr := ReadClusterFrameWithPeerID(bytes.NewReader(encoded.Bytes()), limit)
-		var output bytes.Buffer
-		writeErr := WriteClusterFrameWithPeerID(&output, &ClusterFrame{}, limit)
-		if limit <= MaxP2PPayloadLen {
-			if readErr != nil || writeErr != nil {
-				t.Fatalf("valid limit %d: read = %v, write = %v", limit, readErr, writeErr)
-			}
-		} else {
-			if !errors.Is(readErr, ErrInvalidFrame) || !errors.Is(writeErr, ErrInvalidFrame) {
-				t.Fatalf("invalid limit %d: read = %v, write = %v", limit, readErr, writeErr)
-			}
-			if output.Len() != 0 {
-				t.Fatalf("invalid limit %d: wrote %d bytes before rejection", limit, output.Len())
-			}
-		}
+func TestClusterFrameIntermediateReadError(t *testing.T) {
+	// The first body read fills the initial buffer and ends with an error.
+	var data [frameHeader + initialClusterBodySize]byte
+	binary.BigEndian.PutUint32(data[:], initialClusterBodySize)
+	readErr := errors.New("read failed")
+	r := &finalErrorReader{data: data[:], err: readErr}
+	if _, err := ReadClusterFrame(r); !errors.Is(err, readErr) {
+		t.Fatalf("intermediate read error = %v, want %v", err, readErr)
 	}
 }
 
-func TestClusterFrameUnlimitedPayload(t *testing.T) {
+func TestClusterFrameLargeInternalPayload(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xa5}, (16<<20)+1)
 	for _, codec := range []struct {
-		name   string
-		peerID uint64
-		read   func(io.Reader) (*ClusterFrame, error)
-		write  func(io.Writer, Frame) error
+		name  string
+		read  func(io.Reader) (*ClusterFrame, error)
+		write func(io.Writer, Frame) error
 	}{
-		{"direct", 0, ReadClusterFrame, WriteClusterFrame},
-		{"peer", math.MaxUint64, func(r io.Reader) (*ClusterFrame, error) { return ReadClusterFrameWithPeerID(r, 0) }, func(w io.Writer, frame Frame) error { return WriteClusterFrameWithPeerID(w, frame, 0) }},
+		{"direct", ReadClusterFrame, WriteClusterFrame},
+		{"zero peer ID", ReadClusterFrameWithPeerID, WriteClusterFrameWithPeerID},
 	} {
 		t.Run(codec.name, func(t *testing.T) {
-			frame := &ClusterFrame{ClusterPeerID: codec.peerID, Opcode: 0x42, RPCID: 7, Payload: payload}
+			frame := &ClusterFrame{Opcode: 0x42, RPCID: 7, Payload: payload}
 			var encoded bytes.Buffer
 			if err := codec.write(&encoded, frame); err != nil {
 				t.Fatal(err)
@@ -413,6 +376,9 @@ func TestClusterFrameUnlimitedPayload(t *testing.T) {
 			}
 			if got.ClusterPeerID != frame.ClusterPeerID || got.Opcode != frame.Opcode || got.RPCID != frame.RPCID || !bytes.Equal(got.Payload, payload) {
 				t.Fatal("large internal frame round trip mismatch")
+			}
+			if cap(got.Payload) != len(payload) {
+				t.Fatalf("payload buffer capacity = %d, want %d", cap(got.Payload), len(payload))
 			}
 		})
 	}
@@ -436,12 +402,12 @@ func TestP2PFramePayloadLimit(t *testing.T) {
 		snappy.MaxEncodedLen(MaxP2PFrameSize)+codeSize > rlpxMaxFrameSize {
 		t.Fatal("P2P limit does not fit RLPx with and without Snappy")
 	}
-	payload := make([]byte, MaxP2PPayloadLen)
+	payload := make([]byte, MaxP2PPayloadLen+1)
 	if _, err := rand.New(rand.NewSource(1)).Read(payload); err != nil {
 		t.Fatal(err)
 	}
 	chainID := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
-	external := &P2PFrame{ChainID: chainID, Opcode: math.MaxUint8, RPCID: math.MaxUint64, Payload: payload}
+	external := &P2PFrame{ChainID: chainID, Opcode: math.MaxUint8, RPCID: math.MaxUint64, Payload: payload[:MaxP2PPayloadLen]}
 	encoded, err := EncodeP2PFrame(external)
 	if err != nil {
 		t.Fatal(err)
@@ -463,10 +429,10 @@ func TestP2PFramePayloadLimit(t *testing.T) {
 	}
 	internal := &ClusterFrame{ClusterPeerID: math.MaxUint64, Opcode: received.Opcode, RPCID: received.RPCID, Payload: received.Payload}
 	var stream bytes.Buffer
-	if err := WriteClusterFrameWithPeerID(&stream, internal, MaxP2PPayloadLen); err != nil {
+	if err := WriteClusterFrameWithPeerID(&stream, internal); err != nil {
 		t.Fatal(err)
 	}
-	relayed, err := ReadClusterFrameWithPeerID(&stream, MaxP2PPayloadLen)
+	relayed, err := ReadClusterFrameWithPeerID(&stream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +445,7 @@ func TestP2PFramePayloadLimit(t *testing.T) {
 	if relayed.ClusterPeerID != math.MaxUint64 || !bytes.Equal(encoded, outbound) {
 		t.Fatal("maximum peer frame changed during cluster round trip")
 	}
-	external.Payload = append(payload, 0)
+	external.Payload = payload
 	if _, err := EncodeP2PFrame(external); !errors.Is(err, ErrInvalidFrame) {
 		t.Fatalf("oversized P2P encode: %v", err)
 	}
@@ -490,30 +456,38 @@ func TestP2PFramePayloadLimit(t *testing.T) {
 	if _, err := DecodeP2PFrame(append(encoded, 0)); err == nil {
 		t.Fatal("decoder accepted an oversized P2P frame")
 	}
-	if err := WriteClusterFrameWithPeerID(&rejected, &ClusterFrame{Payload: external.Payload}, MaxP2PPayloadLen); !errors.Is(err, ErrInvalidFrame) || rejected.Len() != 0 {
+	internal.Payload = payload
+	if err := WriteClusterFrameWithPeerID(&rejected, internal); !errors.Is(err, ErrInvalidFrame) || rejected.Len() != 0 {
 		t.Fatalf("oversized virtual-peer write: error = %v, bytes = %d", err, rejected.Len())
 	}
 }
 
 func TestClusterFrameForgedLength(t *testing.T) {
 	for _, codec := range []struct {
-		name string
-		read func(io.Reader, uint32) (*ClusterFrame, error)
+		name      string
+		read      func(io.Reader) (*ClusterFrame, error)
+		headerLen int
+		payload   uint32
+		peerID    uint64
 	}{
-		{"peer", ReadClusterFrameWithPeerID},
+		{"direct", ReadClusterFrame, frameHeader, maxClusterPayloadLen + 1, 0},
+		{"zero peer ID", ReadClusterFrameWithPeerID, frameHeader + clusterPeerIDSize, maxClusterPayloadLen + 1, 0},
+		{"virtual peer", ReadClusterFrameWithPeerID, frameHeader + clusterPeerIDSize, MaxP2PPayloadLen + 1, 1},
+		{"maximum length prefix", ReadClusterFrameWithPeerID, frameHeader + clusterPeerIDSize, math.MaxUint32, 1},
 	} {
 		t.Run(codec.name, func(t *testing.T) {
-			for _, length := range []uint32{MaxP2PPayloadLen + 1, math.MaxUint32} {
-				// Leave bytes after the header to detect reads of peer ID or body.
-				var data [frameHeader + clusterPeerIDSize + frameBodyHeader]byte
-				binary.BigEndian.PutUint32(data[:frameHeader], length)
-				r := bytes.NewReader(data[:])
-				if _, err := codec.read(r, MaxP2PPayloadLen); err == nil || !strings.Contains(err.Error(), "payload too large") {
-					t.Fatalf("forged length %d error = %v, want payload too large", length, err)
-				}
-				if r.Len() != len(data)-frameHeader {
-					t.Fatalf("read beyond length header for forged length %d", length)
-				}
+			// Leave bytes after the metadata to detect a read of the frame body.
+			data := make([]byte, codec.headerLen+frameBodyHeader)
+			binary.BigEndian.PutUint32(data, codec.payload)
+			if codec.headerLen > frameHeader {
+				binary.BigEndian.PutUint64(data[frameHeader:], codec.peerID)
+			}
+			r := bytes.NewReader(data)
+			if _, err := codec.read(r); !errors.Is(err, ErrInvalidFrame) {
+				t.Fatalf("forged length %d error = %v, want invalid frame", codec.payload, err)
+			}
+			if r.Len() != frameBodyHeader {
+				t.Fatalf("read %d bytes for forged length %d, want %d metadata bytes", len(data)-r.Len(), codec.payload, codec.headerLen)
 			}
 		})
 	}

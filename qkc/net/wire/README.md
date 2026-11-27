@@ -31,6 +31,27 @@ hand.
 Run `go generate ./qkc/net/wire` after changing `messages.go`. `go run build/ci.go check_generate` reports a stale
 `messages_ssz.go`.
 
+## Frame payload limits
+
+- Ordinary `ClusterFrame` traffic with an absent or zero `ClusterPeerID` uses
+  `maxClusterPayloadLen` (2,147,483,626 bytes). This is `MaxInt32` minus the
+  largest cluster frame header, so frame sizes fit in a 32-bit `int`.
+- External `P2PFrame` traffic and `ClusterFrame` traffic with a nonzero
+  `ClusterPeerID` both use `MaxP2PPayloadLen` for the entire encoded message.
+  A nonzero ID marks virtual P2P traffic. The limit comes from the RLPx 24-bit
+  frame size after accounting for the RLP message code, worst-case Snappy
+  expansion, and the QKC P2P header.
+
+The cluster codec enforces these limits on reads and writes before allocating
+a payload or encoding buffer. A rejected write returns `ErrInvalidFrame`
+before emitting any bytes. The business layer owns request sizing, message
+splitting, response batching, and handling partial responses.
+
+Future virtual peer connections will multiplex frames by `ClusterPeerID` over
+the real Master–Slave TCP connection and share its frame codec. A local frame
+validation error when sending a request or response must leave the shared TCP
+connection usable.
+
 ## Field rules
 
 - **Fixed values:** Use fixed-width unsigned integers and arrays, or `ssz-size:"N"` for
@@ -45,19 +66,7 @@ Run `go generate ./qkc/net/wire` after changing `messages.go`. `go run build/ci.
 - **Optional values:** Encode presence explicitly, for example with a boolean.
 - **Limits:** Validate received lengths in handlers; generated decoders do not
   enforce every byte-list bound. The existing `4294967295` tags are broad
-  schema bounds. Internal RPCs on trusted cluster links carry complete messages
-  in one frame. For example, one cross-shard deposit request carries the entire
-  list for a source block and receives one acknowledgement. Removing the former
-  16 MiB limit preserves this contract for larger messages. Direct slave-to-slave
-  codecs use the cluster frame capacity, and ordinary Master-to-slave traffic
-  passes `0` as `maxPayloadLen` to use that same capacity for reads and writes.
-  The capacity is `2147483626` bytes (`MaxInt32` minus the largest cluster frame
-  header), with the same value on 32-bit and 64-bit platforms.
-  P2P codecs enforce `MaxP2PPayloadLen` for the entire encoded RPC or command
-  payload, derived from the RLPx 24-bit frame limit after reserving space for the
-  message code, worst-case Snappy expansion, and QKC frame header. Future virtual
-  peer connections must apply this payload limit in both directions before
-  forwarding. Nonzero `maxPayloadLen` values must fit within `MaxP2PPayloadLen`.
+  schema bounds.
 
 ### Encoded objects: `Data`
 

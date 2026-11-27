@@ -1038,40 +1038,32 @@ func TestBaseConn_SendRPCInvalidRequestKeepsConnection(t *testing.T) {
 }
 
 func TestBaseConn_InvalidRPCFrameKeepsConnection(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		payload []byte
-	}{
-		{name: "oversized payload", payload: make([]byte, 1025)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			local, peer := net.Pipe()
-			defer peer.Close()
-			if err := peer.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
-				t.Fatal(err)
-			}
-			conn := newConn(newLimitedPipeTransport(t, local, 1024))
-			conn.Start()
-			defer conn.Close()
+	local, peer := net.Pipe()
+	defer peer.Close()
+	if err := peer.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn := newConn(newPeerIDTransport(t, local))
+	conn.Start()
+	defer conn.Close()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), &stubSSZRequest{payload: tc.payload})
-			if !errors.Is(err, wire.ErrInvalidFrame) {
-				t.Fatalf("invalid RPC frame error = %v, want validation error", err)
-			}
-			if !conn.IsActive() || conn.pendingLen() != 0 {
-				t.Fatalf("after invalid RPC frame: state=%v pending=%d", conn.State(), conn.pendingLen())
-			}
-			read := make(chan error, 1)
-			go func() { _, err := wire.ReadClusterFrameWithPeerID(peer, 0); read <- err }()
-			if err := conn.WriteFrame(&wire.ClusterFrame{}); err != nil {
-				t.Fatalf("write after validation failure: %v", err)
-			}
-			if err := receive(t, read, "frame after validation failure"); err != nil {
-				t.Fatalf("read after validation failure: %v", err)
-			}
-		})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	frame := &wire.ClusterFrame{ClusterPeerID: 1, Opcode: byte(wire.ClusterOpPing)}
+	req := &stubSSZRequest{payload: make([]byte, wire.MaxP2PPayloadLen+1)}
+	if _, err := conn.sendRPC(ctx, frame, req); !errors.Is(err, wire.ErrInvalidFrame) {
+		t.Fatalf("invalid RPC frame error = %v, want validation error", err)
+	}
+	if !conn.IsActive() || conn.pendingLen() != 0 {
+		t.Fatalf("after invalid RPC frame: state=%v pending=%d", conn.State(), conn.pendingLen())
+	}
+	read := make(chan error, 1)
+	go func() { _, err := wire.ReadClusterFrameWithPeerID(peer); read <- err }()
+	if err := conn.WriteFrame(&wire.ClusterFrame{}); err != nil {
+		t.Fatalf("write after validation failure: %v", err)
+	}
+	if err := receive(t, read, "frame after validation failure"); err != nil {
+		t.Fatalf("read after validation failure: %v", err)
 	}
 }
 
@@ -1117,7 +1109,7 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 	if err := peer.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	conn := newConn(newLimitedPipeTransport(t, local, 1024))
+	conn := newConn(newPeerIDTransport(t, local))
 	conn.Start()
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1128,11 +1120,12 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 		resp, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), req)
 		result <- rpcResult{resp, err}
 	}()
-	request, err := wire.ReadClusterFrameWithPeerID(peer, 0)
+	request, err := wire.ReadClusterFrameWithPeerID(peer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = conn.SendRPC(ctx, byte(wire.ClusterOpPing), &stubSSZRequest{payload: make([]byte, 1025)})
+	frame := &wire.ClusterFrame{ClusterPeerID: 1, Opcode: byte(wire.ClusterOpPing)}
+	_, err = conn.sendRPC(ctx, frame, &stubSSZRequest{payload: make([]byte, wire.MaxP2PPayloadLen+1)})
 	if !errors.Is(err, wire.ErrInvalidFrame) || conn.pendingLen() != 1 {
 		t.Fatalf("invalid RPC: error=%v pending=%d", err, conn.pendingLen())
 	}
@@ -1140,7 +1133,7 @@ func TestBaseConn_InvalidRPCPreservesOtherPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteClusterFrameWithPeerID(peer, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: payload}, 0); err != nil {
+	if err := wire.WriteClusterFrameWithPeerID(peer, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	if got := receive(t, result, "pending RPC"); got.err != nil {
@@ -2650,13 +2643,7 @@ func newPeerIDConnPair(t *testing.T, cfg Config) (*BaseConn, net.Conn) {
 		t.Fatalf("accept: %v", err)
 	}
 
-	cfg.Transport = NewTCPTransport(peer,
-		func(r io.Reader) (wire.Frame, error) {
-			return wire.ReadClusterFrameWithPeerID(r, 0)
-		},
-		func(w io.Writer, frame wire.Frame) error {
-			return wire.WriteClusterFrameWithPeerID(w, frame, 0)
-		})
+	cfg.Transport = newPeerIDTransport(t, peer)
 	cfg.Logger = log.New()
 	return NewBaseConn(cfg), raw
 }
@@ -2743,13 +2730,7 @@ func TestSimulation_FullLifecycle(t *testing.T) {
 		},
 	})
 	client := NewBaseConn(Config{
-		Transport: NewTCPTransport(raw,
-			func(r io.Reader) (wire.Frame, error) {
-				return wire.ReadClusterFrameWithPeerID(r, 0)
-			},
-			func(w io.Writer, frame wire.Frame) error {
-				return wire.WriteClusterFrameWithPeerID(w, frame, 0)
-			}),
+		Transport: newPeerIDTransport(t, raw),
 		Serializers: map[byte]*OpSerializer{
 			byte(wire.ClusterOpPing): pingSer,
 		},
@@ -2865,47 +2846,40 @@ func mustSerialize(t *testing.T, v wire.SSZMessage) []byte {
 }
 
 func TestClusterTransportPayloadLimit(t *testing.T) {
-	for _, codec := range []struct {
-		name   string
-		peerID uint64
-		new    func(*testing.T, net.Conn, uint32) FrameTransport
-		read   func(io.Reader, uint32) (*wire.ClusterFrame, error)
-	}{
-		{"peer", 42, newLimitedPipeTransport, wire.ReadClusterFrameWithPeerID},
-	} {
-		t.Run(codec.name, func(t *testing.T) {
-			local, remote := net.Pipe()
-			defer remote.Close()
-			if err := remote.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-				t.Fatal(err)
-			}
-			transport := codec.new(t, local, 8)
-			defer transport.Close()
-			frame := &wire.ClusterFrame{ClusterPeerID: codec.peerID, Opcode: 1, RPCID: 7, Payload: []byte("123456789")}
-			if err := transport.WriteFrame(frame); !errors.Is(err, wire.ErrInvalidFrame) {
-				t.Fatalf("write above configured limit: %v", err)
-			}
-			frame.Payload = frame.Payload[:8]
-			written := make(chan error, 1)
-			go func() { written <- transport.WriteFrame(frame) }()
-			received, err := codec.read(remote, 8)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if received.ClusterPeerID != frame.ClusterPeerID || received.Opcode != frame.Opcode || received.RPCID != frame.RPCID || !bytes.Equal(received.Payload, frame.Payload) {
-				t.Fatal("frame changed after an oversized write was rejected")
-			}
-			if err := receive(t, written, "frame at configured limit"); err != nil {
-				t.Fatal(err)
-			}
-			go func() { written <- binary.Write(remote, binary.BigEndian, uint32(9)) }()
-			if _, err := transport.ReadFrame(); !errors.Is(err, wire.ErrInvalidFrame) {
-				t.Fatalf("read above configured limit: %v", err)
-			}
-			if err := receive(t, written, "oversized length prefix"); err != nil {
-				t.Fatal(err)
-			}
-		})
+	local, remote := net.Pipe()
+	defer remote.Close()
+	if err := remote.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	transport := newPeerIDTransport(t, local)
+	defer transport.Close()
+	const peerID = 42
+	frame := &wire.ClusterFrame{ClusterPeerID: peerID, Opcode: 1, RPCID: 7, Payload: make([]byte, wire.MaxP2PPayloadLen+1)}
+	if err := transport.WriteFrame(frame); !errors.Is(err, wire.ErrInvalidFrame) {
+		t.Fatalf("oversized virtual P2P write: %v", err)
+	}
+	frame.ClusterPeerID = 0
+	written := make(chan error, 1)
+	go func() { written <- transport.WriteFrame(frame) }()
+	received, err := wire.ReadClusterFrameWithPeerID(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.ClusterPeerID != frame.ClusterPeerID || received.Opcode != frame.Opcode || received.RPCID != frame.RPCID || !bytes.Equal(received.Payload, frame.Payload) {
+		t.Fatal("ordinary cluster frame changed after an oversized write was rejected")
+	}
+	if err := receive(t, written, "ordinary cluster frame"); err != nil {
+		t.Fatal(err)
+	}
+	var header [12]byte
+	binary.BigEndian.PutUint32(header[:4], uint32(len(frame.Payload)))
+	binary.BigEndian.PutUint64(header[4:], peerID)
+	go func() { _, err := remote.Write(header[:]); written <- err }()
+	if _, err := transport.ReadFrame(); !errors.Is(err, wire.ErrInvalidFrame) {
+		t.Fatalf("oversized virtual P2P read: %v", err)
+	}
+	if err := receive(t, written, "oversized frame header"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2925,13 +2899,13 @@ func newPipeTransport(t *testing.T, c net.Conn) FrameTransport {
 	return transport
 }
 
-func newLimitedPipeTransport(t *testing.T, c net.Conn, maxPayloadLen uint32) FrameTransport {
+func newPeerIDTransport(t *testing.T, c net.Conn) FrameTransport {
 	t.Helper()
-	return NewTCPTransport(c, func(r io.Reader) (wire.Frame, error) {
-		return wire.ReadClusterFrameWithPeerID(r, maxPayloadLen)
-	}, func(w io.Writer, frame wire.Frame) error {
-		return wire.WriteClusterFrameWithPeerID(w, frame, maxPayloadLen)
-	})
+	transport, err := NewMasterSlaveTransport(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return transport
 }
 
 // TestTCPTransport_WriteFrameStalledPeer: with nobody reading the peer end,
@@ -2951,6 +2925,9 @@ func TestTCPTransport_WriteFrameStalledPeer(t *testing.T) {
 	err := tr.WriteFrame(&wire.ClusterFrame{Opcode: 1, RPCID: 1, Payload: []byte("ping")})
 	if err == nil {
 		t.Fatal("expected deadline error, got nil")
+	}
+	if errors.Is(err, wire.ErrInvalidFrame) {
+		t.Fatalf("network write error reported as a validation failure: %v", err)
 	}
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
 		var ne net.Error

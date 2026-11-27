@@ -193,7 +193,7 @@ func TestMasterConnIgnoresPeerFrames(t *testing.T) {
 	}
 	mc.Start()
 	defer mc.Close()
-	if err = wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{ClusterPeerID: 1, Opcode: byte(wire.ClusterOpPing), RPCID: 1}, 0); err != nil {
+	if err = wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{ClusterPeerID: 1, Opcode: byte(wire.ClusterOpPing), RPCID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -203,10 +203,10 @@ func TestMasterConnIgnoresPeerFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPing), RPCID: 2, Payload: payload}, 0); err != nil {
+	if err := wire.WriteClusterFrameWithPeerID(b, &wire.ClusterFrame{Opcode: byte(wire.ClusterOpPing), RPCID: 2, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
-	response, err := wire.ReadClusterFrameWithPeerID(b, 0)
+	response, err := wire.ReadClusterFrameWithPeerID(b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestMasterConnWritesPeerFrame(t *testing.T) {
 	go func() {
 		writeErr <- mc.WriteFrame(&wire.ClusterFrame{ClusterPeerID: 42, Opcode: 3, RPCID: 7, Payload: []byte("peer")})
 	}()
-	frame, err := wire.ReadClusterFrameWithPeerID(b, 0)
+	frame, err := wire.ReadClusterFrameWithPeerID(b)
 	if err != nil {
 		t.Fatal(err)
 	}
