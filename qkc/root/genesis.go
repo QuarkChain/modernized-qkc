@@ -33,8 +33,10 @@ import (
 )
 
 // SetupRootGenesisBlock writes or verifies the root genesis block (R0).
-// Pass shard genesis specifications in configured ChainIDs order.
-// A nil seed uses the stored root rules and verifies them against the shards.
+// The shards argument is required for both initialization and restart, even
+// when seed is nil. Supply one genesis per configured chain, in ChainIDs order.
+// On restart with a nil seed, setup rebuilds the shard genesis headers using
+// the stored root rules and R0 timestamp and checks their commitment against R0.
 // Call with exclusive access to the database before starting the chain.
 func SetupRootGenesisBlock(db ethdb.Database, seed *RootGenesis, shards []*core.Genesis) (*params.QuarkChainConfig, common.Hash, error) {
 	if db == nil {
