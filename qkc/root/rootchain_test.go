@@ -177,6 +177,11 @@ type rootEnv struct {
 // Unlike Python's empty-DB startup, root genesis already confirms every member.
 func newRootEnv(t *testing.T) *rootEnv {
 	t.Helper()
+	return newRootEnvWithConsensus(t, params.ConsensusEthash)
+}
+
+func newRootEnvWithConsensus(t *testing.T, consensus params.ConsensusType) *rootEnv {
+	t.Helper()
 	f := &rootEnv{
 		t: t, config: params.NewTestQuarkChainConfig(10001, 10001, 10002).QuarkChain,
 		db: &rootDB{Database: rawdb.NewMemoryDatabase()}, client: new(rootClient),
@@ -185,7 +190,12 @@ func newRootEnv(t *testing.T) *rootEnv {
 	t.Cleanup(func() { f.db.Close() })
 	// An old parent brings a candidate down to difficulty one for the Ethash test.
 	f.config.PoSW.AdjustmentFactor = 1
-	engine, err := posw.New(f.config)
+	f.config.ConsensusType = consensus
+	newEngine := posw.New
+	if consensus == params.ConsensusSimulate {
+		newEngine = posw.NewSimulate
+	}
+	engine, err := newEngine(f.config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,6 +366,50 @@ func TestRootPoWMiner(t *testing.T) {
 	if !qkcrawdb.HasRootBlock(f.db, tip.Hash()) || len(f.client.broadcasts) != 1 || f.client.broadcasts[0] != tip.Hash() {
 		t.Fatal("sealed root was not persisted and broadcast")
 	}
+}
+
+func TestRootPoWMinerSimulated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newRootEnvWithConsensus(t, params.ConsensusSimulate)
+		if err := f.chain.Init(); err != nil {
+			t.Fatal(err)
+		}
+		coinbase := common.Address{42}
+		m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{
+			Coinbase: coinbase, Search: mining.NewSimulatedSearch(time.Second),
+		})
+		if err := m.StartLocalMining(); err != nil {
+			t.Fatal(err)
+		}
+		const wantHeight = 3
+		deadline := time.Now().Add(time.Minute)
+		for f.chain.RootTip().Number < wantHeight && time.Now().Before(deadline) {
+			time.Sleep(time.Second)
+		}
+		m.StopLocalMining()
+
+		height := f.chain.RootTip().Number
+		if height < wantHeight || len(f.client.broadcasts) != int(height) {
+			t.Fatalf("root tip #%d, %d broadcasts, want at least %d blocks and one broadcast per block", height, len(f.client.broadcasts), wantHeight)
+		}
+		parent := f.genesis
+		for n := uint32(1); n <= height; n++ {
+			block, err := f.chain.GetRootBlockByNumber(n)
+			if err != nil || block == nil {
+				t.Fatalf("read canonical root #%d: block %v, err %v", n, block, err)
+			}
+			if block.ParentHash() != parent.Hash() {
+				t.Fatalf("root #%d has parent %s, want %s", n, block.ParentHash(), parent.Hash())
+			}
+			if got := f.client.broadcasts[n-1]; got != block.Hash() {
+				t.Fatalf("broadcast root #%d has hash %s, want %s", n, got, block.Hash())
+			}
+			if block.Coinbase() != coinbase || block.Time() <= parent.Time() || block.Time() > uint64(time.Now().Unix()) {
+				t.Fatalf("root #%d has coinbase %s and time %d after parent time %d", n, block.Coinbase(), block.Time(), parent.Time())
+			}
+			parent = block
+		}
+	})
 }
 
 func TestRootPoWMinerTipChange(t *testing.T) {
