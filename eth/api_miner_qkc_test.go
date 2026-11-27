@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -147,7 +148,7 @@ func TestQKCMinerRPC(t *testing.T) {
 			t.Fatal("sealed block and state were not imported")
 		}
 		t.Logf("Imported sealed block and state: number=%s hash=%s coinbase=%s", head.Number, head.Hash().TerminalString(), head.Coinbase)
-		if err := client.Call(&accepted, "qkc_submitWork", sealHash, nonce, mixHash); err == nil || !strings.Contains(err.Error(), shard.ErrUnknownWork.Error()) {
+		if err := client.Call(&accepted, "qkc_submitWork", sealHash, nonce, mixHash); err == nil || !strings.Contains(err.Error(), mining.ErrUnknownWork.Error()) {
 			t.Fatalf("imported work accepted again: %v", err)
 		}
 		t.Logf("Rejected replay of imported work: sealHash=%s", sealHash.TerminalString())
@@ -175,7 +176,7 @@ func TestMinerRPCRequiresQKC(t *testing.T) {
 }
 
 type blockedMiningImport struct {
-	shard.MinerBackend
+	mining.MinerBackend
 	entered, release chan struct{}
 }
 
@@ -194,7 +195,7 @@ func TestMiningRPCShutdown(t *testing.T) {
 	imp := &blockedMiningImport{backend.Shard(), make(chan struct{}), make(chan struct{})}
 	release := sync.OnceFunc(func() { close(imp.release) })
 	defer release()
-	backend.powMiner = shard.NewPoWMiner(imp, shard.PoWMinerConfig{})
+	backend.powMiner = mining.NewPoWMiner(imp, mining.PoWMinerConfig{})
 	api := &qkcMiningAPI{backend}
 	work, err := api.GetWork(t.Context(), address)
 	if err != nil {

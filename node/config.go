@@ -67,7 +67,8 @@ type Config struct {
 	// Configuration of peer-to-peer networking.
 	P2P p2p.Config
 
-	// Shard cluster endpoint and mining recipient; runtime wiring is pending.
+	// QuarkChain's private RPC endpoint (root JSON-RPC or shard cluster RPC)
+	// and mining recipient. Runtime wiring is pending.
 	PrivateHost     string
 	PrivatePort     int
 	CoinbaseAddress common.Address
