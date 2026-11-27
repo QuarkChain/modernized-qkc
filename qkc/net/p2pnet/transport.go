@@ -11,12 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 )
 
-const (
-	frameCode              = 0
-	p2pFrameHeaderSize     = 32 + 1 + 8     // chainId + opcode + rpcId
-	maxP2PFrameSize        = (16 << 20) - 1 // geth frame max size
-	maxP2PFramePayloadSize = maxP2PFrameSize - p2pFrameHeaderSize
-)
+const frameCode = 0
 
 var _ conn.FrameTransport = (*Transport)(nil)
 
@@ -42,7 +37,7 @@ func (transport *Transport) ReadFrame() (wire.Frame, error) {
 	if message.Code != frameCode {
 		return nil, fmt.Errorf("unexpected P2P message code %d", message.Code)
 	}
-	if message.Size > maxP2PFrameSize {
+	if message.Size > wire.MaxP2PFrameSize {
 		return nil, fmt.Errorf("P2P frame too large: %d bytes", message.Size)
 	}
 	data := make([]byte, message.Size)
@@ -56,14 +51,7 @@ func (transport *Transport) ReadFrame() (wire.Frame, error) {
 }
 
 func (transport *Transport) WriteFrame(value wire.Frame) error {
-	frame, ok := value.(*wire.P2PFrame)
-	if !ok || frame == nil {
-		return fmt.Errorf("%w: expected P2P frame, got %T", wire.ErrInvalidFrame, value)
-	}
-	if len(frame.Payload) > maxP2PFramePayloadSize {
-		return fmt.Errorf("%w: payload too large", wire.ErrInvalidFrame)
-	}
-	data, err := wire.EncodeP2PFrame(frame)
+	data, err := wire.EncodeP2PFrame(value)
 	if err != nil {
 		return err
 	}

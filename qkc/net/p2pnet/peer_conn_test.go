@@ -232,7 +232,7 @@ func TestPeerConnRejectsOversizedFrame(t *testing.T) {
 	}
 	peer := newTestPeer(t, cfg)
 	peer.Start()
-	payload := make([]byte, maxP2PFrameSize+1)
+	payload := make([]byte, wire.MaxP2PFrameSize+1)
 	if err := remote.WriteMsg(p2p.Msg{Code: frameCode, Size: uint32(len(payload)), Payload: bytes.NewReader(payload)}); err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestTransportTruncatedPayload(t *testing.T) {
 			written := make(chan error, 1)
 			go func() {
 				written <- remote.WriteMsg(p2p.Msg{
-					Code: frameCode, Size: p2pFrameHeaderSize, Payload: bytes.NewReader(entry.payload),
+					Code: frameCode, Size: wire.P2PFrameHeaderSize, Payload: bytes.NewReader(entry.payload),
 				})
 			}()
 			if _, err := (&Transport{rw: local}).ReadFrame(); !errors.Is(err, io.ErrUnexpectedEOF) {
