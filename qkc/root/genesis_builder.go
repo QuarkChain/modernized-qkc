@@ -45,16 +45,20 @@ func (g *RootGenesis) Validate() error {
 	if g.Difficulty == nil || g.Difficulty.Sign() <= 0 || g.Difficulty.BitLen() > 256 {
 		return errors.New("Difficulty must be a positive uint256")
 	}
-	if err := g.Config.ConsensusType.Check(); err != nil {
-		return err
-	}
-	if err := g.Config.Check(); err != nil {
+	if err := checkRootConsensusConfig(g.Config); err != nil {
 		return err
 	}
 	if g.Difficulty.Cmp(g.Config.PoSW.MinimumDifficulty) < 0 {
 		return errors.New("Difficulty is below MinimumDifficulty")
 	}
 	return nil
+}
+
+func checkRootConsensusConfig(config *params.QuarkChainConfig) error {
+	if config != nil && config.ConsensusType == "" {
+		return errors.New("root ConsensusType is required")
+	}
+	return config.Check()
 }
 
 // ValidateShardGenesis checks one shard's native genesis. When rules is set,
@@ -81,7 +85,18 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 	if err := seed.Validate(); err != nil {
 		return nil, err
 	}
-	rules := seed.Config
+	headers, err := buildShardGenesisHeaders(seed.Config, seed.Timestamp, shards)
+	if err != nil {
+		return nil, err
+	}
+	difficulty := uint256.MustFromBig(seed.Difficulty)
+	return qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+		Time: seed.Timestamp, Coinbase: seed.Coinbase,
+		Difficulty: *difficulty, TotalDifficulty: *difficulty,
+	}, headers, nil), nil
+}
+
+func buildShardGenesisHeaders(rules *params.QuarkChainConfig, rootTimestamp uint64, shards []*core.Genesis) (qkctypes.ShardBlockHeaders, error) {
 	if len(shards) != len(rules.ChainIDs) {
 		return nil, errors.New("shard genesis count differs from configured chain IDs")
 	}
@@ -93,8 +108,8 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 		if shard.Config.ChainID.Cmp(id) != 0 {
 			return nil, fmt.Errorf("expected shard genesis for chain %s at index %d, got chain %s", id, i, shard.Config.ChainID)
 		}
-		if shard.Timestamp > seed.Timestamp {
-			return nil, fmt.Errorf("shard %s genesis timestamp %d is later than root genesis timestamp %d", id, shard.Timestamp, seed.Timestamp)
+		if shard.Timestamp > rootTimestamp {
+			return nil, fmt.Errorf("shard %s genesis timestamp %d is later than root genesis timestamp %d", id, shard.Timestamp, rootTimestamp)
 		}
 	}
 	sorted := slices.Clone(shards)
@@ -109,9 +124,5 @@ func BuildRootGenesis(seed *RootGenesis, shards []*core.Genesis) (*qkctypes.Root
 		}
 		headers[i] = header
 	}
-	difficulty := uint256.MustFromBig(seed.Difficulty)
-	return qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
-		Time: seed.Timestamp, Coinbase: seed.Coinbase,
-		Difficulty: *difficulty, TotalDifficulty: *difficulty,
-	}, headers, nil), nil
+	return headers, nil
 }

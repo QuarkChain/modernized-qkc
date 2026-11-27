@@ -23,6 +23,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 // QKCExtraSize is the size of the QuarkChain extra data carried in the
@@ -119,6 +120,21 @@ func DecodeQKCExtra(extra []byte) (*QKCExtra, error) {
 	copy(e.Nonce[:], extra[qkcExtraNonceOffset:qkcExtraMixHashOffset])
 	copy(e.MixHash[:], extra[qkcExtraMixHashOffset:QKCExtraSize])
 	return e, nil
+}
+
+// CheckGenesis validates the QKC fields shared by a shard genesis specification
+// and the G0 header included in the root genesis.
+func (e *QKCExtra) CheckGenesis(chainID *big.Int, gasLimit uint64) error {
+	if e.Version != 0 || chainID == nil || e.ChainID == nil || e.ChainID.Cmp(chainID) != 0 {
+		return errors.New("genesis extra-data has an invalid version or chain ID")
+	}
+	if e.PrevRootBlock != (common.Hash{}) || e.Cursor != (XShardCursor{RootBlockHeight: 1}) {
+		return errors.New("genesis extra-data has an invalid root reference or cursor")
+	}
+	if e.XShardGasUsed != 0 || e.XShardGasLimit != gasLimit/params.XShardGasLimitDivisor {
+		return errors.New("genesis extra-data has invalid cross-shard gas limits")
+	}
+	return nil
 }
 
 // Encode packs the QuarkChain fields into the extra data of a shard block
