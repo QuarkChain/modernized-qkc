@@ -45,7 +45,7 @@ func (c *RootChain) BuildMiningWork(ctx context.Context, coinbase common.Address
 		},
 		Parent: header.ParentHash,
 		Submit: func(nonce types.BlockNonce, mixHash common.Hash) error {
-			return c.InsertBlock(block.WithMiningResult(nonce.Uint64(), mixHash, nil))
+			return c.insertBlock(block.WithMiningResult(nonce.Uint64(), mixHash, nil), true)
 		},
 	}, nil
 }

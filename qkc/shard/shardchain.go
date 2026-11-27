@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
@@ -289,7 +290,34 @@ func (c *ShardChain) validateGenesisRoot(root *qkctypes.RootBlock) (*types.Heade
 func (c *ShardChain) InsertShardBlock(block *types.Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.insertShardBlock(block)
+}
 
+// importForDelivery reports whether the block was already delivered. A mined
+// submission must still extend the head, including a replay of a committed block.
+func (c *ShardChain) importForDelivery(block *types.Block, mined bool) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if mined && block.ParentHash() != c.chain.CurrentBlock().Hash() {
+		return false, mining.ErrStaleWork
+	}
+	committed, err := rawdb.IsShardBlockCommitted(c.db, block.Hash())
+	if err != nil {
+		log.Error("Failed to read shard block commit marker", "chain", c.chain.Config().ChainID, "block", block.Hash(), "err", err)
+		return false, fmt.Errorf("read block %x commit marker: %w", block.Hash(), err)
+	}
+	if committed {
+		return true, nil
+	}
+	if err := c.insertShardBlock(block); err != nil {
+		log.Error("Failed to import shard block", "chain", c.chain.Config().ChainID, "block", block.Hash(), "number", block.NumberU64(), "err", err)
+		return false, err
+	}
+	return false, nil
+}
+
+// insertShardBlock requires c.mu.
+func (c *ShardChain) insertShardBlock(block *types.Block) error {
 	// Shard genesis is already committed before Init; it is not imported here.
 	if block.NumberU64() == 0 {
 		return consensus.ErrInvalidNumber

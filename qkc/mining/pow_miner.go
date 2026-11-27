@@ -212,15 +212,16 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	if !ok {
 		return ErrUnknownWork
 	}
-	// TODO(mining): Check the parent under the chain's import lock. Two submissions
-	// can pass the check above and both be stored and propagated.
-	if err := w.Submit(nonce, mixHash); err != nil {
+	// Import rechecks the parent under the chain lock. A competing submission
+	// may have advanced the head since the check above.
+	err := w.Submit(nonce, mixHash)
+	if err != nil && !errors.Is(err, ErrStaleWork) {
 		return err
 	}
 	m.mu.Lock()
 	m.works.Remove(sealHash)
 	m.mu.Unlock()
-	return nil
+	return err
 }
 
 // StartLocalMining begins mining locally for the configured coinbase. It is a
