@@ -87,6 +87,9 @@ func TestRootInsertForkChoiceAndConfirmations(t *testing.T) {
 			if _, err := f.chain.GetLastConfirmedShardBlocks(block.Hash()); err != nil {
 				t.Fatal(err)
 			}
+			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != block.Hash() {
+				t.Fatal("broadcast lacks its atomically committed recovery marker", hash, err)
+			}
 			return nil
 		}
 		if err := f.chain.InsertBlock(test.block); err != nil {
@@ -94,6 +97,9 @@ func TestRootInsertForkChoiceAndConfirmations(t *testing.T) {
 		}
 		if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != test.tip.Hash() {
 			t.Fatal("wrong persisted tip", hash, err)
+		}
+		if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != (common.Hash{}) {
+			t.Fatal("successful broadcast retained its recovery marker", hash, err)
 		}
 	}
 	if engine.calls != 5 || len(f.client.broadcasts) != 5 {
@@ -252,7 +258,7 @@ func TestRootInsertStaleHeightLimit(t *testing.T) {
 }
 
 func TestRootInsertLocalFailureAndRetry(t *testing.T) {
-	for _, stage := range []string{"verify", "read", "put", "commit"} {
+	for _, stage := range []string{"verify", "read", "put", "committing marker", "commit"} {
 		t.Run(stage, func(t *testing.T) {
 			f, engine := newInsertEnv(t)
 			block := f.block(f.genesis, 1)
@@ -264,6 +270,8 @@ func TestRootInsertLocalFailureAndRetry(t *testing.T) {
 				f.db.readErr = failure
 			case "put":
 				f.db.putErr = failure
+			case "committing marker":
+				f.db.putErr, f.db.putKey = failure, "qkc_root_committing"
 			case "commit":
 				f.db.batchErr = failure
 			}
@@ -285,6 +293,9 @@ func TestRootInsertLocalFailureAndRetry(t *testing.T) {
 			}
 			if hash := qkcrawdb.ReadRootCanonicalHash(f.db, 1); hash != (common.Hash{}) {
 				t.Fatal("failed import left a canonical index", hash)
+			}
+			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != (common.Hash{}) {
+				t.Fatal("failed local commit left a recovery marker", hash, err)
 			}
 			if err := f.chain.InsertBlock(block); err != nil {
 				t.Fatal("import retry failed", err)
@@ -365,7 +376,7 @@ func TestRootInsertRejectsIncompleteParentConfirmations(t *testing.T) {
 }
 
 func TestRootInsertDeliveryResults(t *testing.T) {
-	for _, stage := range []string{"broadcast", "cancel rpc", "cancel after success"} {
+	for _, stage := range []string{"broadcast", "clear marker", "cancel rpc", "cancel after success"} {
 		t.Run(stage, func(t *testing.T) {
 			f, engine := newInsertEnv(t)
 			block := f.block(f.genesis, 1)
@@ -373,6 +384,9 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 			switch stage {
 			case "broadcast":
 				f.client.broadcastErr = failure
+			case "clear marker":
+				f.db.deleteErr = failure
+				failure = nil // Delivery succeeded; cleanup is best-effort.
 			case "cancel rpc":
 				failure = context.Canceled
 				f.client.onBroadcast = func(ctx context.Context, _ *types.RootBlock) error { f.cancel(); return ctx.Err() }
@@ -386,7 +400,13 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 			if f.chain.RootTip().Hash() != block.Hash() || qkcrawdb.ReadRootBlock(f.db, block.Hash()) == nil {
 				t.Fatal("delivery failure lost the local commit")
 			}
+			if stage == "clear marker" {
+				if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != block.Hash() {
+					t.Fatal("failed cleanup did not leave the acknowledged marker", hash, err)
+				}
+			}
 			f.client.broadcastErr, f.client.onBroadcast = nil, nil
+			f.db.deleteErr = nil
 			if stage == "cancel after success" {
 				if !f.chain.initialized.Load() || f.chain.stopping.Load() || f.chain.Ready() {
 					t.Fatal("successful delivery must remain recorded without readiness after backend cancellation")
@@ -394,6 +414,9 @@ func TestRootInsertDeliveryResults(t *testing.T) {
 				return
 			}
 			if failure != nil {
+				if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != block.Hash() {
+					t.Fatal("failed delivery or cleanup lost its recovery marker", hash, err)
+				}
 				if !f.chain.initialized.Load() || !f.chain.stopping.Load() || f.chain.Ready() {
 					t.Fatal("delivery failure did not preserve initialization and stop the chain")
 				}
