@@ -15,6 +15,8 @@ NoDiscovery = true
 
 [Root]
 NetworkID = 2
+# List one shard TOML per configured chain ID, even when Root.Genesis is omitted.
+# Each file provides the shard genesis and its private RPC endpoint.
 # Paths resolve relative to this file. R0 orders shard headers by increasing chain ID.
 ShardConfigs = ["shard-100001.toml", "shard-100002.toml"]
 

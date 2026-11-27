@@ -98,10 +98,10 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	if err := backendCtx.Err(); err != nil {
 		return nil, err
 	}
-	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
-	// genesis. For an empty database, atomically store genesis, its cumulative shard
-	// confirmations, the canonical index and root head. For an initialized database,
-	// validate genesis without replacing the persisted head.
+	// TODO(backend): Build the engine in master.New from the stored root config
+	// or the supplied genesis config on first startup. Pass the engine and
+	// the root and shard genesis inputs to New. New should call
+	// SetupRootGenesisBlock before reading the persisted head.
 	hash, err := rawdb.ReadRootHeadBlockHash(db)
 	if err != nil {
 		return nil, fmt.Errorf("read persisted root head: %w", err)
