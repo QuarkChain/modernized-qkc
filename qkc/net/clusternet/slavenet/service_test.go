@@ -19,7 +19,6 @@ package slavenet
 import (
 	"context"
 	"errors"
-	"io"
 	"maps"
 	"math/big"
 	"net"
@@ -103,17 +102,17 @@ func serviceMaster(t *testing.T, s *Service, handler conn.TypedHandler) *conn.Ba
 	if err != nil {
 		t.Fatal(err)
 	}
+	transport, err := conn.NewMasterSlaveTransport(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if handler == nil {
 		handler = func(wire.SSZMessage) (wire.SSZMessage, error) {
 			return &wire.AddShardBlockHeaderResponse{ErrorCode: 9}, nil
 		}
 	}
 	remote := conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
-			return wire.ReadClusterFrameWithPeerID(r, 0)
-		}, func(w io.Writer, frame wire.Frame) error {
-			return wire.WriteClusterFrameWithPeerID(w, frame, 0)
-		}),
+		Transport: transport,
 		Serializers: map[byte]*conn.OpSerializer{
 			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),

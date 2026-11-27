@@ -106,6 +106,37 @@ func WriteRootHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) error {
 	return db.Put(rootHeadBlockKey, hash.Bytes())
 }
 
+// ReadRootCommittingHash returns zero only when no broadcast is pending.
+// Read failures and malformed records must not silently discard recovery work.
+func ReadRootCommittingHash(db ethdb.KeyValueReader) (common.Hash, error) {
+	exists, err := db.Has(rootCommittingHashKey)
+	if err != nil || !exists {
+		return common.Hash{}, err
+	}
+	data, err := db.Get(rootCommittingHashKey)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(data) != common.HashLength {
+		return common.Hash{}, fmt.Errorf("invalid committing root hash length %d", len(data))
+	}
+	hash := common.BytesToHash(data)
+	if hash == (common.Hash{}) {
+		return common.Hash{}, fmt.Errorf("invalid zero committing root hash")
+	}
+	return hash, nil
+}
+
+// WriteRootCommittingHash stages the pending broadcast with the local root commit.
+func WriteRootCommittingHash(db ethdb.KeyValueWriter, hash common.Hash) error {
+	return db.Put(rootCommittingHashKey, hash.Bytes())
+}
+
+// DeleteRootCommittingHash clears a broadcast only after every shard acknowledges.
+func DeleteRootCommittingHash(db ethdb.KeyValueWriter) error {
+	return db.Delete(rootCommittingHashKey)
+}
+
 // ReadRootCanonicalHash retrieves the hash assigned to a canonical root height.
 // Like core/rawdb.ReadCanonicalHash, it does not expose Get errors. A zero hash
 // therefore does not distinguish an absent index from a failed read.
