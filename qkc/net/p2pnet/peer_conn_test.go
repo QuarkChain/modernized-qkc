@@ -185,7 +185,6 @@ func TestPeerConnForwardsRawFrames(t *testing.T) {
 	second.Start()
 
 	for _, frame := range []*wire.P2PFrame{
-		{ChainID: big.NewInt(3), Opcode: 0x42, Payload: []byte{0xfa}},
 		{ChainID: new(big.Int).Lsh(big.NewInt(1), 200), Opcode: byte(wire.CommandOpGetShardHeadersRequest), RPCID: 19, Payload: []byte{0xff, 0x00}},
 		{ChainID: big.NewInt(3), Opcode: byte(wire.CommandOpGetShardHeadersResponse), RPCID: 19, Payload: []byte{0xff}},
 		{ChainID: big.NewInt(4), Opcode: byte(wire.CommandOpGetShardBlocksRequest), RPCID: 1, Payload: []byte{0xff}},
@@ -202,21 +201,59 @@ func TestPeerConnForwardsRawFrames(t *testing.T) {
 	}
 }
 
+func TestPeerConnRejectsUnregisteredForwardedOpcode(t *testing.T) {
+	for _, entry := range []struct {
+		name   string
+		opcode byte
+	}{
+		{"unknown", 0x42},
+		{"hello after handshake", byte(wire.CommandOpHello)},
+		{"internal cluster opcode", byte(wire.ClusterOpPing)},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			local, remote := p2p.MsgPipe()
+			defer remote.Close()
+			cfg := testPeerConfig(local, 42)
+			forwarded := make(chan *wire.ClusterFrame, 1)
+			cfg.Forwarder = func(_ *big.Int, frame *wire.ClusterFrame) error {
+				forwarded <- frame
+				return errors.New("unexpected forwarding")
+			}
+			peer := newTestPeer(t, cfg)
+			peer.Start()
+
+			frame := &wire.P2PFrame{ChainID: big.NewInt(3), Opcode: entry.opcode}
+			if err := (&Transport{rw: remote}).WriteFrame(frame); err != nil {
+				t.Fatal(err)
+			}
+			await(t, peer.WaitUntilClosed())
+			select {
+			case frame := <-forwarded:
+				t.Fatalf("forwarded unregistered opcode %#x", frame.Opcode)
+			default:
+			}
+		})
+	}
+}
+
 func TestPeerConnForwarderErrorClosesConnection(t *testing.T) {
 	firstRW, secondRW := p2p.MsgPipe()
 	defer firstRW.Close()
 	first := newTestPeer(t, testPeerConfig(firstRW, 1))
 	secondCfg := testPeerConfig(secondRW, 2)
+	called := make(chan struct{}, 1)
 	secondCfg.Forwarder = func(*big.Int, *wire.ClusterFrame) error {
+		called <- struct{}{}
 		return errors.New("forwarding failed")
 	}
 	second := newTestPeer(t, secondCfg)
 	first.Start()
 	second.Start()
 
-	if err := first.WriteFrame(&wire.P2PFrame{ChainID: big.NewInt(3), Opcode: 0x42}); err != nil {
+	if err := first.WriteFrame(&wire.P2PFrame{ChainID: big.NewInt(3), Opcode: byte(wire.CommandOpNewTip)}); err != nil {
 		t.Fatal(err)
 	}
+	await(t, called)
 	await(t, second.WaitUntilClosed())
 	await(t, first.WaitUntilClosed())
 }
@@ -597,7 +634,7 @@ func TestGetHTransportRoundTrip(t *testing.T) {
 		stacks = append(stacks, stack)
 	}
 	first, second := await(t, peers), await(t, peers)
-	frame := &wire.P2PFrame{ChainID: big.NewInt(10001), Opcode: 0x42, RPCID: 19, Payload: []byte{0xff, 0x00}}
+	frame := &wire.P2PFrame{ChainID: big.NewInt(10001), Opcode: byte(wire.CommandOpGetShardHeadersRequest), RPCID: 19, Payload: []byte{0xff, 0x00}}
 	if err := first.WriteFrame(frame); err != nil {
 		t.Fatal(err)
 	}

@@ -17,9 +17,18 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
+// maxPeerHandlers caps in-flight root-chain requests and notifications per
+// external peer, including decoding and response writes. The initial limit
+// matches Besu 26.8.0's per-peer limit for serving snap requests.
+const maxPeerHandlers = 8
+
 // PeerRequestHandler serves root-chain traffic received from peers. Calls may
 // run concurrently. Errors close the peer connection. peerID is the locally
 // assigned cluster peer ID; all payloads are decoded before calling the handler.
+// Retrieval handlers may return fewer items than requested. Business services
+// must bound lookup work and response bytes while gathering items, accounting
+// for the complete wire message, including SSZ offsets and the root tip.
+// PeerConn serializes handler results without automatic pagination or trimming.
 type PeerRequestHandler interface {
 	NewTip(peerID uint64, rootTip *qkctypes.RootBlockHeader) error
 	NewTransactions(peerID uint64, transactions types.Transactions) error
@@ -37,8 +46,11 @@ type PeerConnConfig struct {
 	// Forwarder receives shard traffic as internal frames. chainID selects the
 	// destination slave; the frame carries this connection's cluster peer ID and
 	// the original opcode, RPC ID, and payload without decoding it.
-	// It must hand off frames without blocking the reader goroutine. An error
-	// closes the peer connection.
+	// Only registered post-handshake P2P opcodes reach this callback.
+	// It must hand off frames without blocking the reader goroutine. Return an
+	// error only for failures that should close the peer connection.
+	// The destination handler encodes business rejections in the RPC response
+	// when the response type defines an error code.
 	Forwarder func(chainID *big.Int, frame *wire.ClusterFrame) error
 }
 
@@ -82,10 +94,20 @@ func NewPeerConn(cfg PeerConnConfig) (*PeerConn, error) {
 		clusterPeerID: cfg.ClusterPeerID,
 		handler:       cfg.Handler,
 	}
+	serializers := conn.P2PSerializers()
+	nonRPCOps := conn.P2PNonRPCOps()
+	forwardOpcodes := make(map[byte]struct{}, 2*len(serializers))
+	for opcode, serializer := range serializers {
+		forwardOpcodes[opcode] = struct{}{}
+		if _, nonRPC := nonRPCOps[opcode]; !nonRPC {
+			forwardOpcodes[serializer.ResponseOpCode] = struct{}{}
+		}
+	}
 	peer.BaseConn = conn.NewBaseConn(conn.Config{
-		Transport:   transport,
-		Serializers: conn.P2PSerializers(),
-		NonRPCOps:   conn.P2PNonRPCOps(),
+		Transport:             transport,
+		Serializers:           serializers,
+		NonRPCOps:             nonRPCOps,
+		MaxConcurrentHandlers: maxPeerHandlers,
 		Handlers: map[byte]conn.TypedHandler{
 			byte(wire.CommandOpNewTip):                peer.handleNewTip,
 			byte(wire.CommandOpNewTransactions):       peer.handleNewTransactions,
@@ -96,6 +118,11 @@ func NewPeerConn(cfg PeerConnConfig) (*PeerConn, error) {
 			frame := value.(*wire.P2PFrame)
 			if frame.ChainID.Sign() == 0 {
 				return false
+			}
+			if _, ok := forwardOpcodes[frame.Opcode]; !ok {
+				peer.Logger().Warn("unsupported P2P opcode", "peer", peer.remoteID, "opcode", frame.Opcode)
+				peer.Close()
+				return true
 			}
 			forwarded := &wire.ClusterFrame{
 				ClusterPeerID: peer.clusterPeerID,
@@ -154,6 +181,9 @@ func (peer *PeerConn) SendNewTransactions(transactions types.Transactions) error
 
 // SendGetRootHeaders queries by hash when height is nil. Otherwise hash must be
 // zero and height must be a nonnegative uint256. Reverse selects genesis direction.
+// limit is an upper bound; a peer may return fewer headers. The caller sizes
+// requests using estimated response bytes and handles partial or empty replies
+// without assuming that a short response means the end of the chain.
 func (peer *PeerConn) SendGetRootHeaders(ctx context.Context, hash common.Hash, height *big.Int, limit, skip uint32, reverse bool) (*RootHeadersResult, error) {
 	request := &wire.GetRootHeadersRequest{
 		Type: wire.HeaderOriginHash, Data: hash, Limit: limit, Skip: skip, Direction: uint8(wire.DirectionTip),
@@ -189,6 +219,9 @@ func (peer *PeerConn) SendGetRootHeaders(ctx context.Context, hash common.Hash, 
 	return decoded, nil
 }
 
+// SendGetRootBlocks requests a batch of root blocks. The caller must bound the
+// request and expected response sizes. A peer may return fewer blocks; match
+// returned blocks by hash and reschedule missing ones with bounded retries.
 func (peer *PeerConn) SendGetRootBlocks(ctx context.Context, hashes []common.Hash) ([]*qkctypes.RootBlock, error) {
 	response, err := peer.SendP2PRPC(ctx, wire.RootChainID(), byte(wire.CommandOpGetRootBlocksRequest), &wire.GetRootBlocksRequest{Hashes: hashes})
 	if err != nil {
