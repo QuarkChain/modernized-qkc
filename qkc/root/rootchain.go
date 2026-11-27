@@ -59,8 +59,6 @@ var (
 // backendCtx before calling Close. Configuration must match the engine and stay
 // unchanged after New. The caller must drain in-flight operations before closing
 // shared resources.
-// TODO(backend): Call Init after cluster connections are ready and before
-// starting sync, mining or imports.
 type RootChain struct {
 	backendCtx context.Context
 	config     *params.QuarkChainConfig
@@ -195,9 +193,6 @@ func (c *RootChain) readConfirmations(hash common.Hash) (map[string]common.Hash,
 // from it. Otherwise, they must restore its locally stored direct parent, then
 // import the supplied root block through the normal root-block path. Missing
 // parents or required shard blocks, state or cross-shard data must return an error.
-// TODO(shard): Implement recovery when the supplied root block is absent locally;
-// ShardChain.Init currently requires non-genesis roots and their confirmations
-// to already be stored locally.
 // Connections must be ready before this call. Init records initialization after
 // PING and any pending side-root broadcast succeed. Marker cleanup is best-effort.
 // Ready becomes true only while backendCtx is active and not stopping.
@@ -579,8 +574,6 @@ func (c *RootChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]co
 
 // AddShardBlockCoinbaseAmount stores reported after-tax income; the caller
 // verifies the source. It avoids chainmu so reports can proceed during RPCs.
-// TODO(backend): Stop the cluster client via masternet.Service.Stop, rejecting
-// new requests and draining AddShardBlockHeader writes before RootChain.Close.
 func (c *RootChain) AddShardBlockCoinbaseAmount(hash common.Hash, amount *uint256.Int) error {
 	if err := rawdb.WriteShardBlockCoinbaseAmount(c.db, hash, amount); err != nil {
 		return fmt.Errorf("store shard coinbase amount %x: %w", hash, err)

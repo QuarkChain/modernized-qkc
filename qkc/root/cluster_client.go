@@ -35,8 +35,6 @@ type ClusterClient interface {
 	// and waits for initialization at that root block to finish. Missing connections
 	// and RPC failures return errors. Receivers may already be initialized after
 	// partial success, so the caller must abort startup instead of repeating PING.
-	// TODO(shard): If the supplied root block is absent locally, restore its local
-	// direct parent, then import the supplied root block, rejecting missing data.
 	Ping(ctx context.Context, checkpoint *qkctypes.RootBlock) error
 
 	// BroadcastRootBlock sends block to every ShardNode in the cluster and waits
