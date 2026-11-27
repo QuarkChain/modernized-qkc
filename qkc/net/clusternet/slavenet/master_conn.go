@@ -151,8 +151,8 @@ func (mc *MasterConn) SendAddShardBlockHeader(ctx context.Context, header *types
 
 // routeFrame leaves master-local frames for normal dispatch and consumes peer
 // frames without dispatching them until virtual peer connections are supported.
-func (mc *MasterConn) routeFrame(frame *wire.ClusterFrame) bool {
-	if frame.ClusterPeerID == 0 {
+func (mc *MasterConn) routeFrame(frame wire.Frame) bool {
+	if frame.(*wire.ClusterFrame).ClusterPeerID == 0 {
 		return false
 	}
 
