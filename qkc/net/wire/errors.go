@@ -21,8 +21,8 @@ import (
 	"fmt"
 )
 
-// ErrInvalidClusterFrame identifies a frame rejected before any bytes are written.
-var ErrInvalidClusterFrame = errors.New("invalid cluster frame")
+// ErrInvalidFrame identifies a frame rejected before any bytes are written.
+var ErrInvalidFrame = errors.New("invalid frame")
 
 // RemoteError reports a nonzero business error code returned by a remote peer.
 // Callers receive it as an error so that a rejected request is never mistaken

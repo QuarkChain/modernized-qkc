@@ -58,17 +58,16 @@ type Config struct {
 	// callback prevents all RPC responses and virtual peers on this link from
 	// making progress.
 	//
-	// On a multiplexed physical connection, it must consume every frame with a
-	// nonzero ClusterPeerID, including responses and unknown or destroyed routes.
-	// Such frames must never fall through to local dispatch. Reject unknown routes
-	// according to the routing layer's policy and return true.
+	// On multiplexed connections, it must consume all routed frames, including
+	// responses and unknown or destroyed routes. They must not fall through to
+	// local dispatch. Route selection belongs to the connection owner.
 	//
 	// To close the connection, call c.Close() directly. It does not wait for
 	// the reader loop, but it calls transport.Close synchronously. Return true
 	// to prevent the current frame from being dispatched after closing.
 	//
 	// The callback is responsible for synchronizing any shared state it accesses.
-	Forwarder func(*wire.ClusterFrame) bool
+	Forwarder func(wire.Frame) bool
 
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger

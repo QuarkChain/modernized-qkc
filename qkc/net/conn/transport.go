@@ -45,11 +45,11 @@ var frameWriteTimeout = 20 * time.Second
 // requires it (for example, by writing through the same BaseConn).
 // A virtual transport's Close must close only that virtual connection and leave
 // the shared physical transport available to other routes.
-// WriteFrame may return wire.ErrInvalidClusterFrame only if no frame bytes were
+// WriteFrame may return wire.ErrInvalidFrame only if no frame bytes were
 // written, including through an error wrapping it.
 type FrameTransport interface {
-	ReadFrame() (*wire.ClusterFrame, error)
-	WriteFrame(*wire.ClusterFrame) error
+	ReadFrame() (wire.Frame, error)
+	WriteFrame(wire.Frame) error
 	Close() error
 	RemoteAddr() string
 }
@@ -59,8 +59,8 @@ type transport struct {
 	r    *bufio.Reader
 	w    *bufio.Writer
 
-	readFrameFn  func(io.Reader) (*wire.ClusterFrame, error)
-	writeFrameFn func(io.Writer, *wire.ClusterFrame) error
+	readFrameFn  func(io.Reader) (wire.Frame, error)
+	writeFrameFn func(io.Writer, wire.Frame) error
 
 	remoteAddr string
 }
@@ -70,8 +70,8 @@ type transport struct {
 // connection (for example, ClusterFrame with or without ClusterPeerID).
 func NewTCPTransport(
 	conn net.Conn,
-	readFrame func(io.Reader) (*wire.ClusterFrame, error),
-	writeFrame func(io.Writer, *wire.ClusterFrame) error,
+	readFrame func(io.Reader) (wire.Frame, error),
+	writeFrame func(io.Writer, wire.Frame) error,
 ) FrameTransport {
 	return &transport{
 		conn:         conn,
@@ -83,11 +83,11 @@ func NewTCPTransport(
 	}
 }
 
-func (t *transport) ReadFrame() (*wire.ClusterFrame, error) {
+func (t *transport) ReadFrame() (wire.Frame, error) {
 	return t.readFrameFn(t.r)
 }
 
-func (t *transport) WriteFrame(f *wire.ClusterFrame) error {
+func (t *transport) WriteFrame(f wire.Frame) error {
 	// Clear the deadline once this write finishes (success or error), so it
 	// does not stay armed on the conn and break later operations. Failure to
 	// clear must not fail an already-successful write.

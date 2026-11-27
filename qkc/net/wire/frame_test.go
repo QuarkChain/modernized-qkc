@@ -227,6 +227,31 @@ func TestFrameReadErrors(t *testing.T) {
 	}
 }
 
+func TestFrameCodecRejectsInvalidTypes(t *testing.T) {
+	for _, codec := range []struct {
+		name     string
+		write    func(io.Writer, Frame) error
+		wrong    Frame
+		typedNil Frame
+	}{
+		{"cluster", WriteClusterFrame, &P2PFrame{ChainID: RootChainID()}, (*ClusterFrame)(nil)},
+		{"cluster with peer ID", WriteClusterFrameWithPeerID, &P2PFrame{ChainID: RootChainID()}, (*ClusterFrame)(nil)},
+		{"P2P", WriteP2PFrame, &ClusterFrame{}, (*P2PFrame)(nil)},
+	} {
+		t.Run(codec.name, func(t *testing.T) {
+			for _, frame := range []Frame{nil, codec.typedNil, codec.wrong} {
+				var encoded bytes.Buffer
+				if err := codec.write(&encoded, frame); !errors.Is(err, ErrInvalidFrame) {
+					t.Fatalf("frame %T: error = %v, want invalid frame", frame, err)
+				}
+				if encoded.Len() != 0 {
+					t.Fatalf("frame %T: wrote %d bytes before rejection", frame, encoded.Len())
+				}
+			}
+		})
+	}
+}
+
 func TestFrameEOFContract(t *testing.T) {
 	if _, err := ReadClusterFrame(bytes.NewReader(nil), testMaxPayloadLen); !errors.Is(err, io.EOF) {
 		t.Fatalf("clean EOF = %v, want EOF", err)
@@ -254,7 +279,7 @@ func TestClusterFrameFinalReadError(t *testing.T) {
 	codecs := []struct {
 		name  string
 		read  func(io.Reader, uint32) (*ClusterFrame, error)
-		write func(io.Writer, *ClusterFrame) error
+		write func(io.Writer, Frame) error
 	}{
 		{"direct", ReadClusterFrame, WriteClusterFrame},
 		{"peer", ReadClusterFrameWithPeerID, WriteClusterFrameWithPeerID},
@@ -350,7 +375,7 @@ func TestClusterFrameMaxPayload(t *testing.T) {
 		name   string
 		peerID uint64
 		read   func(io.Reader, uint32) (*ClusterFrame, error)
-		write  func(io.Writer, *ClusterFrame) error
+		write  func(io.Writer, Frame) error
 	}{
 		{"direct", 0, ReadClusterFrame, WriteClusterFrame},
 		{"peer", 0x1122334455667788, ReadClusterFrameWithPeerID, WriteClusterFrameWithPeerID},
