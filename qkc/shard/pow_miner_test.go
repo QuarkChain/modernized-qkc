@@ -175,6 +175,9 @@ func TestPoWMinerSubmitWork(t *testing.T) {
 		other := getWork(t, m, b)
 		// Superseded work is accepted while its parent is the head.
 		nonce, mixHash := types.EncodeNonce(7), common.Hash{7}
+		if err := m.SubmitWorkWithSignature(first.SealHash, nonce, mixHash, &[65]byte{1}); err == nil {
+			t.Fatal("accepted a root staking signature for shard work")
+		}
 		if err := m.SubmitWork(first.SealHash, nonce, mixHash); err != nil {
 			t.Fatal(err)
 		}

@@ -614,12 +614,25 @@ func (c *RootChain) GetShardBlockCoinbaseAmount(hash common.Hash) (*uint256.Int,
 // substituting zero stakes or retrying here. Connection failures are managed by
 // the client. Wrapped context and remote errors remain identifiable with errors.Is/As.
 func (c *RootChain) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
-	ctx, cancel := context.WithTimeout(c.backendCtx, rpcTimeout)
+	return (rootStakeReader{c, c.backendCtx}).GetRootChainStakes(chainID, shardBlockHash, coinbase)
+}
+
+// rootStakeReader binds the staking RPC to the lifetime of the operation.
+type rootStakeReader struct {
+	*RootChain
+	ctx context.Context
+}
+
+func (r rootStakeReader) GetRootChainStakes(chainID *big.Int, shardBlockHash common.Hash, coinbase common.Address) (*uint256.Int, common.Address, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, rpcTimeout)
 	defer cancel()
+	// A mining request has its own context and must also stop at backend shutdown.
+	stop := context.AfterFunc(r.backendCtx, cancel)
+	defer stop()
 	if err := ctx.Err(); err != nil {
 		return nil, common.Address{}, err
 	}
-	result, err := c.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
+	result, err := r.client.GetRootChainStakes(ctx, chainID, coinbase, shardBlockHash)
 	if err != nil {
 		return nil, common.Address{}, fmt.Errorf("query root stakes for chain %v, shard block %x, coinbase %s: %w", chainID, shardBlockHash, coinbase, err)
 	}

@@ -187,10 +187,10 @@ func (b *blockedMiningImport) BuildMiningWork(ctx context.Context, coinbase comm
 		return nil, err
 	}
 	submit := candidate.Submit
-	candidate.Submit = func(nonce types.BlockNonce, mixHash common.Hash) error {
+	candidate.Submit = func(nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error {
 		close(b.entered)
 		<-b.release
-		return submit(nonce, mixHash)
+		return submit(nonce, mixHash, signature)
 	}
 	return candidate, nil
 }

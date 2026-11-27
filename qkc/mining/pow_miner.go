@@ -73,8 +73,11 @@ var (
 type MiningWork struct {
 	SealHash   common.Hash // Hash of the candidate without its seal
 	Number     uint64      // Candidate block number
-	Difficulty *big.Int    // Difficulty the seal must meet
+	Difficulty *big.Int    // Root base difficulty or shard effective difficulty
 	Time       uint64      // Candidate timestamp
+	// A nonzero DiffDivider lets the authorized root signer seal at
+	// max(1, Difficulty / DiffDivider).
+	DiffDivider uint64
 }
 
 // Candidate binds the work to its original block. Submit seals a copy and
@@ -83,7 +86,7 @@ type Candidate struct {
 	MiningWork
 	Parent common.Hash
 	Anchor common.Hash // Referenced root for shard work, zero for root work
-	Submit func(types.BlockNonce, common.Hash) error
+	Submit func(nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error
 
 	refreshAt time.Time // Set by PoWMiner when it caches the candidate.
 }
@@ -200,6 +203,12 @@ func (m *PoWMiner) currentWork(coinbase common.Address) *Candidate {
 // if import succeeds but RPCs fail, the moved head makes resubmissions stale,
 // and the local mining loop logs the error and moves on.
 func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash) error {
+	return m.SubmitWorkWithSignature(sealHash, nonce, mixHash, nil)
+}
+
+// SubmitWorkWithSignature submits a seal with an optional root staking
+// signature over sealHash. Root consensus verifies the signature at import.
+func (m *PoWMiner) SubmitWorkWithSignature(sealHash common.Hash, nonce types.BlockNonce, mixHash common.Hash, signature *[65]byte) error {
 	head := m.backend.MiningHead()
 	m.mu.Lock()
 	w, ok := m.works.Get(sealHash)
@@ -214,7 +223,7 @@ func (m *PoWMiner) SubmitWork(sealHash common.Hash, nonce types.BlockNonce, mixH
 	}
 	// TODO(mining): Check the parent under the chain's import lock. Two submissions
 	// can pass the check above and both be stored and propagated.
-	if err := w.Submit(nonce, mixHash); err != nil {
+	if err := w.Submit(nonce, mixHash, signature); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -353,5 +362,8 @@ func (m *PoWMiner) search(ctx context.Context, w *Candidate, changed <-chan stru
 			}
 		}
 	})
-	return m.config.Search.Search(ctx, &w.MiningWork)
+	// The local miner submits unsigned work and cannot claim a root discount.
+	work := w.MiningWork
+	work.DiffDivider = 0
+	return m.config.Search.Search(ctx, &work)
 }
