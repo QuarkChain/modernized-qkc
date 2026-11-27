@@ -33,6 +33,7 @@ import (
 
 // MinerBackend supplies chain-specific work and tracks the mining head.
 type MinerBackend interface {
+	// BuildMiningWork returns a new candidate for the miner to cache.
 	BuildMiningWork(ctx context.Context, coinbase common.Address) (*Candidate, error)
 	// MiningHead returns the canonical head used to check a candidate's parent.
 	MiningHead() common.Hash
@@ -83,6 +84,8 @@ type Candidate struct {
 	Parent common.Hash
 	Anchor common.Hash // Referenced root for shard work, zero for root work
 	Submit func(types.BlockNonce, common.Hash) error
+
+	refreshAt time.Time // Set by PoWMiner when it caches the candidate.
 }
 
 // NonceSearch finds seals for local mining.
@@ -111,16 +114,11 @@ type PoWMiner struct {
 
 	build   chan struct{}                             // Semaphore serializing candidate construction
 	mu      sync.Mutex                                // Protects works and current
-	works   lru.BasicLRU[common.Hash, *servedWork]    // Served candidates by seal hash
+	works   lru.BasicLRU[common.Hash, *Candidate]     // Served candidates by seal hash
 	current lru.BasicLRU[common.Address, common.Hash] // Current seal hash by coinbase
 
 	lifecycle sync.Mutex
 	stop      func() // Stops local mining; nil when it is not running
-}
-
-type servedWork struct {
-	*Candidate
-	expires time.Time
 }
 
 // NewPoWMiner creates a miner on the given backend. Local mining starts
@@ -133,7 +131,7 @@ func NewPoWMiner(backend MinerBackend, config PoWMinerConfig) *PoWMiner {
 		backend: backend,
 		config:  config,
 		build:   make(chan struct{}, 1),
-		works:   lru.NewBasicLRU[common.Hash, *servedWork](miningWorkCacheSize),
+		works:   lru.NewBasicLRU[common.Hash, *Candidate](miningWorkCacheSize),
 		current: lru.NewBasicLRU[common.Address, common.Hash](miningWorkCacheSize),
 	}
 }
@@ -151,7 +149,7 @@ func (m *PoWMiner) GetWork(ctx context.Context, coinbase common.Address) (*Minin
 	return &work, nil
 }
 
-func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*servedWork, error) {
+func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*Candidate, error) {
 	if w := m.currentWork(coinbase); w != nil {
 		return w, nil
 	}
@@ -170,16 +168,16 @@ func (m *PoWMiner) getWork(ctx context.Context, coinbase common.Address) (*serve
 	if err != nil {
 		return nil, err
 	}
-	w := &servedWork{Candidate: candidate, expires: time.Now().Add(m.config.WorkRefresh)}
+	candidate.refreshAt = time.Now().Add(m.config.WorkRefresh)
 	m.mu.Lock()
-	m.works.Add(w.SealHash, w)
-	m.current.Add(coinbase, w.SealHash)
+	m.works.Add(candidate.SealHash, candidate)
+	m.current.Add(coinbase, candidate.SealHash)
 	m.mu.Unlock()
-	return w, nil
+	return candidate, nil
 }
 
 // A root reorg can orphan the root referenced by shard work without moving the shard head.
-func (m *PoWMiner) currentWork(coinbase common.Address) *servedWork {
+func (m *PoWMiner) currentWork(coinbase common.Address) *Candidate {
 	head := m.backend.MiningHead()
 	anchor := m.backend.MiningAnchor()
 	m.mu.Lock()
@@ -189,7 +187,7 @@ func (m *PoWMiner) currentWork(coinbase common.Address) *servedWork {
 		return nil
 	}
 	w, ok := m.works.Peek(hash)
-	if !ok || w.Parent != head || w.Anchor != anchor || !time.Now().Before(w.expires) {
+	if !ok || w.Parent != head || w.Anchor != anchor || !time.Now().Before(w.refreshAt) {
 		return nil
 	}
 	return w
@@ -332,9 +330,9 @@ func waitForMiningRetry(ctx context.Context) {
 }
 
 // search runs the local search on w until it finds a seal, the head moves away
-// from w's parent or w expires.
-func (m *PoWMiner) search(ctx context.Context, w *servedWork, changed <-chan struct{}) (types.BlockNonce, common.Hash, bool) {
-	ctx, cancel := context.WithDeadline(ctx, w.expires)
+// from w's parent or the work is due for refresh.
+func (m *PoWMiner) search(ctx context.Context, w *Candidate, changed <-chan struct{}) (types.BlockNonce, common.Hash, bool) {
+	ctx, cancel := context.WithDeadline(ctx, w.refreshAt)
 	var watcher sync.WaitGroup
 	defer func() {
 		cancel()

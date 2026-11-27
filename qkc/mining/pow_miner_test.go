@@ -50,7 +50,7 @@ func (b *countingWorkBackend) BuildMiningWork(context.Context, common.Address) (
 func TestGetWorkRebuildsEvictedCandidate(t *testing.T) {
 	m := NewPoWMiner(new(countingWorkBackend), PoWMinerConfig{WorkRefresh: time.Hour})
 	// Both coinbases stay in current, but only one candidate fits in works.
-	m.works = lru.NewBasicLRU[common.Hash, *servedWork](1)
+	m.works = lru.NewBasicLRU[common.Hash, *Candidate](1)
 	a, b := common.Address{1}, common.Address{2}
 	for _, step := range []struct {
 		coinbase common.Address
