@@ -239,6 +239,8 @@ func TestShardGenesisUBTOverride(t *testing.T) {
 	}
 	// Enable Shanghai so fork ordering does not mask the QKC UBT restriction.
 	inline := strings.Replace(string(contents), `ChainID = "100001"`, "ChainID = \"100001\"\nShanghaiTime = 0", 1)
+	// Parallel tests must not share the devnet slave listener port.
+	inline = strings.Replace(inline, "PrivatePort = 38000", "PrivatePort = 0", 1)
 	withoutGenesis, _, ok := strings.Cut(inline, "[Eth.Genesis]")
 	if !ok {
 		t.Fatal("example is missing the Genesis table")
@@ -296,7 +298,8 @@ func TestShardGenesis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inline := string(contents)
+	// Let the OS allocate a slave listener port for each test node.
+	inline := strings.Replace(string(contents), "PrivatePort = 38000", "PrivatePort = 0", 1)
 	withoutGenesis, _, ok := strings.Cut(inline, "[Eth.Genesis]")
 	if !ok {
 		t.Fatal("example is missing the Genesis table")
