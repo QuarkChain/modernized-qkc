@@ -40,7 +40,6 @@ const startupNetworkTimeout = 20 * time.Second
 type ServiceConfig struct {
 	SlaveInfos         []clusternet.SlaveInfo
 	ConfiguredChainIDs []*big.Int
-	MaxPayloadSize     uint32
 	Logger             log.Logger
 	// Shutdown requests asynchronous node shutdown after an unexpected slave
 	// disconnect or initialization failure. It is called at most once, never
@@ -60,11 +59,6 @@ func (cfg *ServiceConfig) validate() error {
 	if len(cfg.ConfiguredChainIDs) != len(cfg.SlaveInfos) {
 		return errors.New("configured chain IDs and slaves must have equal counts")
 	}
-	payloadSize, err := conn.ClusterPayloadSize(cfg.MaxPayloadSize)
-	if err != nil {
-		return err
-	}
-	cfg.MaxPayloadSize = payloadSize
 	if cfg.Logger == nil {
 		cfg.Logger = log.Root()
 	}

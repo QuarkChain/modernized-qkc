@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 )
 
@@ -39,14 +40,55 @@ const (
 	rpcIDSize         = 8
 	frameHeader       = 4 // internal TCP payload length prefix
 	frameBodyHeader   = opcodeSize + rpcIDSize
+
+	// maxClusterPayloadLen leaves room for the largest cluster frame header
+	// within a 32-bit int, so frame lengths fit in int on all platforms.
+	maxClusterPayloadLen = math.MaxInt32 - frameHeader - clusterPeerIDSize - frameBodyHeader
+
+	// initialClusterBodySize caps the allocation before any body bytes arrive.
+	initialClusterBodySize = 4 << 10
 )
 
-// MaxFramePayloadLen caps internal frame payloads at 16 MiB to bound upfront
-// allocations while accommodating payloads relayed from devp2p messages.
-// External messages must separately obey the devp2p limit, including P2P frame
-// headers. Larger internal data, such as block lists for sync, must be split
-// by size at the protocol level.
-const MaxFramePayloadLen = 16 << 20
+// QKC sends P2PFrame through geth's P2P protocol, which requires
+// a message code and a payload. Since P2PFrame already contains its
+// own opcode, QKC sets the message code to 0 and uses the encoded
+// P2PFrame as the message payload.
+//
+// Geth adds the protocol offset to the message code and encodes
+// the RLPx frame body as:
+//
+//	without Snappy: [RLP(code)][P2PFrame]
+//	with Snappy:    [RLP(code)][Snappy(P2PFrame)]
+//
+// The combined size of the encoded code and payload must fit within
+// the RLPx 24-bit frame size limit. Therefore, the maximum P2PFrame
+// size must account for both the encoded code and possible Snappy
+// expansion.
+const (
+	// rlpxMaxFrameSize bounds the combined code and message bytes shown above.
+	rlpxMaxFrameSize = (1 << 24) - 1
+	// rlpxMaxCodeSize reserves at most 9 bytes for RLP(code): a prefix
+	// followed by 8 value bytes. It does not include the QKC opcode.
+	rlpxMaxCodeSize = 9
+	// Snappy can expand data. Its encoded size is bounded by 32 + n + n/6
+	// for n input bytes; snappyOverhead is the fixed 32-byte term.
+	snappyOverhead = 32
+
+	// MaxP2PFrameSize bounds the encoded P2PFrame length before compression,
+	// including the QKC header. For n bytes, both transport layouts must fit:
+	//
+	//	without Snappy: 9 + n <= rlpxMaxFrameSize
+	//	with Snappy:    9 + 32 + n + n/6 <= rlpxMaxFrameSize
+	//
+	// The stricter Snappy bound gives the conservative 6/7 factor below.
+	MaxP2PFrameSize = (rlpxMaxFrameSize - rlpxMaxCodeSize - snappyOverhead) * 6 / 7
+
+	// P2PFrameHeaderSize is the 41-byte QKC frame header.
+	P2PFrameHeaderSize = chainIDSize + frameBodyHeader
+	// MaxP2PPayloadLen bounds the payload of a P2PFrame or a ClusterFrame
+	// with a nonzero ClusterPeerID.
+	MaxP2PPayloadLen = MaxP2PFrameSize - P2PFrameHeaderSize
+)
 
 // Frame exposes the RPC body while preserving transport-specific metadata.
 // WithBody returns a new frame without modifying the receiver.
@@ -63,12 +105,9 @@ type Frame interface {
 //
 //	[4B payload_len][8B cluster_peer_id, Master↔slave only][1B opcode][8B rpc_id][payload]
 //
-// payload_len counts only payload. ClusterPeerID routes traffic through a
-// virtual peer connection on Master↔slave links; it is zero for ordinary
-// cluster traffic and is omitted entirely on direct slave↔slave links.
-//
-// The codec selected for the connection determines whether ClusterPeerID is
-// present on the wire.
+// payload_len counts only payload. A nonzero ClusterPeerID marks virtual P2P
+// traffic and selects MaxP2PPayloadLen. An absent or zero ClusterPeerID
+// selects maxClusterPayloadLen.
 type ClusterFrame struct {
 	ClusterPeerID uint64
 	Opcode        byte
@@ -107,57 +146,74 @@ func (frame *P2PFrame) WithBody(opcode byte, rpcID uint64, payload []byte) Frame
 	return &P2PFrame{ChainID: chainID, Opcode: opcode, RPCID: rpcID, Payload: payload}
 }
 
-// ReadClusterFrame reads one direct slave↔slave internal TCP frame, which does
-// not carry a ClusterPeerID. maxPayloadLen must be in [1, MaxFramePayloadLen].
-func ReadClusterFrame(r io.Reader, maxPayloadLen uint32) (*ClusterFrame, error) {
-	return readClusterFrame(r, maxPayloadLen, false)
+// ReadClusterFrame reads one direct slave↔slave frame without a ClusterPeerID.
+func ReadClusterFrame(r io.Reader) (*ClusterFrame, error) {
+	return readClusterFrame(r, false)
 }
 
-// WriteClusterFrame writes one direct slave↔slave internal TCP frame, which
-// does not carry a ClusterPeerID.
+// WriteClusterFrame writes one direct slave↔slave frame without a ClusterPeerID.
 func WriteClusterFrame(w io.Writer, frame Frame) error {
 	return writeClusterFrame(w, frame, false)
 }
 
-// ReadClusterFrameWithPeerID reads one Master↔slave internal TCP frame. The
-// 8-byte ClusterPeerID routes a virtual peer command through the connection.
-// maxPayloadLen must be in [1, MaxFramePayloadLen].
-func ReadClusterFrameWithPeerID(r io.Reader, maxPayloadLen uint32) (*ClusterFrame, error) {
-	return readClusterFrame(r, maxPayloadLen, true)
+// ReadClusterFrameWithPeerID reads one Master↔slave frame with a ClusterPeerID.
+func ReadClusterFrameWithPeerID(r io.Reader) (*ClusterFrame, error) {
+	return readClusterFrame(r, true)
 }
 
-// WriteClusterFrameWithPeerID writes one Master↔slave internal TCP frame.
+// WriteClusterFrameWithPeerID writes one Master↔slave frame with a ClusterPeerID.
 func WriteClusterFrameWithPeerID(w io.Writer, frame Frame) error {
 	return writeClusterFrame(w, frame, true)
 }
 
-func readClusterFrame(r io.Reader, maxPayloadLen uint32, hasPeerID bool) (*ClusterFrame, error) {
-	if maxPayloadLen == 0 || maxPayloadLen > MaxFramePayloadLen {
-		return nil, fmt.Errorf("cluster frame maxPayloadLen must be between 1 and %d: %d", MaxFramePayloadLen, maxPayloadLen)
-	}
+func readClusterFrame(r io.Reader, hasPeerID bool) (*ClusterFrame, error) {
 	var payloadLen uint32
 	if err := binary.Read(r, binary.BigEndian, &payloadLen); err != nil {
 		return nil, fmt.Errorf("reading cluster frame length: %w", err)
 	}
-	if payloadLen > maxPayloadLen {
-		return nil, fmt.Errorf("cluster frame payload too large: %d > %d", payloadLen, maxPayloadLen)
-	}
-
-	frame := new(ClusterFrame)
+	var peerID uint64
 	if hasPeerID {
-		if err := binary.Read(r, binary.BigEndian, &frame.ClusterPeerID); err != nil {
+		if err := binary.Read(r, binary.BigEndian, &peerID); err != nil {
 			return nil, fmt.Errorf("reading cluster peer ID: %w", normalizeTruncatedEOF(err))
 		}
 	}
+	if err := validateClusterPayloadLen(uint64(payloadLen), peerID); err != nil {
+		return nil, err
+	}
 
-	body := make([]byte, frameBodyHeader+int(payloadLen))
-	if _, err := io.ReadFull(r, body); err != nil {
+	body, err := readClusterFrameBody(r, frameBodyHeader+int(payloadLen))
+	if err != nil {
 		return nil, fmt.Errorf("reading cluster frame body (payload_len=%d): %w", payloadLen, normalizeTruncatedEOF(err))
 	}
-	frame.Opcode = body[0]
-	frame.RPCID = binary.BigEndian.Uint64(body[1:frameBodyHeader])
-	frame.Payload = body[frameBodyHeader:]
-	return frame, nil
+	return &ClusterFrame{
+		ClusterPeerID: peerID,
+		Opcode:        body[0],
+		RPCID:         binary.BigEndian.Uint64(body[1:frameBodyHeader]),
+		Payload:       body[frameBodyHeader:],
+	}, nil
+}
+
+func readClusterFrameBody(r io.Reader, bodyLen int) ([]byte, error) {
+	body := make([]byte, min(bodyLen, initialClusterBodySize))
+	offset := 0
+	for len(body) < bodyLen {
+		// Preserve read errors at intermediate buffer boundaries.
+		n, err := r.Read(body[offset:])
+		if err != nil {
+			return nil, err
+		}
+		offset += n
+		if offset == len(body) {
+			// Grow only after receiving data, and clamp before adding to avoid overflow.
+			next := make([]byte, offset+min(offset, bodyLen-offset))
+			copy(next, body)
+			body = next
+		}
+	}
+	if _, err := io.ReadFull(r, body[offset:]); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 func writeClusterFrame(w io.Writer, value Frame, withPeerID bool) error {
@@ -168,8 +224,8 @@ func writeClusterFrame(w io.Writer, value Frame, withPeerID bool) error {
 	if !withPeerID && frame.ClusterPeerID != 0 {
 		return fmt.Errorf("%w: cluster peer ID is not supported by this frame codec", ErrInvalidFrame)
 	}
-	if len(frame.Payload) > MaxFramePayloadLen {
-		return fmt.Errorf("%w: payload too large", ErrInvalidFrame)
+	if err := validateClusterPayloadLen(uint64(len(frame.Payload)), frame.ClusterPeerID); err != nil {
+		return err
 	}
 
 	extra := 0
@@ -190,11 +246,25 @@ func writeClusterFrame(w io.Writer, value Frame, withPeerID bool) error {
 	return err
 }
 
+func validateClusterPayloadLen(payloadLen, peerID uint64) error {
+	limit := uint64(maxClusterPayloadLen)
+	if peerID != 0 {
+		limit = MaxP2PPayloadLen
+	}
+	if payloadLen > limit {
+		return fmt.Errorf("%w: cluster frame payload too large: %d > %d", ErrInvalidFrame, payloadLen, limit)
+	}
+	return nil
+}
+
 // DecodeP2PFrame decodes one complete devp2p message payload. The caller must
-// enforce its configured payload size limit and pass exactly one message's bytes.
+// pass exactly one message's bytes. The fixed P2P size limit is always enforced.
 // The returned Payload aliases data. Copy the payload if it must survive
 // changes to or reuse of the input buffer.
 func DecodeP2PFrame(data []byte) (*P2PFrame, error) {
+	if len(data) > MaxP2PFrameSize {
+		return nil, fmt.Errorf("P2P frame too large: %d > %d", len(data), MaxP2PFrameSize)
+	}
 	if len(data) < chainIDSize+frameBodyHeader {
 		return nil, fmt.Errorf("P2P frame too short: %d < %d", len(data), chainIDSize+frameBodyHeader)
 	}
@@ -209,8 +279,7 @@ func DecodeP2PFrame(data []byte) (*P2PFrame, error) {
 }
 
 // EncodeP2PFrame encodes one external cluster↔cluster message payload. The
-// caller enforces the devp2p message size limit; this codec adds no length
-// prefix.
+// fixed P2P size limit is always enforced. This codec adds no length prefix.
 func EncodeP2PFrame(value Frame) ([]byte, error) {
 	frame, ok := value.(*P2PFrame)
 	if !ok || frame == nil {
@@ -218,6 +287,9 @@ func EncodeP2PFrame(value Frame) ([]byte, error) {
 	}
 	if frame.ChainID == nil || frame.ChainID.Sign() < 0 || frame.ChainID.BitLen() > 256 {
 		return nil, fmt.Errorf("%w: invalid routing chain ID: %v", ErrInvalidFrame, frame.ChainID)
+	}
+	if len(frame.Payload) > MaxP2PPayloadLen {
+		return nil, fmt.Errorf("%w: P2P frame payload too large: %d > %d", ErrInvalidFrame, len(frame.Payload), MaxP2PPayloadLen)
 	}
 	buf := make([]byte, chainIDSize+frameBodyHeader+len(frame.Payload))
 	frame.ChainID.FillBytes(buf[:chainIDSize])

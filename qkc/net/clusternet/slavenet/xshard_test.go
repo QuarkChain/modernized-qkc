@@ -17,10 +17,12 @@
 package slavenet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,34 +47,9 @@ type xshardRequest struct {
 
 func noopShutdown() {}
 
-func TestXshardConnManagerPayloadLimit(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		limit   uint32
-		wantErr bool
-	}{
-		{"default", 0, false},
-		{"maximum", wire.MaxFramePayloadLen, false},
-		{"above maximum", wire.MaxFramePayloadLen + 1, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, tc.limit, &testXshardHandler{}, noopShutdown, nil)
-			if manager != nil {
-				defer manager.Close()
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("NewXshardConnManager error = %v, want error: %v", err, tc.wantErr)
-			}
-			if tc.wantErr && manager != nil {
-				t.Fatal("invalid payload limit returned a manager")
-			}
-		})
-	}
-}
-
 func TestRejectUnconfiguredSlave(t *testing.T) {
 	handler := &testXshardHandler{requests: make(chan xshardRequest, 1)}
-	manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, 0, handler, noopShutdown, nil)
+	manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +61,7 @@ func TestRejectUnconfiguredSlave(t *testing.T) {
 	local, remote := net.Pipe()
 	done := make(chan struct{})
 	go func() { defer close(done); manager.HandleInbound(local) }()
-	peer, err := newXshardConn(remote, 0, big.NewInt(3), big.NewInt(1), true, handler, nil)
+	peer, err := newXshardConn(remote, big.NewInt(3), big.NewInt(1), true, handler, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +102,7 @@ func (h xshardHandlerFunc) AddXshardTxList(blockHash common.Hash, deposits []*ty
 // exercise the same handler registration as real TCP connections.
 func newTestXshardPeer(t *testing.T, handler XshardRequestHandler) *XshardConn {
 	t.Helper()
-	manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, 0, handler, noopShutdown, nil)
+	manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +113,7 @@ func newTestXshardPeer(t *testing.T, handler XshardRequestHandler) *XshardConn {
 		defer close(done)
 		manager.HandleInbound(local)
 	}()
-	peer, err := newXshardConn(remote, 0, big.NewInt(2), big.NewInt(1), true, handler, nil)
+	peer, err := newXshardConn(remote, big.NewInt(2), big.NewInt(1), true, handler, nil)
 	if err != nil {
 		remote.Close()
 		t.Fatal(err)
@@ -154,6 +131,46 @@ func newTestXshardPeer(t *testing.T, handler XshardRequestHandler) *XshardConn {
 		t.Fatal(ctx.Err())
 	}
 	return peer
+}
+
+func TestXshardConnDeliversLargeDepositListInOneRPC(t *testing.T) {
+	handler := &testXshardHandler{requests: make(chan xshardRequest, 2)}
+	peer := newTestXshardPeer(t, handler)
+	blockHash := common.Hash{0xbb}
+	// Data alone totals 16 MiB. RLP and SSZ overhead take the request past
+	// the former payload limit.
+	data := bytes.Repeat([]byte{0xa5}, 64<<10)
+	deposits := make([]*types.DepositTx, 256)
+	for i := range deposits {
+		deposits[i] = &types.DepositTx{
+			Version:         types.DepositTxVersion,
+			SourceBlockHash: blockHash,
+			SourceLogIndex:  uint64(i),
+			Value:           uint256.NewInt(42),
+			GasPrice:        uint256.NewInt(3),
+			Data:            data,
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := peer.SendAddXshardTxList(ctx, blockHash, deposits); err != nil {
+		t.Fatalf("send large deposit list: %v", err)
+	}
+	if got := len(handler.requests); got != 1 {
+		t.Fatalf("handler calls = %d, want 1", got)
+	}
+	request := <-handler.requests
+	if request.blockHash != blockHash {
+		t.Fatalf("source block hash = %v, want %v", request.blockHash, blockHash)
+	}
+	if len(request.deposits) != len(deposits) {
+		t.Fatalf("received %d deposits, want %d", len(request.deposits), len(deposits))
+	}
+	for i, want := range deposits {
+		if !reflect.DeepEqual(request.deposits[i], want) {
+			t.Fatalf("deposit %d changed during RPC", i)
+		}
+	}
 }
 
 func TestXshardConnRemoteErrorKeepsConnection(t *testing.T) {
@@ -274,12 +291,12 @@ func TestTCPXshardHandshakeAndRequest(t *testing.T) {
 	clientID := new(big.Int).Add(serverID, big.NewInt(1))
 	configuredIDs := []*big.Int{serverID, clientID}
 	serverWireID := *uint256.MustFromBig(serverID)
-	server, err := NewXshardConnManager(serverID, configuredIDs, 0, handler, noopShutdown, nil)
+	server, err := NewXshardConnManager(serverID, configuredIDs, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer server.Close()
-	client, err := NewXshardConnManager(clientID, configuredIDs, 0, handler, noopShutdown, nil)
+	client, err := NewXshardConnManager(clientID, configuredIDs, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,12 +348,12 @@ func TestTCPXshardHandshakeAndRequest(t *testing.T) {
 
 func TestDialToSlaveRejectsWrongChainID(t *testing.T) {
 	handler := &testXshardHandler{requests: make(chan xshardRequest, 1)}
-	server, err := NewXshardConnManager(big.NewInt(3), []*big.Int{big.NewInt(2), big.NewInt(3), big.NewInt(4)}, 0, handler, noopShutdown, nil)
+	server, err := NewXshardConnManager(big.NewInt(3), []*big.Int{big.NewInt(2), big.NewInt(3), big.NewInt(4)}, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer server.Close()
-	client, err := NewXshardConnManager(big.NewInt(2), []*big.Int{big.NewInt(2), big.NewInt(3), big.NewInt(4)}, 0, handler, noopShutdown, nil)
+	client, err := NewXshardConnManager(big.NewInt(2), []*big.Int{big.NewInt(2), big.NewInt(3), big.NewInt(4)}, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +382,7 @@ func TestDialToSlaveRejectsWrongChainID(t *testing.T) {
 
 func TestXshardConnManagerRejectsDuplicateConnection(t *testing.T) {
 	handler := &testXshardHandler{}
-	manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, 0, handler, noopShutdown, nil)
+	manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, handler, noopShutdown, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +390,7 @@ func TestXshardConnManagerRejectsDuplicateConnection(t *testing.T) {
 
 	firstLocal, firstRemote := net.Pipe()
 	defer firstRemote.Close()
-	first, err := newXshardConn(firstLocal, 0, big.NewInt(1), big.NewInt(2), true, handler, nil)
+	first, err := newXshardConn(firstLocal, big.NewInt(1), big.NewInt(2), true, handler, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +403,7 @@ func TestXshardConnManagerRejectsDuplicateConnection(t *testing.T) {
 
 	duplicateLocal, duplicateRemote := net.Pipe()
 	defer duplicateRemote.Close()
-	duplicate, err := newXshardConn(duplicateLocal, 0, big.NewInt(1), big.NewInt(2), true, handler, nil)
+	duplicate, err := newXshardConn(duplicateLocal, big.NewInt(1), big.NewInt(2), true, handler, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +426,7 @@ func TestXshardConnManagerRejectsDuplicateConnection(t *testing.T) {
 func TestXshardConnManagerShutsDownOnIndexedConnectionClose(t *testing.T) {
 	shutdown := make(chan struct{}, 1)
 	manager, err := NewXshardConnManager(
-		big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, 0,
+		big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)},
 		&testXshardHandler{}, func() { shutdown <- struct{}{} }, nil,
 	)
 	if err != nil {
@@ -419,7 +436,7 @@ func TestXshardConnManagerShutsDownOnIndexedConnectionClose(t *testing.T) {
 
 	local, remote := net.Pipe()
 	defer remote.Close()
-	indexed, err := newXshardConn(local, 0, big.NewInt(1), big.NewInt(2), true, &testXshardHandler{}, nil)
+	indexed, err := newXshardConn(local, big.NewInt(1), big.NewInt(2), true, &testXshardHandler{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +458,7 @@ func TestXshardConnManagerShutsDownOnIndexedConnectionClose(t *testing.T) {
 func TestXshardConnManagerCloseDoesNotShutDownSlave(t *testing.T) {
 	shutdown := make(chan struct{}, 1)
 	manager, err := NewXshardConnManager(
-		big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)}, 0,
+		big.NewInt(1), []*big.Int{big.NewInt(1), big.NewInt(2)},
 		&testXshardHandler{}, func() { shutdown <- struct{}{} }, nil,
 	)
 	if err != nil {
@@ -449,7 +466,7 @@ func TestXshardConnManagerCloseDoesNotShutDownSlave(t *testing.T) {
 	}
 	local, remote := net.Pipe()
 	defer remote.Close()
-	indexed, err := newXshardConn(local, 0, big.NewInt(1), big.NewInt(2), true, &testXshardHandler{}, nil)
+	indexed, err := newXshardConn(local, big.NewInt(1), big.NewInt(2), true, &testXshardHandler{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,16 +487,16 @@ func TestXshardConnManagerCloseDoesNotShutDownSlave(t *testing.T) {
 
 func TestXshardConnManagerRejectsInvalidChainIDs(t *testing.T) {
 	for _, id := range []*big.Int{nil, new(big.Int), big.NewInt(-1), new(big.Int).Lsh(big.NewInt(1), 256)} {
-		if manager, err := NewXshardConnManager(id, []*big.Int{big.NewInt(1)}, 0, &testXshardHandler{}, noopShutdown, nil); err == nil {
+		if manager, err := NewXshardConnManager(id, []*big.Int{big.NewInt(1)}, &testXshardHandler{}, noopShutdown, nil); err == nil {
 			manager.Close()
 			t.Fatalf("accepted invalid local chain ID %v", id)
 		}
-		if manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), id}, 0, &testXshardHandler{}, noopShutdown, nil); err == nil {
+		if manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(1), id}, &testXshardHandler{}, noopShutdown, nil); err == nil {
 			manager.Close()
 			t.Fatalf("accepted invalid configured chain ID %v", id)
 		}
 	}
-	if manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(2)}, 0, &testXshardHandler{}, noopShutdown, nil); err == nil {
+	if manager, err := NewXshardConnManager(big.NewInt(1), []*big.Int{big.NewInt(2)}, &testXshardHandler{}, noopShutdown, nil); err == nil {
 		manager.Close()
 		t.Fatal("accepted local chain ID missing from configuration")
 	}

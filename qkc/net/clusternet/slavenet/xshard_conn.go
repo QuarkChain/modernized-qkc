@@ -68,14 +68,14 @@ type XshardConn struct {
 // newXshardConn creates a cross-shard connection to another slave. For outbound
 // connections remoteChainID is that slave's expected chain ID; for inbound
 // connections it is learned from the first PING.
-func newXshardConn(nc net.Conn, maxPayloadSize uint32, localChainID, remoteChainID *big.Int, outbound bool, handler XshardRequestHandler, logger log.Logger) (*XshardConn, error) {
+func newXshardConn(nc net.Conn, localChainID, remoteChainID *big.Int, outbound bool, handler XshardRequestHandler, logger log.Logger) (*XshardConn, error) {
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
 	}
 	if outbound {
 		remoteChainID = new(big.Int).Set(remoteChainID)
 	}
-	transport, err := conn.NewXshardTransport(nc, maxPayloadSize)
+	transport, err := conn.NewXshardTransport(nc)
 	if err != nil {
 		return nil, err
 	}

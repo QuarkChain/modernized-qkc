@@ -40,33 +40,25 @@ func ClusterSerializers() map[byte]*OpSerializer {
 	}
 }
 
-// NewMasterSlaveTransport creates the peer-ID frame transport. A zero payload
-// limit uses the protocol maximum. On error the caller retains ownership of nc.
-func NewMasterSlaveTransport(nc net.Conn, maxPayloadSize uint32) (FrameTransport, error) {
+// NewMasterSlaveTransport creates a cluster frame transport with peer IDs.
+// On error the caller retains ownership of nc.
+func NewMasterSlaveTransport(nc net.Conn) (FrameTransport, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("master-slave connection must not be nil")
 	}
-	maxPayloadSize, err := ClusterPayloadSize(maxPayloadSize)
-	if err != nil {
-		return nil, err
-	}
 	return NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
-		return wire.ReadClusterFrameWithPeerID(r, maxPayloadSize)
+		return wire.ReadClusterFrameWithPeerID(r)
 	}, wire.WriteClusterFrameWithPeerID), nil
 }
 
-// NewXshardTransport creates a slave-to-slave frame transport without peer IDs.
-// On error the caller retains ownership of nc.
-func NewXshardTransport(nc net.Conn, maxPayloadSize uint32) (FrameTransport, error) {
+// NewXshardTransport creates an internal slave-to-slave frame transport without
+// peer IDs. On error the caller retains ownership of nc.
+func NewXshardTransport(nc net.Conn) (FrameTransport, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("xshard connection must not be nil")
 	}
-	maxPayloadSize, err := ClusterPayloadSize(maxPayloadSize)
-	if err != nil {
-		return nil, err
-	}
 	return NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
-		return wire.ReadClusterFrame(r, maxPayloadSize)
+		return wire.ReadClusterFrame(r)
 	}, wire.WriteClusterFrame), nil
 }
 
@@ -76,16 +68,4 @@ func ValidateSlaveChainID(id *big.Int) error {
 		return fmt.Errorf("invalid slave chain ID: %v", id)
 	}
 	return nil
-}
-
-// ClusterPayloadSize resolves the default payload size and enforces the
-// cluster protocol limit.
-func ClusterPayloadSize(size uint32) (uint32, error) {
-	if size == 0 {
-		return wire.MaxFramePayloadLen, nil
-	}
-	if size > wire.MaxFramePayloadLen {
-		return 0, fmt.Errorf("max payload size %d exceeds protocol limit %d", size, wire.MaxFramePayloadLen)
-	}
-	return size, nil
 }

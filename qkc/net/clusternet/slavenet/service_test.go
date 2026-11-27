@@ -19,7 +19,6 @@ package slavenet
 import (
 	"context"
 	"errors"
-	"io"
 	"maps"
 	"math/big"
 	"net"
@@ -103,15 +102,17 @@ func serviceMaster(t *testing.T, s *Service, handler conn.TypedHandler) *conn.Ba
 	if err != nil {
 		t.Fatal(err)
 	}
+	transport, err := conn.NewMasterSlaveTransport(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if handler == nil {
 		handler = func(wire.SSZMessage) (wire.SSZMessage, error) {
 			return &wire.AddShardBlockHeaderResponse{ErrorCode: 9}, nil
 		}
 	}
 	remote := conn.NewBaseConn(conn.Config{
-		Transport: conn.NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
-			return wire.ReadClusterFrameWithPeerID(r, wire.MaxFramePayloadLen)
-		}, wire.WriteClusterFrameWithPeerID),
+		Transport: transport,
 		Serializers: map[byte]*conn.OpSerializer{
 			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
@@ -314,7 +315,7 @@ func TestServiceStopWaitsForRejectedXshardHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := newXshardConn(nc, 0, big.NewInt(2), big.NewInt(1), true, &serviceBackend{}, nil)
+	peer, err := newXshardConn(nc, big.NewInt(2), big.NewInt(1), true, &serviceBackend{}, nil)
 	if err != nil {
 		nc.Close()
 		t.Fatal(err)
