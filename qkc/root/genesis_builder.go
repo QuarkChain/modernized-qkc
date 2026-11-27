@@ -55,9 +55,8 @@ func (g *RootGenesis) Validate() error {
 }
 
 func checkRootConsensusConfig(config *params.QuarkChainConfig) error {
-	// Root chains require an explicit consensus type.
 	if config != nil && config.ConsensusType == "" {
-		return config.ConsensusType.Check()
+		return errors.New("root ConsensusType is required")
 	}
 	return config.Check()
 }

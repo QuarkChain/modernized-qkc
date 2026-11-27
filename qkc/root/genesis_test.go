@@ -231,13 +231,13 @@ func TestRootGenesisSetupRequiresConsensusType(t *testing.T) {
 
 	db := rawdb.NewMemoryDatabase()
 	defer db.Close()
-	if _, _, err := SetupRootGenesisBlock(db, &invalid, shards); err == nil || !strings.Contains(err.Error(), "invalid ConsensusType") {
+	if _, _, err := SetupRootGenesisBlock(db, &invalid, shards); err == nil || !strings.Contains(err.Error(), "root ConsensusType is required") {
 		t.Fatalf("initialization with no consensus type: %v", err)
 	}
 	if err := qkcrawdb.WriteRootChainConfig(f.db, &config); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := SetupRootGenesisBlock(f.db, nil, shards); err == nil || !strings.Contains(err.Error(), "invalid ConsensusType") {
+	if _, _, err := SetupRootGenesisBlock(f.db, nil, shards); err == nil || !strings.Contains(err.Error(), "root ConsensusType is required") {
 		t.Fatalf("recovery with no stored consensus type: %v", err)
 	}
 }
