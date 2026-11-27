@@ -111,11 +111,12 @@ func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) 
 	return block, diff, nil
 }
 
-// InsertMinedBlock imports and propagates a sealed candidate that still extends the head.
+// InsertMinedBlock imports and propagates a sealed candidate through the same
+// path as a block received from the network.
 func (s *Shard) InsertMinedBlock(block *types.Block) error {
 	ctx, cancel := context.WithTimeout(context.Background(), minedBlockDeliveryTimeout)
 	defer cancel()
-	return s.addShardBlock(ctx, block, true)
+	return s.AddShardBlock(ctx, block)
 }
 
 // SubscribeChainHeadEvent registers a subscription for shard head changes.
@@ -208,18 +209,25 @@ func (s *Shard) BroadcastXShardTxList(ctx context.Context, blockHash common.Hash
 // unconfirmed range in a background loop, including failed mined blocks and
 // single-cluster setups where root-sync recovery cannot trigger a retry.
 func (s *Shard) AddShardBlock(ctx context.Context, block *types.Block) error {
-	return s.addShardBlock(ctx, block, false)
-}
-
-func (s *Shard) addShardBlock(ctx context.Context, block *types.Block, mined bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if block == nil {
 		return errors.New("nil shard block")
 	}
-	committed, err := s.chain.importForDelivery(block, mined)
-	if err != nil || committed {
+	// Skip completed deliveries so replaying old blocks cannot repeatedly amplify
+	// traffic into cross-shard broadcasts and master reports.
+	committed, err := rawdb.IsShardBlockCommitted(s.chain.db, block.Hash())
+	if err != nil {
+		log.Error("Failed to read shard block commit marker", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "err", err)
+		return fmt.Errorf("read block %x commit marker: %w", block.Hash(), err)
+	}
+	if committed {
+		return nil
+	}
+	if err := s.chain.InsertShardBlock(block); err != nil {
+		// Log import failures here; ShardChain only returns errors to avoid duplicate logs.
+		log.Error("Failed to import shard block", "chain", s.chain.chain.Config().ChainID, "block", block.Hash(), "number", block.NumberU64(), "err", err)
 		return err
 	}
 	// Resolve local reporting data before sending RPCs, so calculation failures

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"math/big"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -564,47 +563,6 @@ func TestRootPoWMinerTipChange(t *testing.T) {
 	if err := m.SubmitWork(old.SealHash, coretypes.BlockNonce{}, common.Hash{}); !errors.Is(err, mining.ErrStaleWork) {
 		t.Fatalf("submit work on old tip: got %v, want ErrStaleWork", err)
 	}
-}
-
-func TestRootPoWMinerCompetingSubmissions(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		f, engine := newInsertEnv(t)
-		m := mining.NewPoWMiner(f.chain, mining.PoWMinerConfig{})
-		var work [2]*mining.MiningWork
-		for i := range work {
-			var err error
-			work[i], err = m.GetWork(t.Context(), common.Address{byte(i + 1)})
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		// Let both submissions pass the miner's head check before either imports.
-		f.chain.chainmu.MustLock()
-		var wg sync.WaitGroup
-		var results [2]error
-		for i, w := range work {
-			wg.Go(func() { results[i] = m.SubmitWork(w.SealHash, coretypes.EncodeNonce(1), common.Hash{}) })
-		}
-		synctest.Wait()
-		f.chain.chainmu.Unlock()
-		wg.Wait()
-		tip := f.chain.RootTip()
-		if engine.calls != 1 || len(f.client.broadcasts) != 1 || f.client.broadcasts[0] != tip.Hash() {
-			t.Fatalf("verified %d blocks, broadcast %v, tip %x", engine.calls, f.client.broadcasts, tip.Hash())
-		}
-		for i, w := range work {
-			var want error
-			if w.SealHash != tip.SealHash() {
-				want = mining.ErrStaleWork
-			}
-			if !errors.Is(results[i], want) {
-				t.Fatalf("submission %d: got %v, want %v", i, results[i], want)
-			}
-			if err := m.SubmitWork(w.SealHash, coretypes.EncodeNonce(1), common.Hash{}); !errors.Is(err, mining.ErrUnknownWork) {
-				t.Fatalf("resubmitting %d: got %v, want evicted work", i, err)
-			}
-		}
-	})
 }
 
 // waitingRootSearch holds the local work until the search is canceled.

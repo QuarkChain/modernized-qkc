@@ -32,7 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -244,10 +243,6 @@ func (c *RootChain) Init() error {
 // disable Init and insertion, and return an error. The client handles connection
 // failures and requests master shutdown for cluster recovery.
 func (c *RootChain) InsertBlock(block *types.RootBlock) error {
-	return c.insertBlock(block, false)
-}
-
-func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 	if block == nil || block.Number() == 0 {
 		return errors.New("missing or genesis root block")
 	}
@@ -264,14 +259,10 @@ func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 	if !c.initialized.Load() {
 		return errChainNotInitialized
 	}
-	tip := c.tip.Load()
-	if mined && block.ParentHash() != tip.Hash() {
-		return mining.ErrStaleWork
-	}
 	// Reject stale blocks before loading, verifying or broadcasting them, even
 	// if already stored. Compare heights first to avoid unsigned underflow.
-	if tip.Number > block.Number() && tip.Number-block.Number() > maxStaleRootBlockHeightDiff {
-		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip.Number, maxStaleRootBlockHeightDiff)
+	if tip := c.tip.Load().Number; tip > block.Number() && tip-block.Number() > maxStaleRootBlockHeightDiff {
+		return fmt.Errorf("root block is too old: height %d, tip %d, maximum difference %d", block.Number(), tip, maxStaleRootBlockHeightDiff)
 	}
 	hash := block.Hash()
 	stored, err := c.GetRootBlock(hash)
@@ -315,7 +306,7 @@ func (c *RootChain) insertBlock(block *types.RootBlock, mined bool) error {
 	header := block.Header()
 	// Stored blocks can belong to side branches. Re-evaluate fork choice and
 	// promote a block only when its TD strictly exceeds the current runtime tip.
-	updateTip := header.TotalDifficulty.Cmp(&tip.TotalDifficulty) > 0
+	updateTip := header.TotalDifficulty.Cmp(&c.tip.Load().TotalDifficulty) > 0
 	if updateTip {
 		if err := c.rewriteCanonical(batch, header); err != nil {
 			return err
