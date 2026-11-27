@@ -42,9 +42,12 @@ type Config struct {
 	// Must be safe for concurrent use: handlers may be called from multiple
 	// dispatch goroutines, in a different order from frame arrival. Business
 	// operations that require ordering must serialize their own execution.
-	// The external peer ingress layer must bound admitted work; dispatch itself
-	// does not impose a concurrency limit.
 	Handlers map[byte]TypedHandler
+
+	// MaxConcurrentHandlers bounds in-flight inbound requests and commands,
+	// including decoding and response writes. A zero value means unlimited.
+	// A new request or command at capacity closes the connection.
+	MaxConcurrentHandlers int
 
 	// NonRPCOps marks fire-and-forget opcodes that must use rpc_id=0.
 	// Each opcode must have a request serializer in Serializers.
@@ -77,6 +80,9 @@ type Config struct {
 func (cfg *Config) validate() {
 	if cfg.Transport == nil {
 		panic("conn.Config: Transport must not be nil")
+	}
+	if cfg.MaxConcurrentHandlers < 0 {
+		panic("conn.Config: MaxConcurrentHandlers must not be negative")
 	}
 	// RPC response opcodes must be unique and disjoint from request opcodes.
 	responseOwners := make(map[byte]byte)

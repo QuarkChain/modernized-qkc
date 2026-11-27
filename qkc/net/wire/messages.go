@@ -38,7 +38,7 @@ const UInt128Length = 16
 type Data []byte
 
 // =============================================================================
-// §1  Cluster initialisation
+// §1  Internal cluster messages (Master↔slave, slave↔slave)
 // =============================================================================
 
 // The large ssz-max tags below describe individual fields. External frames and
@@ -88,17 +88,6 @@ type ConnectToSlavesRequest struct {
 // payload.
 type ConnectToSlavesResponse struct {
 	ResultList [][]byte `ssz-max:"4294967295,4294967295" ssz-size:"?,?"`
-}
-
-// HelloCommand (CommandOp.HELLO, 0x00) is the non-RPC Master↔Master handshake.
-type HelloCommand struct {
-	Version              uint32
-	NetworkID            uint64
-	PeerID               common.Hash
-	PeerIP               [UInt128Length]byte
-	PeerPort             uint16
-	RootBlockHeader      Data `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeader.
-	GenesisRootBlockHash common.Hash
 }
 
 // AddShardBlockHeaderRequest reports an accepted shard block to Master.
@@ -158,4 +147,79 @@ type GetRootChainStakesResponse struct {
 	ErrorCode uint32
 	Stakes    uint256.Int
 	Signer    common.Address
+}
+
+// =============================================================================
+// §2  P2P messages (cluster↔cluster)
+// =============================================================================
+
+// HelloCommand (CommandOp.HELLO, 0x00) is the non-RPC Master↔Master handshake.
+type HelloCommand struct {
+	Version              uint32
+	NetworkID            uint64
+	PeerID               common.Hash
+	PeerIP               [UInt128Length]byte
+	PeerPort             uint16
+	RootBlockHeader      Data `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeader.
+	GenesisRootBlockHash common.Hash
+}
+
+// NewTipCommand announces a root tip and, on a shard chain, a shard tip.
+type NewTipCommand struct {
+	RootTip  Data `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeader.
+	ShardTip Data `ssz-max:"4294967295"` // RLP-encoded types.Header; empty for root.
+}
+
+type NewTransactionsCommand struct {
+	Transactions Data `ssz-max:"4294967295"` // RLP-encoded types.Transactions.
+}
+
+// GetRootHeadersRequest selects a root-chain origin and supports skipping.
+// Type selects HeaderOriginHash or HeaderOriginHeight for Data.
+// Direction selects DirectionGenesis or DirectionTip.
+type GetRootHeadersRequest struct {
+	Type      uint8
+	Data      common.Hash
+	Limit     uint32
+	Skip      uint32
+	Direction uint8
+}
+
+type GetRootHeadersResponse struct {
+	RootTip Data   `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeader.
+	Headers []Data `ssz-max:"4294967295"` // SSZ-encoded RootBlockHeaders.
+}
+
+type GetRootBlocksRequest struct {
+	Hashes []common.Hash `ssz-max:"4294967295"`
+}
+
+// GetRootBlocksResponse carries SSZ-encoded QKC root blocks.
+type GetRootBlocksResponse struct {
+	Blocks []Data `ssz-max:"4294967295"`
+}
+
+// GetShardHeadersRequest selects an origin on the frame's destination chain.
+// Type selects HeaderOriginHash or HeaderOriginHeight for Data.
+// Direction selects DirectionGenesis or DirectionTip.
+type GetShardHeadersRequest struct {
+	Type      uint8
+	Data      common.Hash
+	Limit     uint32
+	Skip      uint32
+	Direction uint8
+}
+
+// GetShardHeadersResponse carries RLP-encoded geth headers.
+type GetShardHeadersResponse struct {
+	Headers []Data `ssz-max:"4294967295"`
+}
+
+type GetShardBlocksRequest struct {
+	Hashes []common.Hash `ssz-max:"4294967295"`
+}
+
+// GetShardBlocksResponse carries RLP-encoded geth blocks.
+type GetShardBlocksResponse struct {
+	Blocks []Data `ssz-max:"4294967295"`
 }

@@ -410,6 +410,35 @@ func TestOpSerializerFor_WireRegistry(t *testing.T) {
 	}
 }
 
+func TestP2POpSerializerFor_WireRegistry(t *testing.T) {
+	covered := make(map[wire.CommandOp]bool)
+	nonRPCOps := P2PNonRPCOps()
+	check := func(opcode byte, message wire.SSZMessage) {
+		registered, err := wire.NewCommandMessage(wire.CommandOp(opcode))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reflect.TypeOf(message) != reflect.TypeOf(registered) {
+			t.Errorf("opcode 0x%x: serializer creates %T, wire registry creates %T", opcode, message, registered)
+		}
+		covered[wire.CommandOp(opcode)] = true
+	}
+	for requestOp, serializer := range P2PSerializers() {
+		check(requestOp, serializer.NewRequest())
+		if _, nonRPC := nonRPCOps[requestOp]; !nonRPC {
+			check(serializer.ResponseOpCode, serializer.NewResponse())
+		}
+	}
+	for opcode := 0; opcode < int(wire.ClusterOpBase); opcode++ {
+		if wire.CommandOp(opcode) == wire.CommandOpHello {
+			continue
+		}
+		if _, err := wire.NewCommandMessage(wire.CommandOp(opcode)); err == nil && !covered[wire.CommandOp(opcode)] {
+			t.Errorf("opcode 0x%x has no serializer coverage", opcode)
+		}
+	}
+}
+
 // TestConfig_ValidationPanics covers config validation panics.
 func TestConfig_ValidationPanics(t *testing.T) {
 	tests := []struct {
@@ -418,6 +447,7 @@ func TestConfig_ValidationPanics(t *testing.T) {
 		want string
 	}{
 		{"nil transport", Config{}, "Transport"},
+		{"negative handler limit", Config{Transport: newFakeFrameTransport(), MaxConcurrentHandlers: -1}, "MaxConcurrentHandlers"},
 		{"nil serializer", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: nil}}, "serializer"},
 		{"nil handler", Config{Transport: newFakeFrameTransport(), Handlers: map[byte]TypedHandler{0x01: nil}}, "handler"},
 		{"handler without serializer", Config{Transport: newFakeFrameTransport(), Handlers: map[byte]TypedHandler{0x01: pongHandler()}}, "serializer for handler opcode"},
@@ -1585,6 +1615,92 @@ func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 
 	conn.Close()
 	wg.Wait()
+}
+
+func TestBaseConnHandlerLimitIncludesResponseWrite(t *testing.T) {
+	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: newFakeFrameTransport()}
+	tr.releaseWrite = make(chan struct{})
+	tr.writeStarted = make(chan struct{})
+	const op = byte(wire.ClusterOpPing)
+	var calls atomic.Int32
+	c := NewBaseConn(Config{
+		Transport:             tr,
+		Serializers:           pingSerializers,
+		MaxConcurrentHandlers: 1,
+		Handlers: map[byte]TypedHandler{op: func(wire.SSZMessage) (wire.SSZMessage, error) {
+			calls.Add(1)
+			return &wire.PongResponse{}, nil
+		}},
+	})
+	c.Start()
+	t.Cleanup(c.Close)
+
+	payload := validPingPayload(t)
+	feedFrame(t, tr.fakeFrameTransport, &wire.ClusterFrame{Opcode: op, RPCID: 1, Payload: payload})
+	receive(t, tr.writeStarted, "first response write")
+	feedFrame(t, tr.fakeFrameTransport, &wire.ClusterFrame{Opcode: op, RPCID: 2, Payload: payload})
+	awaitClosed(t, c, "request received while the response write occupied the only handler slot")
+	c.WaitHandlers()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("handle calls = %d, want 1", got)
+	}
+}
+
+func TestBaseConnHandlerLimitKeepsRoutingActiveAndReleasesSlot(t *testing.T) {
+	tr := newFakeFrameTransport()
+	const requestOp, responseOp = byte(wire.ClusterOpPing), byte(wire.ClusterOpPong)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	forwarded := make(chan wire.Frame, 1)
+	c := NewBaseConn(Config{
+		Transport:             tr,
+		Serializers:           pingSerializers,
+		MaxConcurrentHandlers: 1,
+		Handlers: map[byte]TypedHandler{requestOp: func(wire.SSZMessage) (wire.SSZMessage, error) {
+			entered <- struct{}{}
+			<-release
+			return &wire.PongResponse{}, nil
+		}},
+		Forwarder: func(frame wire.Frame) bool {
+			if frame.(*wire.ClusterFrame).ClusterPeerID == 0 {
+				return false
+			}
+			forwarded <- frame
+			return true
+		},
+	})
+	c.Start()
+	t.Cleanup(c.Close)
+	t.Cleanup(unblock)
+
+	payload := validPingPayload(t)
+	feedFrame(t, tr, &wire.ClusterFrame{Opcode: requestOp, RPCID: 1, Payload: payload})
+	receive(t, entered, "first inbound handler")
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.SendRPC(t.Context(), requestOp, &wire.PingRequest{})
+		result <- err
+	}()
+	outbound := receive(t, tr.writes, "outbound RPC")
+	routedFrame := &wire.ClusterFrame{ClusterPeerID: 1, Opcode: requestOp, RPCID: 2}
+	feedFrame(t, tr, routedFrame)
+	if got := receive(t, forwarded, "forwarded frame at capacity"); got != routedFrame {
+		t.Fatalf("forwarded frame = %v, want %v", got, routedFrame)
+	}
+	feedFrame(t, tr, &wire.ClusterFrame{Opcode: responseOp, RPCID: outbound.RPCID, Payload: validPongPayload(t)})
+	if err := receive(t, result, "outbound RPC response at capacity"); err != nil {
+		t.Fatal(err)
+	}
+
+	unblock()
+	receive(t, tr.writes, "first inbound RPC response")
+	c.handlers.Wait()
+	feedFrame(t, tr, &wire.ClusterFrame{Opcode: requestOp, RPCID: 2, Payload: payload})
+	if got := receive(t, tr.writes, "response after reusing the slot"); got.Opcode != responseOp || got.RPCID != 2 {
+		t.Fatalf("unexpected response: opcode %#x, rpc ID %d", got.Opcode, got.RPCID)
+	}
 }
 
 // TestBaseConn_LateHandlerCompletedAfterClose: a handler finishing after Close

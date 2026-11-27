@@ -136,6 +136,7 @@ type BaseConn struct {
 	// -- Synchronization primitives --
 	shutdownOnce sync.Once
 	handlers     sync.WaitGroup
+	handlerSlots chan struct{} // nil for unlimited dispatch
 	// activeChan signals that startup has completed. The connection may be ACTIVE
 	// or already closed; callers must check IsActive().
 	activeChan chan struct{}
@@ -188,6 +189,9 @@ func NewBaseConn(cfg Config) *BaseConn {
 		pending:             make(map[uint64]*pendingRPC),
 		state:               ConnectionStateConnecting,
 		log:                 logger,
+	}
+	if cfg.MaxConcurrentHandlers > 0 {
+		rc.handlerSlots = make(chan struct{}, cfg.MaxConcurrentHandlers)
 	}
 	return rc
 }
@@ -555,10 +559,19 @@ func (c *BaseConn) handleRequest(frame wire.Frame, handler TypedHandler, ser *Op
 		c.mu.Unlock()
 		return
 	}
+	if c.handlerSlots != nil {
+		select {
+		case c.handlerSlots <- struct{}{}:
+		default:
+			c.mu.Unlock()
+			c.shutdown(fmt.Errorf("concurrent handler limit reached (%d)", cap(c.handlerSlots)))
+			return
+		}
+	}
+
 	c.handlers.Add(1)
 	c.mu.Unlock()
 
-	// TODO: Bound concurrent handler dispatches to prevent unbounded goroutines.
 	go c.dispatch(frame, handler, ser)
 }
 
@@ -566,6 +579,9 @@ func (c *BaseConn) handleRequest(frame wire.Frame, handler TypedHandler, ser *Op
 
 func (c *BaseConn) dispatch(frame wire.Frame, handler TypedHandler, ser *OpSerializer) {
 	defer c.handlers.Done()
+	if c.handlerSlots != nil {
+		defer func() { <-c.handlerSlots }()
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			c.shutdown(fmt.Errorf("handler panic (opcode=0x%x): %v", frame.GetOpcode(), recovered))

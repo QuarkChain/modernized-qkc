@@ -30,8 +30,10 @@ import (
 type Direction uint8
 
 const (
+	// DirectionGenesis walks toward lower block heights.
 	DirectionGenesis Direction = 0
-	DirectionTip     Direction = 1
+	// DirectionTip walks toward higher block heights.
+	DirectionTip Direction = 1
 )
 
 func (d Direction) String() string {
@@ -44,6 +46,15 @@ func (d Direction) String() string {
 		return fmt.Sprintf("Direction(%d)", uint8(d))
 	}
 }
+
+// Header origin types match the root and minor block header requests with skip
+// in quarkchain/cluster/p2p_commands.py.
+const (
+	// HeaderOriginHash interprets Data as a block hash.
+	HeaderOriginHash uint8 = 0
+	// HeaderOriginHeight interprets Data as a big-endian block height.
+	HeaderOriginHeight uint8 = 1
+)
 
 // SSZMessage is implemented by every wire message after sszgen runs.
 type SSZMessage interface {
@@ -97,6 +108,26 @@ func NewCommandMessage(op CommandOp) (SSZMessage, error) {
 	switch op {
 	case CommandOpHello:
 		return &HelloCommand{}, nil
+	case CommandOpNewTip:
+		return &NewTipCommand{}, nil
+	case CommandOpNewTransactions:
+		return &NewTransactionsCommand{}, nil
+	case CommandOpGetRootHeadersRequest:
+		return &GetRootHeadersRequest{}, nil
+	case CommandOpGetRootHeadersResponse:
+		return &GetRootHeadersResponse{}, nil
+	case CommandOpGetRootBlocksRequest:
+		return &GetRootBlocksRequest{}, nil
+	case CommandOpGetRootBlocksResponse:
+		return &GetRootBlocksResponse{}, nil
+	case CommandOpGetShardHeadersRequest:
+		return &GetShardHeadersRequest{}, nil
+	case CommandOpGetShardHeadersResponse:
+		return &GetShardHeadersResponse{}, nil
+	case CommandOpGetShardBlocksRequest:
+		return &GetShardBlocksRequest{}, nil
+	case CommandOpGetShardBlocksResponse:
+		return &GetShardBlocksResponse{}, nil
 	default:
 		return nil, fmt.Errorf("unknown CommandOp: 0x%x", op)
 	}

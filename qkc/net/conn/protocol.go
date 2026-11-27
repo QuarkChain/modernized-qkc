@@ -40,6 +40,29 @@ func ClusterSerializers() map[byte]*OpSerializer {
 	}
 }
 
+// P2PSerializers returns an independent registry for peer commands and RPCs
+// after handshake. HELLO is excluded because the service exchanges and validates
+// it directly before constructing PeerConn.
+func P2PSerializers() map[byte]*OpSerializer {
+	return map[byte]*OpSerializer{
+		byte(wire.CommandOpNewTip):                 OpSerializerFor[wire.NewTipCommand, wire.NewTipCommand](byte(wire.CommandOpNewTip)),
+		byte(wire.CommandOpNewTransactions):        OpSerializerFor[wire.NewTransactionsCommand, wire.NewTransactionsCommand](byte(wire.CommandOpNewTransactions)),
+		byte(wire.CommandOpGetRootHeadersRequest):  OpSerializerFor[wire.GetRootHeadersRequest, wire.GetRootHeadersResponse](byte(wire.CommandOpGetRootHeadersResponse)),
+		byte(wire.CommandOpGetRootBlocksRequest):   OpSerializerFor[wire.GetRootBlocksRequest, wire.GetRootBlocksResponse](byte(wire.CommandOpGetRootBlocksResponse)),
+		byte(wire.CommandOpGetShardHeadersRequest): OpSerializerFor[wire.GetShardHeadersRequest, wire.GetShardHeadersResponse](byte(wire.CommandOpGetShardHeadersResponse)),
+		byte(wire.CommandOpGetShardBlocksRequest):  OpSerializerFor[wire.GetShardBlocksRequest, wire.GetShardBlocksResponse](byte(wire.CommandOpGetShardBlocksResponse)),
+	}
+}
+
+// P2PNonRPCOps returns the peer opcodes that do not expect a response after
+// handshake. HELLO is excluded for the same reason as in P2PSerializers.
+func P2PNonRPCOps() map[byte]struct{} {
+	return map[byte]struct{}{
+		byte(wire.CommandOpNewTip):          {},
+		byte(wire.CommandOpNewTransactions): {},
+	}
+}
+
 // NewMasterSlaveTransport creates a cluster frame transport with peer IDs.
 // On error the caller retains ownership of nc.
 func NewMasterSlaveTransport(nc net.Conn) (FrameTransport, error) {

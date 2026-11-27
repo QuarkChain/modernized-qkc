@@ -22,8 +22,8 @@ package wire
 //   - ClusterOp: cluster RPC opcodes (Master ↔ slave, slave ↔ slave),
 //     0x80–0xFF, defined relative to ClusterOpBase.
 //
-// The currently defined set includes cluster connection and chain business
-// opcodes plus the initial peer handshake. Add opcodes as operations are
+// The currently defined set includes cluster RPCs, the peer handshake, and
+// peer commands and queries. Add opcodes as operations are
 // introduced, assigning unique values within the appropriate range. Opcode
 // ranges identify operation families, not frame types: a peer command keeps
 // its CommandOp when relayed through a ClusterFrame to a slave or virtual peer
@@ -71,7 +71,17 @@ type CommandOp byte
 
 const (
 	// CommandOpHello is the P2P connection handshake opcode.
-	CommandOpHello CommandOp = 0x00
+	CommandOpHello                   CommandOp = 0x00
+	CommandOpNewTip                  CommandOp = 0x01
+	CommandOpNewTransactions         CommandOp = 0x02
+	CommandOpGetRootBlocksRequest    CommandOp = 0x07
+	CommandOpGetRootBlocksResponse   CommandOp = 0x08
+	CommandOpGetShardBlocksRequest   CommandOp = 0x09
+	CommandOpGetShardBlocksResponse  CommandOp = 0x0a
+	CommandOpGetRootHeadersRequest   CommandOp = 0x10
+	CommandOpGetRootHeadersResponse  CommandOp = 0x11
+	CommandOpGetShardHeadersRequest  CommandOp = 0x13
+	CommandOpGetShardHeadersResponse CommandOp = 0x14
 )
 
 // =============================================================================

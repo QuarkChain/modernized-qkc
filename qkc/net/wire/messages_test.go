@@ -18,6 +18,7 @@ package wire
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/big"
 	"reflect"
@@ -69,12 +70,94 @@ func TestNewClusterMessageRegistry(t *testing.T) {
 }
 
 func TestNewCommandMessageRegistry(t *testing.T) {
-	msg, err := NewCommandMessage(CommandOpHello)
-	if err != nil {
-		t.Fatalf("NewCommandMessage(Hello): %v", err)
+	cases := []struct {
+		op   CommandOp
+		want SSZMessage
+	}{
+		{CommandOpHello, &HelloCommand{}},
+		{CommandOpNewTip, &NewTipCommand{}},
+		{CommandOpNewTransactions, &NewTransactionsCommand{}},
+		{CommandOpGetRootBlocksRequest, &GetRootBlocksRequest{}},
+		{CommandOpGetRootBlocksResponse, &GetRootBlocksResponse{}},
+		{CommandOpGetShardBlocksRequest, &GetShardBlocksRequest{}},
+		{CommandOpGetShardBlocksResponse, &GetShardBlocksResponse{}},
+		{CommandOpGetRootHeadersRequest, &GetRootHeadersRequest{}},
+		{CommandOpGetRootHeadersResponse, &GetRootHeadersResponse{}},
+		{CommandOpGetShardHeadersRequest, &GetShardHeadersRequest{}},
+		{CommandOpGetShardHeadersResponse, &GetShardHeadersResponse{}},
 	}
-	if _, ok := msg.(*HelloCommand); !ok {
-		t.Fatalf("NewCommandMessage(Hello) = %T, want *HelloCommand", msg)
+	for _, entry := range cases {
+		message, err := NewCommandMessage(entry.op)
+		if err != nil {
+			t.Fatalf("NewCommandMessage(0x%02x): %v", byte(entry.op), err)
+		}
+		if reflect.TypeOf(message) != reflect.TypeOf(entry.want) {
+			t.Fatalf("NewCommandMessage(0x%02x) = %T, want %T", byte(entry.op), message, entry.want)
+		}
+	}
+	if _, err := NewCommandMessage(CommandOp(0x03)); err == nil {
+		t.Fatal("NewCommandMessage: unknown opcode must be rejected")
+	}
+}
+
+func TestP2PMessagesSSZ(t *testing.T) {
+	registered := 0
+	for opcode := 0; opcode < int(ClusterOpBase); opcode++ {
+		message, err := NewCommandMessage(CommandOp(opcode))
+		if err != nil {
+			continue
+		}
+		registered++
+		t.Run(fmt.Sprintf("%02x/%T", opcode, message), func(t *testing.T) {
+			roundTripSSZ(t, message)
+			encoded := mustMarshalSSZ(t, message)
+			if len(encoded) > 0 {
+				if err := message.UnmarshalSSZ(encoded[:len(encoded)-1]); err == nil {
+					t.Fatal("accepted truncated P2P message")
+				}
+			}
+		})
+	}
+	if registered == 0 {
+		t.Fatal("no P2P messages registered")
+	}
+}
+
+func TestP2PMessagePayloads(t *testing.T) {
+	rootQueryGolden := make([]byte, 42)
+	rootQueryGolden[1] = 0xaa
+	rootQueryGolden[33], rootQueryGolden[37], rootQueryGolden[41] = 2, 3, 1
+	shardQueryGolden := make([]byte, 42)
+	shardQueryGolden[0], shardQueryGolden[32] = 1, 7
+	shardQueryGolden[33], shardQueryGolden[37], shardQueryGolden[41] = 2, 3, 1
+	for _, entry := range []struct {
+		message SSZMessage
+		golden  []byte
+	}{
+		{&NewTipCommand{RootTip: Data{0xaa}}, []byte{8, 0, 0, 0, 9, 0, 0, 0, 0xaa}},
+		{&NewTransactionsCommand{Transactions: Data{0xc0}}, []byte{4, 0, 0, 0, 0xc0}},
+		{&GetRootHeadersRequest{Type: HeaderOriginHash, Data: common.Hash{0xaa}, Limit: 2, Skip: 3, Direction: uint8(DirectionTip)}, rootQueryGolden},
+		{&GetShardHeadersRequest{Type: HeaderOriginHeight, Data: common.Hash{31: 7}, Limit: 2, Skip: 3, Direction: uint8(DirectionTip)}, shardQueryGolden},
+		{&GetRootHeadersResponse{RootTip: Data{1}, Headers: []Data{{2}, {3}}}, nil},
+		{&GetShardHeadersResponse{Headers: []Data{{3}}}, []byte{4, 0, 0, 0, 4, 0, 0, 0, 3}},
+		{&GetRootBlocksRequest{Hashes: []common.Hash{{1}, {2}}}, nil},
+		{&GetRootBlocksResponse{Blocks: []Data{{1}, {2}}}, nil},
+		{&GetShardBlocksRequest{}, []byte{4, 0, 0, 0}},
+		{&GetShardBlocksResponse{}, []byte{4, 0, 0, 0}},
+	} {
+		t.Run(fmt.Sprintf("%T", entry.message), func(t *testing.T) {
+			roundTripSSZ(t, entry.message)
+			encoded, err := entry.message.MarshalSSZ()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entry.golden != nil && !bytes.Equal(encoded, entry.golden) {
+				t.Fatalf("encoding %x, want %x", encoded, entry.golden)
+			}
+		})
+	}
+	if err := new(NewTipCommand).UnmarshalSSZ([]byte{0, 0, 0, 0, 8, 0, 0, 0}); err == nil {
+		t.Fatal("accepted invalid tip offset")
 	}
 }
 
