@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"net"
 	"os"
 	"reflect"
@@ -148,6 +149,42 @@ func (t *fakeFrameTransport) closes() int {
 	t.closeMu.Lock()
 	defer t.closeMu.Unlock()
 	return t.closeCount
+}
+
+type fakeP2PFrameTransport struct {
+	*fakeFrameTransport
+	frames chan *wire.P2PFrame
+	writes chan *wire.P2PFrame
+}
+
+func newFakeP2PFrameTransport() *fakeP2PFrameTransport {
+	return &fakeP2PFrameTransport{
+		fakeFrameTransport: newFakeFrameTransport(),
+		frames:             make(chan *wire.P2PFrame, 8),
+		writes:             make(chan *wire.P2PFrame, 8),
+	}
+}
+
+func (t *fakeP2PFrameTransport) ReadFrame() (wire.Frame, error) {
+	select {
+	case frame := <-t.frames:
+		return frame, nil
+	case <-t.closed:
+		return nil, io.EOF
+	}
+}
+
+func (t *fakeP2PFrameTransport) WriteFrame(value wire.Frame) error {
+	frame, ok := value.(*wire.P2PFrame)
+	if !ok || frame == nil {
+		return fmt.Errorf("%w: expected P2P frame, got %T", wire.ErrInvalidFrame, value)
+	}
+	select {
+	case t.writes <- frame:
+		return nil
+	case <-t.closed:
+		return errors.New("fake transport closed")
+	}
 }
 
 // staticReaderTransport feeds wire.ReadClusterFrame from a fixed byte stream (clean
@@ -1800,6 +1837,71 @@ func TestBaseConn_SendRPCZeroPeerID(t *testing.T) {
 	}
 	if _, ok := res.resp.(*wire.PongResponse); !ok {
 		t.Fatalf("expected *wire.PongResponse, got %T", res.resp)
+	}
+}
+
+func TestBaseConn_SendP2PRPC(t *testing.T) {
+	clientTransport := newFakeP2PFrameTransport()
+	serverTransport := newFakeP2PFrameTransport()
+	client := newPingConn(clientTransport)
+	server := newPingServerConn(serverTransport)
+	client.Start()
+	server.Start()
+	defer client.Close()
+	defer server.Close()
+
+	chainID := big.NewInt(0x01020304)
+	for _, rpcID := range []uint64{1, 2} {
+		result := make(chan rpcResult, 1)
+		go func() {
+			resp, err := client.SendP2PRPC(context.Background(), chainID, byte(wire.ClusterOpPing), &wire.PingRequest{ChainID: uint256.Int{1}})
+			result <- rpcResult{resp: resp, err: err}
+		}()
+
+		request := receive(t, clientTransport.writes, "P2P RPC request")
+		if request.ChainID == nil || request.ChainID.Cmp(chainID) != 0 || request.Opcode != byte(wire.ClusterOpPing) || request.RPCID != rpcID {
+			t.Fatalf("unexpected P2P RPC request frame: %+v", request)
+		}
+		if !bytes.Equal(request.Payload, validPingPayload(t)) {
+			t.Fatalf("unexpected P2P RPC request payload: %x", request.Payload)
+		}
+		serverTransport.frames <- request
+
+		response := receive(t, serverTransport.writes, "P2P RPC response")
+		if response.ChainID == nil || response.ChainID.Cmp(chainID) != 0 || response.Opcode != byte(wire.ClusterOpPong) || response.RPCID != request.RPCID {
+			t.Fatalf("unexpected P2P RPC response frame: %+v", response)
+		}
+		if !bytes.Equal(response.Payload, validPongPayload(t)) {
+			t.Fatalf("unexpected P2P RPC response payload: %x", response.Payload)
+		}
+		clientTransport.frames <- response
+
+		res := receive(t, result, "P2P RPC result")
+		if res.err != nil {
+			t.Fatalf("SendP2PRPC failed: %v", res.err)
+		}
+		if _, ok := res.resp.(*wire.PongResponse); !ok {
+			t.Fatalf("expected *wire.PongResponse, got %T", res.resp)
+		}
+	}
+}
+
+func TestBaseConn_SendP2PCommand(t *testing.T) {
+	transport := newFakeP2PFrameTransport()
+	conn := newConnWithHello(transport)
+	conn.Start()
+	defer conn.Close()
+
+	chainID := big.NewInt(0x01020304)
+	if err := conn.SendP2PCommand(chainID, byte(wire.CommandOpHello), &wire.HelloCommand{}); err != nil {
+		t.Fatalf("SendP2PCommand failed: %v", err)
+	}
+	command := receive(t, transport.writes, "P2P command")
+	if command.ChainID == nil || command.ChainID.Cmp(chainID) != 0 || command.Opcode != byte(wire.CommandOpHello) || command.RPCID != 0 {
+		t.Fatalf("unexpected P2P command frame: %+v", command)
+	}
+	if !bytes.Equal(command.Payload, validHelloPayload(t)) {
+		t.Fatalf("unexpected P2P command payload: %x", command.Payload)
 	}
 }
 
