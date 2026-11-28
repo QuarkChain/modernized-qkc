@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"reflect"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -31,7 +32,8 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
@@ -98,8 +100,17 @@ type rootDB struct {
 	hasErr         error
 	nextRead       func() ([]byte, error)
 	putErr         error
+	putKey         string
 	batchErr       error
 	batchDeleteErr error
+	deleteErr      error
+}
+
+func (db *rootDB) Delete(key []byte) error {
+	if db.deleteErr != nil {
+		return db.deleteErr
+	}
+	return db.Database.Delete(key)
 }
 
 func (db *rootDB) NewBatch() ethdb.Batch {
@@ -112,7 +123,7 @@ type rootBatch struct {
 }
 
 func (b *rootBatch) Put(key, value []byte) error {
-	if b.db.putErr != nil {
+	if b.db.putErr != nil && (b.db.putKey == "" || b.db.putKey == string(key)) {
 		return b.db.putErr
 	}
 	return b.Batch.Put(key, value)
@@ -576,18 +587,14 @@ func TestRootInitGenesis(t *testing.T) {
 	}
 }
 
-// PING carries the complete persisted tip. Legacy markers are ignored, even
-// when they reference a missing block, and startup does not broadcast roots.
+// Without pending broadcasts, PING carries the complete persisted tip and
+// startup does not broadcast roots.
 func TestRootInitUsesPersistedTip(t *testing.T) {
 	f := newRootEnv(t)
 	a := f.block(f.genesis, 1)
 	f.store(a, true)
 	b := f.block(a, 2).WithBody(nil, []byte("persisted tip"))
 	f.store(b, true)
-	legacyKey, legacyHash := []byte("qkc_root_committing"), common.Hash{0xff}
-	if err := f.db.Put(legacyKey, legacyHash.Bytes()); err != nil {
-		t.Fatal(err)
-	}
 	c := f.open()
 	if c.RootTip().Hash() != b.Hash() || c.Ready() || len(f.client.calls) != 0 {
 		t.Fatal("local recovery did not select the persisted tip before cluster initialization")
@@ -603,9 +610,6 @@ func TestRootInitUsesPersistedTip(t *testing.T) {
 	}
 	if len(f.client.calls) != 1 || f.client.calls[0] != "ping" || len(f.client.broadcasts) != 0 {
 		t.Fatal("startup must only initialize shards with PING at the persisted tip")
-	}
-	if data, err := f.db.Get(legacyKey); err != nil || common.BytesToHash(data) != legacyHash {
-		t.Fatal("startup modified the unused legacy marker", err)
 	}
 	if hash, err := qkcrawdb.ReadRootHeadBlockHash(f.db); err != nil || hash != b.Hash() {
 		t.Fatal("startup changed the persisted head", err)
@@ -931,7 +935,7 @@ func TestRootChainStakeQuery(t *testing.T) {
 	if !errors.Is(rpcCtx.Err(), context.Canceled) {
 		t.Fatal("stake query context leaked after returning")
 	}
-	failure := &clusternet.RemoteError{Code: 7}
+	failure := &wire.RemoteError{Code: 7}
 	for _, stage := range []string{"zero", "missing response", "missing stakes", "rpc error"} {
 		f.client.onStakes = func(context.Context, *big.Int, common.Address, common.Hash) (*clusternet.RootChainStakesResult, error) {
 			switch stage {
@@ -954,7 +958,7 @@ func TestRootChainStakeQuery(t *testing.T) {
 			t.Fatal("missing or failed stake response accepted", stage, amount, err)
 		}
 		if stage == "rpc error" {
-			var remote *clusternet.RemoteError
+			var remote *wire.RemoteError
 			if !errors.As(err, &remote) || remote.Code != failure.Code {
 				t.Fatal("remote error code lost after wrapping", err)
 			}
@@ -998,6 +1002,107 @@ func TestRootChainStakeQueryCancellation(t *testing.T) {
 					}
 				}
 			})
+		})
+	}
+}
+
+// Interrupted delivery can leave either the canonical tip or a side root pending.
+// PING covers the former; the latter must replay before readiness is published.
+func TestRootCommittingRecovery(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		name := "canonical tip"
+		if side {
+			name = "side root"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRootEnv(t)
+			tip := f.block(f.genesis, 1)
+			f.store(tip, true)
+			pending := tip
+			if side {
+				pending = f.block(f.genesis, 3)
+				f.store(pending, false)
+			}
+			if err := qkcrawdb.WriteRootCommittingHash(f.db, pending.Hash()); err != nil {
+				t.Fatal(err)
+			}
+			f.chain.Close()
+			f.chain = f.open()
+			f.client.onPing = func(_ context.Context, block *types.RootBlock) error {
+				if block.Hash() != tip.Hash() || f.chain.Ready() {
+					t.Fatal("PING did not initialize the persisted tip before replay")
+				}
+				return nil
+			}
+			f.client.onBroadcast = func(_ context.Context, block *types.RootBlock) error {
+				if !reflect.DeepEqual(f.client.calls, []string{"ping", "broadcast"}) || block.Hash() != pending.Hash() || f.chain.Ready() {
+					t.Fatal("pending root was not replayed after PING and before readiness")
+				}
+				if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != pending.Hash() {
+					t.Fatal("recovery marker cleared before acknowledgement", hash, err)
+				}
+				return nil
+			}
+			if err := f.chain.Init(); err != nil || !f.chain.Ready() {
+				t.Fatal("recovery failed:", err)
+			}
+			want := []string{"ping"}
+			if side {
+				want = append(want, "broadcast")
+			}
+			if !reflect.DeepEqual(f.client.calls, want) || f.chain.RootTip().Hash() != tip.Hash() {
+				t.Fatal("unexpected recovery calls or tip", f.client.calls)
+			}
+			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != (common.Hash{}) {
+				t.Fatal("recovery did not clear the marker", hash, err)
+			}
+		})
+	}
+}
+
+func TestRootCommittingRecoveryResults(t *testing.T) {
+	for _, stage := range []string{"missing block", "changed header", "corrupt block", "broadcast", "clear"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newRootEnv(t)
+			pending := f.block(f.genesis, 2)
+			if stage != "missing block" {
+				f.store(pending, false)
+			}
+			if err := qkcrawdb.WriteRootCommittingHash(f.db, pending.Hash()); err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("recovery failed")
+			switch stage {
+			case "changed header":
+				header := pending.Header()
+				header.Nonce++
+				changed := types.NewRootBlock(header, nil, nil)
+				// The replay hash check also covers values returned from the cache.
+				f.chain.blockCache.Add(pending.Hash(), changed)
+			case "corrupt block":
+				qkcrawdb.WriteRootBlock(f.db, pending.WithBody(f.genesis.ShardBlockHeaders(), nil))
+			case "broadcast":
+				f.client.broadcastErr = failure
+			case "clear":
+				f.db.deleteErr = failure
+			}
+			err := f.chain.Init()
+			if stage == "clear" {
+				if err != nil || !f.chain.Ready() {
+					t.Fatal("cleanup failure prevented successful recovery:", err)
+				}
+			} else {
+				if err == nil || (stage == "broadcast" && !errors.Is(err, failure)) {
+					t.Fatal("recovery failure lost:", err)
+				}
+				if f.chain.Ready() {
+					t.Fatal("failed recovery published readiness")
+				}
+			}
+			f.db.deleteErr = nil
+			if hash, err := qkcrawdb.ReadRootCommittingHash(f.db); err != nil || hash != pending.Hash() {
+				t.Fatal("failed recovery discarded the pending root", hash, err)
+			}
 		})
 	}
 }

@@ -25,7 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/holiman/uint256"
 )

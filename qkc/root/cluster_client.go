@@ -23,7 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 )
 
@@ -35,29 +35,27 @@ type ClusterClient interface {
 	// and waits for initialization at that root block to finish. Missing connections
 	// and RPC failures return errors. Receivers may already be initialized after
 	// partial success, so the caller must abort startup instead of repeating PING.
-	// TODO(shard): If the supplied root block is absent locally, restore its local
-	// direct parent, then import the supplied root block, rejecting missing data.
 	Ping(ctx context.Context, checkpoint *qkctypes.RootBlock) error
 
 	// BroadcastRootBlock sends block to every ShardNode in the cluster and waits
 	// for all acknowledgements. A send failure, a nonzero remote ErrorCode
-	// (returned as *clusternet.RemoteError), or a ShardNode without a connection is
+	// (returned as *wire.RemoteError), or a ShardNode without a connection is
 	// returned as an error, so a disconnected chain never silently misses the
-	// root block. Startup recovery uses Ping at the persisted root tip rather
-	// than a separate broadcast driven by a committing marker.
+	// root block. Startup first initializes the persisted tip with Ping, then
+	// replays a committing root through this method if it differs from the tip.
 	BroadcastRootBlock(ctx context.Context, block *qkctypes.RootBlock) error
 
 	// GetUnconfirmedHeaderList collects unconfirmed shard headers from the cluster,
 	// grouped by decimal chainID strings, for constructing a root block. Each shard's headers are
 	// ordered by increasing height. Master filters out headers not yet reported to
 	// it, as in pyquarkchain. A transport or RPC failure, a nonzero remote ErrorCode
-	// (returned as *clusternet.RemoteError), or a missing connection is returned as an
+	// (returned as *wire.RemoteError), or a missing connection is returned as an
 	// error rather than silently omitting headers.
 	GetUnconfirmedHeaderList(ctx context.Context) (map[string][]*types.Header, error)
 
 	// GetRootChainStakes asks chainID for the stakes recorded for address at
 	// shardBlockHash. The result is the decoded business response after a
 	// completed RPC. err reports a transport or RPC failure, or a nonzero remote
-	// ErrorCode as *clusternet.RemoteError.
+	// ErrorCode as *wire.RemoteError.
 	GetRootChainStakes(ctx context.Context, chainID *big.Int, address common.Address, shardBlockHash common.Hash) (*clusternet.RootChainStakesResult, error)
 }

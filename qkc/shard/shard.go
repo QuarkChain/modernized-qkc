@@ -30,13 +30,14 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
+	"github.com/ethereum/go-ethereum/qkc/mining"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
 )
 
-var _ MinerBackend = (*Shard)(nil)
+var _ mining.MinerBackend = (*Shard)(nil)
 
 // Shard imports blocks, sends cross-shard lists and reports headers to master.
 // ShardChain handles chain rules, root confirmations, and head selection.
@@ -92,7 +93,11 @@ func (s *Shard) Init(root *qkctypes.RootBlock) error {
 // coinbase, and returns the adjusted difficulty its seal must meet.
 // It reuses the chain's bound builder. Like pyquarkchain, the timestamp follows
 // the parent even when its next second is ahead of the clock.
+// TODO(cluster): Also require master-reported readiness once the notification exists.
 func (s *Shard) CreateBlockToMine(ctx context.Context, coinbase common.Address) (*types.Block, *big.Int, error) {
+	if s.chain.RootTip() == nil {
+		return nil, nil, ErrRootChainUninitialized
+	}
 	bc := s.chain.chain
 	parent := bc.CurrentBlock()
 	block, err := s.chain.BuildBlock(ctx, miner.QKCBlockArgs{

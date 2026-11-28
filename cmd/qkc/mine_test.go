@@ -46,7 +46,7 @@ func m1TestConfig(t *testing.T, chainID int) string {
 	dir := t.TempDir()
 	text := string(data)
 	text = strings.Replace(text, "[Eth]", "[Eth]\nDatabaseCache = 16\nTrieCleanCache = 16\nTrieDirtyCache = 16\nSnapshotCache = 0", 1)
-	text = strings.Replace(text, fmt.Sprintf("DataDir = %q", fmt.Sprintf("./qkc-data/shard-%d", chainID)), fmt.Sprintf("DataDir = %q", dir), 1)
+	text = strings.Replace(text, fmt.Sprintf("DataDir = %q", fmt.Sprintf("./qkc-data/devnet/shard-%d", chainID)), fmt.Sprintf("DataDir = %q", dir), 1)
 	text = strings.Replace(text, fmt.Sprintf("IPCPath = %q", fmt.Sprintf("qkc-shard-%d.ipc", chainID)), `IPCPath = ""`, 1)
 	text = strings.Replace(text, fmt.Sprintf("HTTPPort = %d", 18545+chainID-100001), "HTTPPort = 0", 1)
 	path := filepath.Join(dir, "shard.toml")

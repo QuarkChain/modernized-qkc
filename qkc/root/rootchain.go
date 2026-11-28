@@ -31,6 +31,7 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/internal/syncx"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/types"
@@ -87,12 +88,13 @@ type RootChain struct {
 
 var _ posw.RootChainReader = (*RootChain)(nil)
 
-// New recovers the persisted root head as the runtime tip, as in goquarkchain,
-// without rewinding or changing the stored head.
+// New recovers the persisted root head as the runtime tip without rewinding
+// or changing the stored head.
 // It binds the supplied client and engine without taking ownership of them or
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // backendCtx controls RootChain's lifetime and is canceled only by the backend.
-// Genesis, canonical indices and cumulative confirmations must already be stored.
+// Call SetupRootGenesisBlock first and use its returned config for both the
+// engine and this chain. Genesis and recovery records must already be stored.
 func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
 	if backendCtx == nil || config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing backend context, root configuration, cluster client, database or engine")
@@ -100,10 +102,6 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	if err := backendCtx.Err(); err != nil {
 		return nil, err
 	}
-	// TODO(backend): Add SetupRootGenesisBlock and call it before New to set up
-	// genesis. For an empty database, atomically store genesis, its cumulative shard
-	// confirmations, the canonical index and root head. For an initialized database,
-	// validate genesis without replacing the persisted head.
 	hash, err := rawdb.ReadRootHeadBlockHash(db)
 	if err != nil {
 		return nil, fmt.Errorf("read persisted root head: %w", err)
@@ -195,12 +193,9 @@ func (c *RootChain) readConfirmations(hash common.Hash) (map[string]common.Hash,
 // from it. Otherwise, they must restore its locally stored direct parent, then
 // import the supplied root block through the normal root-block path. Missing
 // parents or required shard blocks, state or cross-shard data must return an error.
-// TODO(shard): Implement recovery when the supplied root block is absent locally;
-// ShardChain.Init currently requires non-genesis roots and their confirmations
-// to already be stored locally.
 // Connections must be ready before this call. Init records initialization after
-// all shards succeed, using backendCtx for PING cancellation. Ready becomes true
-// only while backendCtx is active and the chain is not stopping.
+// PING and any pending side-root broadcast succeed. Marker cleanup is best-effort.
+// Ready becomes true only while backendCtx is active and not stopping.
 // On failure, the backend must abort startup and stop the node.
 // Do not retry Init: shards may already have handled PING. Recovery requires
 // a cluster restart. Repeating a successful Init is a no-op until the chain stops;
@@ -231,7 +226,57 @@ func (c *RootChain) Init() error {
 	if err := c.client.Ping(c.backendCtx, block); err != nil {
 		return fmt.Errorf("initialize shards: %w", err)
 	}
+	if err := c.replayCommittingBlock(block.Hash()); err != nil {
+		// PING or replay may already have changed shards. Keep the marker and
+		// require a fresh cluster lifetime instead of repeating initialization.
+		c.stopping.Store(true)
+		return err
+	}
 	c.initialized.Store(true)
+	return nil
+}
+
+// replayCommittingBlock requires chainmu and runs after every shard accepts tip.
+// PING already covers a committing tip; a side root still needs an explicit RPC.
+func (c *RootChain) replayCommittingBlock(tip common.Hash) error {
+	committingHash, err := rawdb.ReadRootCommittingHash(c.db)
+	if err != nil {
+		return fmt.Errorf("read committing root: %w", err)
+	}
+	if committingHash == (common.Hash{}) {
+		return nil
+	}
+	// PING already recovered the canonical tip on every shard. Only a pending
+	// side-chain root, whose hash differs from the tip, still needs a broadcast.
+	if committingHash != tip {
+		block, err := c.GetRootBlock(committingHash)
+		if err != nil {
+			return err
+		}
+		if block == nil {
+			// The block and committing marker are persisted in one batch. A
+			// marker without a readable block indicates missing or corrupt data;
+			// keep it and fail recovery rather than hide the inconsistency.
+			return fmt.Errorf("%w: committing root %x", ErrRootDataMissing, committingHash)
+		}
+		if block.Hash() != committingHash {
+			return fmt.Errorf("committing root hash mismatch: have %x, want %x", block.Hash(), committingHash)
+		}
+		// Stored blocks were validated at insertion. Replay only checks that
+		// the block hash and body still match their persisted commitments.
+		if types.CalcShardHeaderHash(block.ShardBlockHeaders()) != block.ShardHeaderHash() {
+			return fmt.Errorf("committing root %x shard header commitment mismatch", committingHash)
+		}
+		if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
+			return fmt.Errorf("replay committing root %x: %w", committingHash, err)
+		}
+	}
+	// Clear the marker in both cases: a committing tip was acknowledged by
+	// PING, while a side-chain root was acknowledged by the replay above.
+	// A cleanup failure only leaves an acknowledged block for safe replay.
+	if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
+		log.Warn("Failed to clear committing root", "root", committingHash, "err", err)
+	}
 	return nil
 }
 
@@ -313,6 +358,11 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 			return fmt.Errorf("store root head: %w", err)
 		}
 	}
+	// Every broadcast, including a side root or a known block, must be
+	// recoverable once its local commit succeeds. Never publish the marker alone.
+	if err := rawdb.WriteRootCommittingHash(batch, hash); err != nil {
+		return fmt.Errorf("store committing root: %w", err)
+	}
 	// Validation and batch preparation may outlive backendCtx. Check again before
 	// committing so an already canceled import leaves DB and runtime tip unchanged.
 	// Once the batch succeeds, publish the tip without another cancellation check.
@@ -328,17 +378,17 @@ func (c *RootChain) InsertBlock(block *types.RootBlock) error {
 	}
 	// Keep serialization through delivery so another insertion cannot overtake
 	// this block's broadcast.
-	// TODO(recovery): Init sends only the persisted canonical tip, so a shard
-	// missing a side-chain root after interrupted delivery may reject its children
-	// after restart. Persist pending delivery atomically with the local commit,
-	// clear it only after all shards acknowledge, and replay it during Init before
-	// publishing Ready, including when the pending block did not update the tip.
 	if err := c.client.BroadcastRootBlock(c.backendCtx, block); err != nil {
 		// The communication layer requests master shutdown on connection failure.
 		// Some shards may already have advanced. Prevent further writes and
 		// reinitialization until the cluster restarts from the persisted tip.
 		c.stopping.Store(true)
 		return fmt.Errorf("broadcast root block: %w", err)
+	}
+	if err := rawdb.DeleteRootCommittingHash(c.db); err != nil {
+		// Every shard acknowledged this block. A stale marker can be safely
+		// replayed after restart or overwritten by the next local commit.
+		log.Warn("Failed to clear committing root", "root", hash, "err", err)
 	}
 	return nil
 }
@@ -539,8 +589,6 @@ func (c *RootChain) AddShardBlockHeader(_ *big.Int, header *coretypes.Header, am
 
 // AddShardBlockCoinbaseAmount stores reported after-tax income; the caller
 // verifies the source. It avoids chainmu so reports can proceed during RPCs.
-// TODO(backend): Stop the cluster client via masternet.Service.Stop, rejecting
-// new requests and draining AddShardBlockHeader writes before RootChain.Close.
 func (c *RootChain) AddShardBlockCoinbaseAmount(hash common.Hash, amount *uint256.Int) error {
 	if err := rawdb.WriteShardBlockCoinbaseAmount(c.db, hash, amount); err != nil {
 		return fmt.Errorf("store shard coinbase amount %x: %w", hash, err)
