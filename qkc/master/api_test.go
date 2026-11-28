@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/qkc/config"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -112,9 +113,9 @@ func TestAPIBackendQueries(t *testing.T) {
 
 // Build valid root fixtures through the existing builder, without adding a
 // master mining API or bypassing consensus validation on import.
-func nextAPITestBlock(t *testing.T, b *Backend, cfg *Config) *qkctypes.RootBlock {
+func nextAPITestBlock(t *testing.T, b *Backend, cfg *config.RootConfig) *qkctypes.RootBlock {
 	t.Helper()
-	builder, err := root.NewRootBlockBuilder(cfg.Chain, b.chain, b.engine, nil)
+	builder, err := root.NewRootBlockBuilder(cfg.Genesis.Config, b.chain, b.engine, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
