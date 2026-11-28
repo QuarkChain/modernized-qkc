@@ -36,22 +36,17 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
-const clusterTestExecutable = "QKC_CLUSTER_TEST_EXECUTABLE"
-
-func TestMain(m *testing.M) {
-	// Run the real CLI when the test launches this binary. The shard processes
-	// inherit the marker when the cluster launches a copy of itself.
-	if os.Getenv(clusterTestExecutable) == "1" {
-		main()
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-
 func TestClusterDevnetRestart(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires Unix process signals")
 	}
+	binDir := t.TempDir()
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binDir+string(os.PathSeparator), "./cmd/cluster", "./cmd/geth")
+	build.Dir = filepath.Join("..", "..")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build cluster and geth: %v\n%s", err, output)
+	}
+	executable := filepath.Join(binDir, "cluster")
 	dir := t.TempDir()
 	configDir := filepath.Join("qkc", "config", "devnet")
 	dest := filepath.Join(dir, configDir)
@@ -87,7 +82,7 @@ func TestClusterDevnetRestart(t *testing.T) {
 	}
 	// The deployment keeps its relative DataDir values and uses the CLI's default
 	// devnet location, both resolved from the temporary working directory.
-	genesis := checkCluster(t, dir, endpoints, os.Interrupt, "--devnet")
+	genesis := checkCluster(t, executable, dir, endpoints, os.Interrupt, "--devnet")
 	rootPath := filepath.Join(dest, "root.toml")
 	contents, err := os.ReadFile(rootPath)
 	if err != nil {
@@ -100,11 +95,11 @@ func TestClusterDevnetRestart(t *testing.T) {
 	if err := os.WriteFile(rootPath, []byte(withoutGenesis), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if restarted := checkCluster(t, dir, endpoints, syscall.SIGTERM, "--config", rootPath); restarted != genesis {
+	if restarted := checkCluster(t, executable, dir, endpoints, syscall.SIGTERM, "--config", rootPath); restarted != genesis {
 		t.Fatalf("root genesis changed across restart: %s -> %s", genesis, restarted)
 	}
 	t.Run("unexpected shard exit", func(t *testing.T) {
-		checkCluster(t, dir, endpoints, os.Kill, "--config", rootPath)
+		checkCluster(t, executable, dir, endpoints, os.Kill, "--config", rootPath)
 	})
 }
 
@@ -128,14 +123,10 @@ func reserveClusterPorts(t *testing.T, count int) []int {
 	return ports
 }
 
-func checkCluster(t *testing.T, dir string, endpoints []string, stop os.Signal, flags ...string) common.Hash {
+func checkCluster(t *testing.T, executable, dir string, endpoints []string, stop os.Signal, flags ...string) common.Hash {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	output, err := os.CreateTemp(t.TempDir(), "cluster-*.log")
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +140,6 @@ func checkCluster(t *testing.T, dir string, endpoints []string, stop os.Signal, 
 		return string(data)
 	}
 	cmd := exec.Command(executable, flags...)
-	cmd.Env = append(os.Environ(), clusterTestExecutable+"=1")
 	cmd.Dir, cmd.Stdout, cmd.Stderr = dir, output, output
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

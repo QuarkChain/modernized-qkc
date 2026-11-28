@@ -24,13 +24,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/eth"
-	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/internal/flags"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
@@ -58,21 +56,6 @@ func newApp() *cli.App {
 		&cli.BoolFlag{Name: "devnet", Usage: "Use " + devnetConfig + " from the working directory"},
 		&cli.PathFlag{Name: "config", Usage: "Use the specified root TOML"},
 	}
-	app.Commands = []*cli.Command{{
-		Name:  "shard",
-		Usage: "Start a shard from its geth TOML",
-		Flags: []cli.Flag{&cli.PathFlag{Name: "config", Usage: "Shard TOML", Required: true}},
-		Action: func(ctx *cli.Context) error {
-			if ctx.NArg() != 0 {
-				return errors.New("shard takes no positional arguments")
-			}
-			nodeConfig, ethConfig, err := config.LoadShard(ctx.Path("config"))
-			if err != nil {
-				return fmt.Errorf("load shard config: %w", err)
-			}
-			return runShard(ctx.Context, &nodeConfig, &ethConfig)
-		},
-	}}
 	app.Action = func(ctx *cli.Context) error {
 		path := ctx.Path("config")
 		if ctx.NArg() != 0 || ctx.Bool("devnet") == (path != "") {
@@ -95,6 +78,10 @@ func runCluster(ctx context.Context, cfg *config.RootConfig, writer io.Writer) (
 	if err != nil {
 		return fmt.Errorf("locate cluster executable: %w", err)
 	}
+	geth, err := exec.LookPath(filepath.Join(filepath.Dir(executable), "geth"))
+	if err != nil {
+		return fmt.Errorf("locate geth alongside cluster (run make cluster): %w", err)
+	}
 	// The parent closes root before signaling its children to exit.
 	shardCtx, stopShards := context.WithCancel(context.Background())
 	var shards sync.WaitGroup
@@ -109,7 +96,7 @@ func runCluster(ctx context.Context, cfg *config.RootConfig, writer io.Writer) (
 			return nil
 		}
 		chainID := shard.Slave.ChainID.String()
-		child := exec.CommandContext(shardCtx, executable, "shard", "--config", shard.Path)
+		child := exec.CommandContext(shardCtx, geth, "--config", shard.Path)
 		child.Stdout, child.Stderr = os.Stdout, os.Stderr
 		child.Cancel = func() error { return child.Process.Signal(syscall.SIGTERM) }
 		child.WaitDelay = 10 * time.Second
@@ -178,34 +165,4 @@ func runCluster(ctx context.Context, cfg *config.RootConfig, writer io.Writer) (
 			}
 		}
 	}
-}
-
-func runShard(ctx context.Context, nodeConfig *node.Config, ethConfig *ethconfig.Config) (err error) {
-	stack, err := node.New(nodeConfig)
-	if err != nil {
-		return fmt.Errorf("create shard node: %w", err)
-	}
-	defer func() {
-		if closeErr := stack.Close(); closeErr != nil && !errors.Is(closeErr, node.ErrNodeStopped) {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-	backend, err := eth.New(stack, ethConfig)
-	if err != nil {
-		return fmt.Errorf("create shard backend: %w", err)
-	}
-	utils.RegisterFilterAPI(stack, backend.APIBackend, ethConfig)
-	if err := stack.Start(); err != nil {
-		return fmt.Errorf("start shard: %w", err)
-	}
-	stopped := make(chan struct{})
-	go func() {
-		stack.Wait()
-		close(stopped)
-	}()
-	select {
-	case <-ctx.Done():
-	case <-stopped:
-	}
-	return nil
 }

@@ -90,23 +90,6 @@ func TestLoadRoot(t *testing.T) {
 	}
 }
 
-func TestLoadShard(t *testing.T) {
-	const filename = "shard-100001.toml"
-	rootPath := writeRootDeployment(t, filename, func(s string) string {
-		return strings.Replace(s, "NetworkId = 2", "NetworkId = 42", 1)
-	})
-	nodeCfg, ethCfg, err := LoadShard(filepath.Join(filepath.Dir(rootPath), filename))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if nodeCfg.Name != "geth" || nodeCfg.PrivatePort != 38000 || nodeCfg.HTTPEndpoint() != "127.0.0.1:18545" {
-		t.Fatalf("unexpected shard node settings: %+v", nodeCfg)
-	}
-	if ethCfg.NetworkId != 42 || ethCfg.Miner.GasPrice == nil {
-		t.Fatalf("unexpected shard network or miner settings: %d, %v", ethCfg.NetworkId, ethCfg.Miner.GasPrice)
-	}
-}
-
 func TestLoadRootWithoutGenesis(t *testing.T) {
 	path := writeRootDeployment(t, "root.toml", func(s string) string {
 		return strings.Split(s, "[Root.Genesis]")[0]

@@ -10,8 +10,9 @@ build/bin/cluster --devnet
 ```
 
 `--devnet` selects `qkc/config/devnet/root.toml`. The launcher runs the root
-node and starts one child process for each TOML in `Root.ShardConfigs`.
-The default cluster runs three processes.
+node and runs `geth --config` for each TOML in `Root.ShardConfigs`.
+The default cluster runs three processes. `make cluster` builds both
+executables in `build/bin`.
 Use `--config <root.toml>` for another deployment. Relative shard config
 paths resolve from the root TOML, and relative data directories resolve from
 the current working directory.

@@ -20,9 +20,9 @@ qkc:
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/qkc\" to launch qkc."
 
-#? cluster: Build the QuarkChain cluster launcher.
+#? cluster: Build the QuarkChain cluster launcher and geth.
 cluster:
-	$(GORUN) build/ci.go install ./cmd/cluster
+	$(GORUN) build/ci.go install ./cmd/cluster ./cmd/geth
 
 #? evm: Build evm.
 evm:
