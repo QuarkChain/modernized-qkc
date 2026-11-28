@@ -223,8 +223,8 @@ func (sc *SlaveConn) SendGetUnconfirmedHeaders(ctx context.Context) ([]*types.He
 }
 
 // routeFrame consumes peer traffic so it cannot enter local RPC dispatch.
-func (sc *SlaveConn) routeFrame(frame *wire.ClusterFrame) bool {
-	if frame.ClusterPeerID == 0 {
+func (sc *SlaveConn) routeFrame(frame wire.Frame) bool {
+	if frame.(*wire.ClusterFrame).ClusterPeerID == 0 {
 		return false
 	}
 

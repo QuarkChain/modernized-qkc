@@ -7,7 +7,7 @@ NetworkId = 2
 SyncMode = "full"
 
 [Node]
-DataDir = "./qkc-data/shard-100001"
+DataDir = "./qkc-data/devnet/shard-100001"
 PrivateHost = "127.0.0.1"
 PrivatePort = 38000
 CoinbaseAddress = "0x2222222222222222222222222222222222222222"

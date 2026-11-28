@@ -50,7 +50,7 @@ func NewMasterSlaveTransport(nc net.Conn, maxPayloadSize uint32) (FrameTransport
 	if err != nil {
 		return nil, err
 	}
-	return NewTCPTransport(nc, func(r io.Reader) (*wire.ClusterFrame, error) {
+	return NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
 		return wire.ReadClusterFrameWithPeerID(r, maxPayloadSize)
 	}, wire.WriteClusterFrameWithPeerID), nil
 }
@@ -65,7 +65,7 @@ func NewXshardTransport(nc net.Conn, maxPayloadSize uint32) (FrameTransport, err
 	if err != nil {
 		return nil, err
 	}
-	return NewTCPTransport(nc, func(r io.Reader) (*wire.ClusterFrame, error) {
+	return NewTCPTransport(nc, func(r io.Reader) (wire.Frame, error) {
 		return wire.ReadClusterFrame(r, maxPayloadSize)
 	}, wire.WriteClusterFrame), nil
 }

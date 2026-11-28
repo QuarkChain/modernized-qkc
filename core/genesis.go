@@ -641,14 +641,8 @@ func (g *Genesis) ValidateQuarkChain() error {
 	if err != nil {
 		return fmt.Errorf("invalid extra-data: %w", err)
 	}
-	if extra.Version != 0 || extra.ChainID.Cmp(config.ChainID) != 0 {
-		return errors.New("genesis extra-data has an invalid version or chain ID")
-	}
-	if extra.PrevRootBlock != (common.Hash{}) || extra.Cursor != (types.XShardCursor{RootBlockHeight: 1}) {
-		return errors.New("genesis extra-data has an invalid root reference or cursor")
-	}
-	if extra.XShardGasUsed != 0 || extra.XShardGasLimit != g.GasLimit/params.XShardGasLimitDivisor {
-		return errors.New("genesis extra-data has invalid cross-shard gas limits")
+	if err := extra.CheckGenesis(config.ChainID, g.GasLimit); err != nil {
+		return err
 	}
 	if g.BaseFee != nil && (!config.IsLondon(common.Big0) || g.BaseFee.Sign() < 0 || g.BaseFee.BitLen() > 256) {
 		return errors.New("genesis base fee requires London and a nonnegative uint256 value")

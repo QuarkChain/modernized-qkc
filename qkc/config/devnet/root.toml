@@ -1,0 +1,37 @@
+# Local root node. Runtime paths resolve from the working directory.
+[Node]
+DataDir = "./qkc-data/devnet/master"
+PrivateHost = "127.0.0.1"
+PrivatePort = 18491
+IPCPath = "qkc-master.ipc"
+CoinbaseAddress = "0x1111111111111111111111111111111111111111"
+HTTPHost = "127.0.0.1"
+HTTPPort = 18391
+
+[Node.P2P]
+ListenAddr = ":30303"
+MaxPeers = 25
+NoDiscovery = true
+
+[Root]
+NetworkID = 2
+# List one shard TOML per configured chain ID, even when Root.Genesis is omitted.
+# Each file provides the shard genesis and its private RPC endpoint.
+# Paths resolve relative to this file. R0 orders shard headers by increasing chain ID.
+ShardConfigs = ["shard-100001.toml", "shard-100002.toml"]
+
+[Root.Genesis]
+Timestamp = 0
+Difficulty = "1024"
+
+[Root.Genesis.Config]
+ConsensusType = "POW_SIMULATE"
+
+[Root.Genesis.Config.PoSW]
+AdjustmentCutoff = 7
+AdjustmentFactor = 512
+MinimumDifficulty = "1024"
+CoinbaseAmount = "123"
+EpochInterval = 3153600
+DecayFactor = "0.88"
+StakingEnabled = false
