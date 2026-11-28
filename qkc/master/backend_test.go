@@ -27,14 +27,15 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/net/clusternet/masternet"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
 	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
@@ -81,7 +82,7 @@ func newTestNode(t *testing.T, engine string, configure ...func(*node.Config)) *
 	return stack
 }
 
-func newTestConfig(t *testing.T, shard *testShard) (*Config, *slavenet.Service) {
+func newTestConfig(t *testing.T, shard *testShard) (*config.RootConfig, *slavenet.Service) {
 	t.Helper()
 	chain := params.NewTestQuarkChainConfig(10001, 10001).QuarkChain
 	chain.ConsensusType = params.ConsensusSimulate
@@ -97,57 +98,47 @@ func newTestConfig(t *testing.T, shard *testShard) (*Config, *slavenet.Service) 
 	}
 	t.Cleanup(func() { _ = s.Stop() })
 	addr := s.Addr().(*net.TCPAddr)
-	return &Config{
-		Chain: chain, Database: node.DatabaseOptions{Cache: 16, Handles: 16},
-		Cluster: masternet.ServiceConfig{SlaveInfos: []clusternet.SlaveInfo{
-			{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: chain.ChainIDs[0]},
+	shardConfig := params.NewTestQuarkChainConfig(10001, 10001)
+	const gasLimit = 1_000_000
+	genesis := &core.Genesis{
+		Config: shardConfig, Timestamp: 1, GasLimit: gasLimit, Difficulty: new(big.Int),
+		Mixhash: common.BigToHash(shardConfig.QuarkChain.PoSW.MinimumDifficulty),
+		Alloc:   core.PoSWStakingContractAllocs(shardConfig),
+		ExtraData: (&coretypes.QKCExtra{
+			ChainID: shardConfig.ChainID, Cursor: coretypes.XShardCursor{RootBlockHeight: 1},
+			XShardGasLimit: gasLimit / params.XShardGasLimitDivisor,
+		}).Encode(),
+	}
+	return &config.RootConfig{
+		Genesis: &root.RootGenesis{Config: chain, Timestamp: 1, Difficulty: big.NewInt(100)},
+		Shards: []config.ShardConfig{{Genesis: genesis,
+			Slave: clusternet.SlaveInfo{Host: "127.0.0.1", Port: uint16(addr.Port), ChainID: chain.ChainIDs[0]},
 		}},
 	}, s
 }
 
-// Seed only in tests, through the node's actual persistent database. Production
-// must recover an existing head rather than inventing genesis or confirmations.
-func seedRoot(t *testing.T, stack *node.Node, cfg *Config) *qkctypes.RootBlock {
+func testDatabaseOptions() node.DatabaseOptions {
+	return node.DatabaseOptions{Cache: 16, Handles: 16}
+}
+
+// Seed through the production genesis setup to exercise recovery separately.
+func seedRoot(t *testing.T, stack *node.Node, cfg *config.RootConfig) *qkctypes.RootBlock {
 	t.Helper()
-	db, err := stack.OpenDatabaseWithOptions(stack.Config().DataDir, cfg.Database)
+	db, err := stack.OpenDatabaseWithOptions(stack.Config().DataDir, testDatabaseOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var headers qkctypes.ShardBlockHeaders
-	confirmed := make(map[string]common.Hash)
-	for _, id := range cfg.Chain.ChainIDs {
-		header := &coretypes.Header{
-			Number: new(big.Int), Difficulty: new(big.Int), UncleHash: coretypes.EmptyUncleHash,
-			Extra: (&coretypes.QKCExtra{ChainID: id}).Encode(),
-		}
-		headers = append(headers, header)
-		confirmed[id.String()] = header.Hash()
-	}
-	block := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
-		Time: 1, Difficulty: *uint256.NewInt(100), TotalDifficulty: *uint256.NewInt(100),
-	}, headers, nil)
-	batch := db.NewBatch()
-	defer batch.Close()
-	for _, err := range []error{
-		qkcrawdb.WriteRootBlockWithError(batch, block),
-		qkcrawdb.WriteRootCanonicalHash(batch, block.Hash(), 0),
-		qkcrawdb.WriteRootHeadBlockHash(batch, block.Hash()),
-		qkcrawdb.WriteRootConfirmedShardBlocks(batch, block.Hash(), confirmed),
-	} {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := batch.Write(); err != nil {
+	_, hash, err := root.SetupRootGenesisBlock(db, cfg.Genesis, cfg.ShardGeneses())
+	if err != nil {
 		t.Fatal(err)
 	}
-	return block
+	return qkcrawdb.ReadRootBlock(db, hash)
 }
 
-func newTestBackend(t *testing.T, stack *node.Node, cfg *Config) *Backend {
+func newTestBackend(t *testing.T, stack *node.Node, cfg *config.RootConfig) *Backend {
 	t.Helper()
-	b, err := New(stack, cfg)
+	b, err := New(stack, cfg, testDatabaseOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +190,10 @@ func TestBackendStartupAndReports(t *testing.T) {
 	stack := newTestNode(t, "pebble")
 	shard := new(testShard)
 	cfg, slave := newTestConfig(t, shard)
-	genesis := seedRoot(t, stack, cfg)
+	genesis, err := root.BuildRootGenesis(cfg.Genesis, cfg.ShardGeneses())
+	if err != nil {
+		t.Fatal(err)
+	}
 	b := newTestBackend(t, stack, cfg)
 	if b.Ready() || b.RootChain().RootTip().Hash() != genesis.Hash() || b.Engine() == nil {
 		t.Fatal("unexpected construction state")
@@ -219,7 +213,7 @@ func TestBackendStartupAndReports(t *testing.T) {
 	}
 	header := &coretypes.Header{
 		Number: big.NewInt(1), Difficulty: new(big.Int), UncleHash: coretypes.EmptyUncleHash,
-		Extra: (&coretypes.QKCExtra{ChainID: cfg.Chain.ChainIDs[0]}).Encode(),
+		Extra: (&coretypes.QKCExtra{ChainID: cfg.Genesis.Config.ChainIDs[0]}).Encode(),
 	}
 	for _, amount := range []uint64{0, 42, 42} {
 		if err := slave.SendShardBlockHeaderToMaster(testContext(t), header, uint256.NewInt(amount)); err != nil {
@@ -275,12 +269,15 @@ func TestBackendInitializationFailureClosesNode(t *testing.T) {
 			stack := newTestNode(t, "pebble")
 			shard := &testShard{init: func(*qkctypes.RootBlock) error { return errors.New("checkpoint rejected") }}
 			cfg, _ := newTestConfig(t, shard)
-			seedRoot(t, stack, cfg)
 			if failure == "identity" {
-				cfg.Chain.ChainIDs[0] = big.NewInt(999)
-				cfg.Cluster.SlaveInfos[0].ChainID = cfg.Chain.ChainIDs[0]
-				// Recovery must still be valid for the configured member.
-				seedRoot(t, stack, cfg)
+				cfg.Genesis.Config.ChainIDs[0] = big.NewInt(999)
+				cfg.Shards[0].Slave.ChainID = cfg.Genesis.Config.ChainIDs[0]
+				// Change genesis membership while the remote identity stays unchanged.
+				cfg.Shards[0].Genesis.Config.ChainID = big.NewInt(999)
+				cfg.Shards[0].Genesis.Config.QuarkChain.ChainIDs[0] = big.NewInt(999)
+				extra, _ := coretypes.DecodeQKCExtra(cfg.Shards[0].Genesis.ExtraData)
+				extra.ChainID = big.NewInt(999)
+				cfg.Shards[0].Genesis.ExtraData = extra.Encode()
 			}
 			b := newTestBackend(t, stack, cfg)
 			if err := stack.Start(); err != nil {
@@ -342,11 +339,14 @@ func TestBackendStopDuringCheckpointInitialization(t *testing.T) {
 func TestBackendConstructionFailures(t *testing.T) {
 	stack := newTestNode(t, "pebble")
 	cfg, _ := newTestConfig(t, new(testShard))
-	if _, err := New(stack, cfg); err == nil {
+	seed := cfg.Genesis
+	cfg.Genesis = nil
+	if _, err := New(stack, cfg, testDatabaseOptions()); err == nil {
 		t.Fatalf("empty database: %v", err)
 	}
 	// Failure must close the database and leave node registration untouched.
 	// Reopening, seeding and constructing on the same stack must work.
+	cfg.Genesis = seed
 	genesis := seedRoot(t, stack, cfg)
 	b := newTestBackend(t, stack, cfg)
 	if b.RootChain().RootTip().Hash() != genesis.Hash() {
@@ -445,7 +445,7 @@ func TestBackendReportFailureClosesNode(t *testing.T) {
 	seedRoot(t, stack, cfg)
 	b := newTestBackend(t, stack, cfg)
 	b.chain.Close()
-	chain, err := root.New(b.ctx, cfg.Chain, b.cluster, failedReportDB{b.db}, b.engine)
+	chain, err := root.New(b.ctx, cfg.Genesis.Config, b.cluster, failedReportDB{b.db}, b.engine)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestBackendReportFailureClosesNode(t *testing.T) {
 	waitBackendReady(t, b)
 	header := &coretypes.Header{
 		Number: big.NewInt(1), Difficulty: new(big.Int), UncleHash: coretypes.EmptyUncleHash,
-		Extra: (&coretypes.QKCExtra{ChainID: cfg.Chain.ChainIDs[0]}).Encode(),
+		Extra: (&coretypes.QKCExtra{ChainID: cfg.Genesis.Config.ChainIDs[0]}).Encode(),
 	}
 	var remote *wire.RemoteError
 	if err := slave.SendShardBlockHeaderToMaster(testContext(t), header, uint256.NewInt(1)); err == nil || errors.As(err, &remote) {
@@ -504,7 +504,7 @@ func TestBackendStopDrainsReportsBeforeClosingDatabase(t *testing.T) {
 	// Release a blocked Put before node cleanup if the test fails.
 	t.Cleanup(func() { releaseOnce.Do(func() { close(db.release) }) })
 	b.chain.Close()
-	chain, err := root.New(b.ctx, cfg.Chain, b.cluster, db, b.engine)
+	chain, err := root.New(b.ctx, cfg.Genesis.Config, b.cluster, db, b.engine)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestBackendStopDrainsReportsBeforeClosingDatabase(t *testing.T) {
 	waitBackendReady(t, b)
 	header := &coretypes.Header{
 		Number: big.NewInt(1), Difficulty: new(big.Int), UncleHash: coretypes.EmptyUncleHash,
-		Extra: (&coretypes.QKCExtra{ChainID: cfg.Chain.ChainIDs[0]}).Encode(),
+		Extra: (&coretypes.QKCExtra{ChainID: cfg.Genesis.Config.ChainIDs[0]}).Encode(),
 	}
 	reportDone := make(chan error, 1)
 	go func() { reportDone <- slave.SendShardBlockHeaderToMaster(testContext(t), header, uint256.NewInt(1)) }()
@@ -554,5 +554,89 @@ func TestBackendStopDrainsReportsBeforeClosingDatabase(t *testing.T) {
 	case <-reportDone:
 	case <-testContext(t).Done():
 		t.Fatal("report caller remained blocked")
+	}
+}
+
+// A restart may omit the root seed but must preserve an advanced persisted head.
+func TestBackendRestartWithoutRootGenesis(t *testing.T) {
+	for _, dbEngine := range []string{"pebble", "leveldb"} {
+		t.Run(dbEngine, func(t *testing.T) {
+			stack := newTestNode(t, dbEngine)
+			cfg, _ := newTestConfig(t, new(testShard))
+			genesis := seedRoot(t, stack, cfg)
+			db, err := stack.OpenDatabaseWithOptions(stack.Config().DataDir, testDatabaseOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			head := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
+				Number: 1, ParentHash: genesis.Hash(), Time: 2,
+				Difficulty: *uint256.NewInt(100), TotalDifficulty: *uint256.NewInt(200),
+			}, nil, nil)
+			confirmed, err := qkcrawdb.ReadRootConfirmedShardBlocks(db, genesis.Hash())
+			if err != nil {
+				t.Fatal(err)
+			}
+			qkcrawdb.WriteRootBlock(db, head)
+			for _, err := range []error{
+				qkcrawdb.WriteRootCanonicalHash(db, head.Hash(), 1),
+				qkcrawdb.WriteRootHeadBlockHash(db, head.Hash()),
+				qkcrawdb.WriteRootConfirmedShardBlocks(db, head.Hash(), confirmed),
+				db.Close(),
+			} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg.Genesis = nil
+			b := newTestBackend(t, stack, cfg)
+			if got := b.RootChain().RootTip().Hash(); got != head.Hash() {
+				t.Fatalf("recovered tip %s, want %s", got, head.Hash())
+			}
+			if err := stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waitBackendReady(t, b)
+		})
+	}
+}
+
+func TestBackendRejectsGenesisMismatch(t *testing.T) {
+	for _, mismatch := range []string{"root block", "root rules", "shard genesis"} {
+		t.Run(mismatch, func(t *testing.T) {
+			stack := newTestNode(t, "pebble")
+			shard := new(testShard)
+			cfg, _ := newTestConfig(t, shard)
+			genesis := seedRoot(t, stack, cfg)
+			var restore func()
+			switch mismatch {
+			case "root block":
+				cfg.Genesis.Timestamp++
+				restore = func() { cfg.Genesis.Timestamp-- }
+			case "root rules":
+				cfg.Genesis.Config.PoSW.AdjustmentFactor++
+				restore = func() { cfg.Genesis.Config.PoSW.AdjustmentFactor-- }
+			case "shard genesis":
+				cfg.Genesis = nil
+				cfg.Shards[0].Genesis.Coinbase = common.Address{1}
+				restore = func() { cfg.Shards[0].Genesis.Coinbase = common.Address{} }
+			}
+			if b, err := New(stack, cfg, testDatabaseOptions()); err == nil || b != nil {
+				t.Fatalf("accepted %s mismatch: %v", mismatch, err)
+			}
+			if shard.inits.Load() != 0 {
+				t.Fatal("failed constructor initialized shards")
+			}
+			restore()
+			// Reopening proves failed construction released its database and
+			// did not register a lifecycle or change the persisted head.
+			b := newTestBackend(t, stack, cfg)
+			if b.RootChain().RootTip().Hash() != genesis.Hash() {
+				t.Fatal("failed constructor changed persisted head")
+			}
+			if err := stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waitBackendReady(t, b)
+		})
 	}
 }

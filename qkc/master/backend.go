@@ -29,22 +29,12 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/config"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
 	"github.com/ethereum/go-ethereum/qkc/net/clusternet/masternet"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	"github.com/ethereum/go-ethereum/rpc"
 )
-
-// Config is temporary and will be revised when configuration is consolidated.
-// Chain must match the existing root database and remain immutable after New,
-// as must Cluster's endpoint slices and chain IDs. Backend supplies Cluster's
-// ConfiguredChainIDs and Shutdown from Chain and its own lifecycle respectively.
-//
-// TODO(config): Update Config once the configuration is finalized.
-type Config struct {
-	Chain    *params.QuarkChainConfig
-	Cluster  masternet.ServiceConfig
-	Database node.DatabaseOptions
-}
 
 // Backend owns the root chain, engine, database and cluster service. Node owns
 // the external endpoints and serializes Start/Stop through its lifecycle.
@@ -70,14 +60,14 @@ var (
 	_ root.ClusterClient      = (*masternet.Service)(nil)
 )
 
-// New recovers an existing root database. Genesis setup is deliberately absent:
-// a missing head or confirmation snapshot fails construction without seeding it.
+// New initializes or verifies genesis and recovers the persisted root head.
+// Configuration and referenced genesis inputs must remain immutable after New.
 // No cluster traffic or business goroutines run until Start.
-func New(stack *node.Node, cfg *Config) (_ *Backend, err error) {
-	if stack == nil || cfg == nil || cfg.Chain == nil {
+func New(stack *node.Node, cfg *config.RootConfig, dbOptions node.DatabaseOptions) (_ *Backend, err error) {
+	if stack == nil || cfg == nil {
 		return nil, errors.New("missing node or master configuration")
 	}
-	if cfg.Database.ReadOnly {
+	if dbOptions.ReadOnly {
 		return nil, errors.New("master requires a writable root database")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -95,38 +85,41 @@ func New(stack *node.Node, cfg *Config) (_ *Backend, err error) {
 			}
 		}
 	}()
-	if cfg.Chain.ConsensusType == params.ConsensusSimulate {
-		b.engine, err = poswroot.NewSimulate(cfg.Chain)
+	if dbOptions.MetricsNamespace == "" {
+		dbOptions.MetricsNamespace = "qkc/db/master/"
+	}
+	// Node resolves DataDir to an absolute path. Store the root DB directly there.
+	b.db, err = stack.OpenDatabaseWithOptions(stack.Config().DataDir, dbOptions)
+	if err != nil {
+		return nil, err
+	}
+	// Genesis setup supplies the same effective rules to the engine and chain.
+	rules, _, err := root.SetupRootGenesisBlock(b.db, cfg.Genesis, cfg.ShardGeneses())
+	if err != nil {
+		return nil, fmt.Errorf("setup root genesis: %w", err)
+	}
+	if rules.ConsensusType == params.ConsensusSimulate {
+		b.engine, err = poswroot.NewSimulate(rules)
 	} else {
-		b.engine, err = poswroot.New(cfg.Chain)
+		b.engine, err = poswroot.New(rules)
 	}
 	if err != nil {
 		return nil, err
 	}
-	clusterCfg := cfg.Cluster
-	clusterCfg.ConfiguredChainIDs = cfg.Chain.ChainIDs
-	clusterCfg.Shutdown = b.requestShutdown
-	if clusterCfg.Logger == nil {
-		clusterCfg.Logger = b.logger
+	clusterCfg := masternet.ServiceConfig{
+		ConfiguredChainIDs: rules.ChainIDs, Shutdown: b.requestShutdown, Logger: b.logger,
+		SlaveInfos: make([]clusternet.SlaveInfo, len(cfg.Shards)),
+	}
+	for i, shard := range cfg.Shards {
+		clusterCfg.SlaveInfos[i] = shard.Slave
 	}
 	b.cluster, err = masternet.NewService(clusterCfg)
 	if err != nil {
 		return nil, err
 	}
-	dbOptions := cfg.Database
-	if dbOptions.MetricsNamespace == "" {
-		dbOptions.MetricsNamespace = "qkc/db/master/"
-	}
-	// Node resolves DataDir to an absolute path. Use it directly as the root DB
-	// directory, without appending an instance name or another database directory.
-	b.db, err = stack.OpenDatabaseWithOptions(stack.Config().DataDir, dbOptions)
+	b.chain, err = root.New(ctx, rules, b.cluster, b.db, b.engine)
 	if err != nil {
-		return nil, err
-	}
-	// TODO(genesis): Call SetupRootGenesisBlock here once it is checked in.
-	b.chain, err = root.New(ctx, cfg.Chain, b.cluster, b.db, b.engine)
-	if err != nil {
-		return nil, fmt.Errorf("recover root chain (initialized root database required): %w", err)
+		return nil, fmt.Errorf("initialize root chain: %w", err)
 	}
 	stack.RegisterAPIs(b.APIs())
 	stack.RegisterProtocols(b.Protocols())
