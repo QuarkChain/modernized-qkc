@@ -51,7 +51,8 @@ const (
 )
 
 // Service owns master-to-slave connections, not root-chain or mining resources.
-// Assembly is NewService -> master.New(client=Service) -> Start(master).
+// Assembly is NewService -> root.New(client=Service) -> Start(rootChain),
+// coordinated by master.Backend.
 // Start launches cluster initialization; WaitForInitialization waits for identity
 // checks and slave interconnection. The owner then calls RootChain.Init, which
 // initializes shards through Ping, before starting normal business activity.

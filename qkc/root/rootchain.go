@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
 	posw "github.com/ethereum/go-ethereum/consensus/poswroot"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/log"
@@ -59,6 +60,8 @@ var (
 // backendCtx before calling Close. Configuration must match the engine and stay
 // unchanged after New. The caller must drain in-flight operations before closing
 // shared resources.
+// master.Backend calls Init after cluster connections are ready and before
+// allowing normal business activity.
 type RootChain struct {
 	backendCtx context.Context
 	config     *params.QuarkChainConfig
@@ -85,12 +88,13 @@ type RootChain struct {
 
 var _ posw.RootChainReader = (*RootChain)(nil)
 
-// New recovers the persisted root head as the runtime tip, as in goquarkchain,
-// without rewinding or changing the stored head.
+// New recovers the persisted root head as the runtime tip without rewinding
+// or changing the stored head.
 // It binds the supplied client and engine without taking ownership of them or
 // making cluster RPCs. The caller must validate configuration when creating the engine.
 // backendCtx controls RootChain's lifetime and is canceled only by the backend.
-// Genesis, canonical indices and cumulative confirmations must already be stored.
+// Call SetupRootGenesisBlock first and use its returned config for both the
+// engine and this chain. Genesis and recovery records must already be stored.
 func New(backendCtx context.Context, config *params.QuarkChainConfig, client ClusterClient, db ethdb.Database, engine posw.RootEngine) (*RootChain, error) {
 	if backendCtx == nil || config == nil || client == nil || db == nil || engine == nil {
 		return nil, errors.New("missing backend context, root configuration, cluster client, database or engine")
@@ -98,10 +102,6 @@ func New(backendCtx context.Context, config *params.QuarkChainConfig, client Clu
 	if err := backendCtx.Err(); err != nil {
 		return nil, err
 	}
-	// TODO(backend): Build the engine in master.New from the stored root config
-	// or the supplied genesis config on first startup. Pass the engine and
-	// the root and shard genesis inputs to New. New should call
-	// SetupRootGenesisBlock before reading the persisted head.
 	hash, err := rawdb.ReadRootHeadBlockHash(db)
 	if err != nil {
 		return nil, fmt.Errorf("read persisted root head: %w", err)
@@ -570,6 +570,21 @@ func (c *RootChain) GetLastConfirmedShardBlocks(hash common.Hash) (map[string]co
 		return nil, fmt.Errorf("read confirmations for root %x: %w", hash, err)
 	}
 	return confirmed, nil
+}
+
+// AddShardBlockHeader records a block already validated by a configured shard.
+// Service verifies connection identity; root does not repeat shard validation.
+// Failures are handler errors, not recoverable business rejections. Avoid
+// chainmu because a root insertion may itself be awaiting a shard RPC. The
+// backend drains Service handlers before releasing the database.
+func (c *RootChain) AddShardBlockHeader(_ *big.Int, header *coretypes.Header, amount *uint256.Int) error {
+	if !c.Ready() {
+		return errChainNotReady
+	}
+	if header == nil {
+		return errors.New("missing shard block header")
+	}
+	return c.AddShardBlockCoinbaseAmount(header.Hash(), amount)
 }
 
 // AddShardBlockCoinbaseAmount stores reported after-tax income; the caller

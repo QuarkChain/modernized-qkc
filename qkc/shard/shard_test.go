@@ -131,6 +131,10 @@ func TestBackendLifecycle(t *testing.T) {
 			if _, err := s.GetUnconfirmedHeaderList(); !errors.Is(err, ErrRootChainUninitialized) {
 				t.Fatalf("uninitialized headers: %v", err)
 			}
+			// Reject mining before Init, including import-only shards without a builder.
+			if block, diff, err := s.CreateBlockToMine(t.Context(), common.Address{}); block != nil || diff != nil || !errors.Is(err, ErrRootChainUninitialized) {
+				t.Fatalf("uninitialized mining: block %v, difficulty %v, error %v", block, diff, err)
+			}
 			root := qkctypes.NewRootBlock(&qkctypes.RootBlockHeader{
 				Difficulty: *uint256.NewInt(1), TotalDifficulty: *uint256.NewInt(1),
 			}, qkctypes.ShardBlockHeaders{s.CurrentBlock()}, nil)
