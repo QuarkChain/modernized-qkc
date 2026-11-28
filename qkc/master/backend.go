@@ -29,7 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/masternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/masternet"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	"github.com/ethereum/go-ethereum/rpc"
 )

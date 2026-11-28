@@ -33,9 +33,10 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/qkc/clusternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/masternet"
-	"github.com/ethereum/go-ethereum/qkc/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/masternet"
+	"github.com/ethereum/go-ethereum/qkc/net/clusternet/slavenet"
+	"github.com/ethereum/go-ethereum/qkc/net/wire"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/rawdb"
 	"github.com/ethereum/go-ethereum/qkc/root"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
@@ -457,7 +458,7 @@ func TestBackendReportFailureClosesNode(t *testing.T) {
 		Number: big.NewInt(1), Difficulty: new(big.Int), UncleHash: coretypes.EmptyUncleHash,
 		Extra: (&coretypes.QKCExtra{ChainID: cfg.Chain.ChainIDs[0]}).Encode(),
 	}
-	var remote *clusternet.RemoteError
+	var remote *wire.RemoteError
 	if err := slave.SendShardBlockHeaderToMaster(testContext(t), header, uint256.NewInt(1)); err == nil || errors.As(err, &remote) {
 		t.Fatalf("expected connection failure, not a business error code: %v", err)
 	}
