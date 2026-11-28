@@ -77,11 +77,33 @@ func TestLoadRoot(t *testing.T) {
 		t.Fatalf("got %d shards", len(cfg.Shards))
 	}
 	for i, id := range []int64{100001, 100002} {
-		g, slave := cfg.Shards[i].Genesis, cfg.Shards[i].Slave
+		shard := cfg.Shards[i]
+		wantPath := filepath.Join(filepath.Dir(path), "shard-"+strconv.FormatInt(id, 10)+".toml")
+		if shard.Path != wantPath {
+			t.Fatalf("shard %d: TOML path = %q, want %q", id, shard.Path, wantPath)
+		}
+		g, slave := shard.Genesis, shard.Slave
 		if g.Config.ChainID.Cmp(big.NewInt(id)) != 0 || slave.ChainID.Cmp(big.NewInt(id)) != 0 ||
 			slave.Host != "127.0.0.1" || int(slave.Port) != 38000+i || !cfg.Genesis.Config.EqualNetworkRules(g.Config.QuarkChain) {
 			t.Fatalf("shard %d: got genesis for %v, endpoint %+v", id, g.Config.ChainID, slave)
 		}
+	}
+}
+
+func TestLoadShard(t *testing.T) {
+	const filename = "shard-100001.toml"
+	rootPath := writeRootDeployment(t, filename, func(s string) string {
+		return strings.Replace(s, "NetworkId = 2", "NetworkId = 42", 1)
+	})
+	nodeCfg, ethCfg, err := LoadShard(filepath.Join(filepath.Dir(rootPath), filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodeCfg.Name != "geth" || nodeCfg.PrivatePort != 38000 || nodeCfg.HTTPEndpoint() != "127.0.0.1:18545" {
+		t.Fatalf("unexpected shard node settings: %+v", nodeCfg)
+	}
+	if ethCfg.NetworkId != 42 || ethCfg.Miner.GasPrice == nil {
+		t.Fatalf("unexpected shard network or miner settings: %d, %v", ethCfg.NetworkId, ethCfg.Miner.GasPrice)
 	}
 }
 
